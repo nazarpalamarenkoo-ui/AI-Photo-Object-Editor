@@ -20,3 +20,12 @@ class DetectionRepository:
             select(Detection).where(Detection.image_id == image_id)
         )
         return result.scalars().all()
+    
+    async def delete_by_image(self, image_id: int) -> int:
+        """Delete all detections for image"""
+        detections = await self.get_by_image(image_id)
+        count = len(detections)
+        for det in detections:
+            await self.db.delete(det)
+        await self.db.commit()
+        return count

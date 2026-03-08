@@ -7,7 +7,7 @@ from app.db.models.image import Image
 
 class User(Base):
     
-    __tablename__ = 'user'
+    __tablename__ = 'users'
     
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(50), unique=True, index=True)
@@ -16,4 +16,4 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now())
     
     # Relationships
-    images: Mapped[List["Image"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    images: Mapped[List["Image"]] = relationship(back_populates="users", cascade="all, delete-orphan")

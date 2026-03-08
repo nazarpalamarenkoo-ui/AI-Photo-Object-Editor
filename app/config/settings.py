@@ -8,16 +8,22 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str
     
-    # Cache
-    cache_type: str = "pickle"  # "pickle" or "redis" (use pickle for dev)
-    #cache_dir: Path = Path("data_pipeline/outputs/cache")
-    redis_url: str = "redis://localhost:6379/0"
-    redis_host: str = "localhost"
-    redis_port: int = 6379
+    ALEMBIC_DATABASE_URL: str
     
-    # Logging
-    debug: bool = False
-    log_level: str = "INFO"
+    # S3/MinIO
+    R2_ENDPOINT: str 
+    S3_BUCKET: str 
+    ACCESS_KEY: str 
+    SECRET_KEY: str  
+    
+    # Redis
+    REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = 6379
+    
+    # App
+    DEBUG: bool = False
+    LOG_LEVEL: str = "INFO"
     
     class Config:
         env_file = ".env"

@@ -41,3 +41,11 @@ class ImageRepository:
         await self.db.commit()
         await self.db.refresh(image)
         return image
+    
+    async def delete(self, image_id: int) -> bool:
+        image = await self.get_by_id(image_id)
+        if not image:
+            return False
+        await self.db.delete(image)
+        await self.db.commit()
+        return True
