@@ -1,0 +1,200 @@
+import pytest
+import asyncio
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.pool import NullPool
+from io import BytesIO
+from fastapi import UploadFile
+from unittest.mock import AsyncMock, MagicMock
+import pytest_asyncio
+
+from app.db.db_connect import Base
+from app.db.models.user import User
+from app.db.models.image import Image
+from app.db.models.detection import Detection
+from app.config.test_settings import test_setting
+
+TEST_DATABASE = test_setting.TEST_DATABASE_URL
+
+@pytest.fixture(scope = 'session')
+def event_loop():
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    yield loop
+    loop.close()
+    
+@pytest_asyncio.fixture(scope = 'function')
+async def db_engine():
+    engine = create_async_engine(TEST_DATABASE, echo = False, poolclass = NullPool)
+    
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield engine
+    
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        
+    await engine.dispose()
+    
+@pytest_asyncio.fixture(scope='function')
+async def db_session(db_engine):
+    async_session_maker = async_sessionmaker(
+        bind=db_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+        autocommit=False
+    )
+    
+    # Create session
+    async with async_session_maker() as session:
+        yield session
+        # Cleanup
+        await session.rollback()
+        
+@pytest.fixture
+def mock_upload_file():
+    return UploadFile(
+        filename="test.jpg",
+        file=BytesIO(b"fake image data"),
+    )
+
+@pytest.fixture
+def mock_image_bytes():
+    return b"fake image bytes content"
+
+@pytest.fixture
+def mock_s3_storage():
+    storage = AsyncMock()
+    
+    # Mock upload
+    async def mock_upload(file, path):
+        return f"s3://test-bucket/{path}"
+    storage.upload = mock_upload
+    
+    # Mock upload_bytes
+    async def mock_upload_bytes(data, path, content_type="image/jpeg"):
+        return f"s3://test-bucket/{path}"
+    storage.upload_bytes = mock_upload_bytes
+    
+    # Mock download
+    async def mock_download(path):
+        return b"fake downloaded data"
+    storage.download = mock_download
+    
+    # Mock delete
+    async def mock_delete(path):
+        return True
+    storage.delete = mock_delete
+    
+    # Mock exists
+    async def mock_exists(path):
+        return True
+    storage.exists = mock_exists
+    
+    return storage
+
+
+@pytest.fixture
+def mock_redis_cache():
+    cache = AsyncMock()
+    
+    _storage = {}
+    
+    async def mock_set(key, value, ttl=None):
+        _storage[key] = value
+    cache.set = mock_set
+    
+    async def mock_get(key):
+        return _storage.get(key)
+    cache.get = mock_get
+    
+    async def mock_delete(key):
+        _storage.pop(key, None)
+    cache.delete = mock_delete
+    
+    async def mock_exists(key):
+        return key in _storage
+    cache.exists = mock_exists
+    
+    async def mock_cache_image(image_id, image_data, suffix="processed", ttl=None):
+        key = f"image:{image_id}:{suffix}"
+        _storage[key] = image_data
+        return key
+    cache.cache_image = mock_cache_image
+    
+    async def mock_get_cached_image(image_id, suffix="processed"):
+        key = f"image:{image_id}:{suffix}"
+        return _storage.get(key)
+    cache.get_cached_image = mock_get_cached_image
+    
+    async def mock_cache_detections(image_id, detections, ttl=None):
+        key = f"detections:{image_id}"
+        _storage[key] = detections
+        return key
+    cache.cache_detections = mock_cache_detections
+    
+    async def mock_get_cached_detections(image_id):
+        key = f"detections:{image_id}"
+        return _storage.get(key)
+    cache.get_cached_detections = mock_get_cached_detections
+    
+    async def mock_invalidate_image(image_id):
+        keys_to_delete = [k for k in _storage.keys() if f":{image_id}:" in k or k.endswith(f":{image_id}")]
+        for key in keys_to_delete:
+            _storage.pop(key, None)
+    cache.invalidate_image = mock_invalidate_image
+    
+    return cache
+
+
+@pytest_asyncio.fixture
+async def sample_user(db_session):
+    user = User(username="testuser", email="test@example.com", password_hash="hashed")
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+    return user
+
+
+@pytest_asyncio.fixture
+async def sample_image(db_session, sample_user):
+    image = Image(
+        filename="test.jpg",
+        storage_path="s3://bucket/test.jpg",
+        user_id=sample_user.id,
+        status="uploaded"
+    )
+    db_session.add(image)
+    await db_session.commit()
+    await db_session.refresh(image)
+    return image
+
+
+@pytest_asyncio.fixture
+async def sample_detection(db_session, sample_image):
+    detection = Detection(
+        image_id=sample_image.id,
+        x1=10, y1=10, x2=100, y2=100,
+        detected_class="person",
+        confidence=0.95
+    )
+    db_session.add(detection)
+    await db_session.commit()
+    await db_session.refresh(detection)
+    return detection
+
+
+@pytest_asyncio.fixture
+async def multiple_images(db_session, sample_user):
+    images = []
+    for i in range(3):
+        img = Image(
+            filename=f"img{i}.jpg",
+            storage_path=f"s3://bucket/img{i}.jpg",
+            user_id=sample_user.id
+        )
+        db_session.add(img)
+        images.append(img)
+    await db_session.commit()
+    for img in images:
+        await db_session.refresh(img)
+    return images
