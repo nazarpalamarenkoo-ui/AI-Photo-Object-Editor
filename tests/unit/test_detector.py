@@ -1,7 +1,6 @@
 import pytest
 from unittest.mock import MagicMock, patch, Mock
 
-# ВАЖЛИВО: Patch get_tracker ПЕРЕД import!
 with patch('app.ml.experiment_tracker.get_tracker'):
     from app.ml.detector import YOLODetector
 
