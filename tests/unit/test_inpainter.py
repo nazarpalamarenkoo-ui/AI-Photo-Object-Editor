@@ -4,12 +4,9 @@ import numpy as np
 from PIL import Image
 from io import BytesIO
 
-# ВАЖЛИВО: Patch get_tracker ПЕРЕД import!
 with patch('app.ml.experiment_tracker.get_tracker'):
     from app.ml.inpainter import LaMaInpainter, InpaintMode
 
-
-# ==================== UNIT TESTS ====================
 
 @pytest.mark.unit
 @patch('app.ml.inpainter.get_tracker')
