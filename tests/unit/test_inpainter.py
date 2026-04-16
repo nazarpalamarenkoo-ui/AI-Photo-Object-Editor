@@ -1,10 +1,3 @@
-"""
-Unit Tests for LaMaInpainter
-
-Location: tests/unit/test_inpainter.py
-
-КРИТИЧНО: Мокаємо ВСЕ - ModelManager, get_tracker!
-"""
 import pytest
 from unittest.mock import MagicMock, patch
 import numpy as np
