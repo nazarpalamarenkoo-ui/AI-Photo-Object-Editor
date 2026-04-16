@@ -1,19 +1,9 @@
-"""
-Unit Tests for YOLODetector
-
-Location: tests/unit/test_detector.py
-
-КРИТИЧНО: Мокаємо ВСЕ - YOLO, get_tracker, щоб не було зовнішніх підключень!
-"""
 import pytest
 from unittest.mock import MagicMock, patch, Mock
 
 # ВАЖЛИВО: Patch get_tracker ПЕРЕД import!
 with patch('app.ml.experiment_tracker.get_tracker'):
     from app.ml.detector import YOLODetector
-
-
-# ==================== UNIT TESTS ====================
 
 @pytest.mark.unit
 @patch('app.ml.detector.get_tracker')
