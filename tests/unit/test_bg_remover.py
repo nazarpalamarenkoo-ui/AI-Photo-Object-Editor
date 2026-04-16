@@ -1,8 +1,3 @@
-"""
-Unit Tests for BackgroundRemover
-
-Location: tests/unit/test_background_remover.py
-"""
 import pytest
 import numpy as np
 from PIL import Image
@@ -10,8 +5,6 @@ from io import BytesIO
 from rembg import remove
 from app.ml.processors.background_remover import BackgroundRemover
 
-
-# ==================== FIXTURES ====================
 
 @pytest.fixture
 def background_remover():
@@ -47,8 +40,6 @@ def test_bbox():
     """Test bbox"""
     return {'x1': 220, 'y1': 140, 'x2': 420, 'y2': 340}
 
-
-# ==================== UNIT TESTS ====================
 
 @pytest.mark.unit
 def test_background_remover_init(background_remover):
