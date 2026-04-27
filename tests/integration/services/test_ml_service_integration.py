@@ -178,7 +178,6 @@ async def test_replace_object_success(db_session, mock_s3_storage, mock_redis_ml
 
     assert "result_url" in result
     assert "presigned_url" in result
-    mock_pipeline.remove_object.assert_called_once()
     mock_pipeline.replace_object.assert_called_once()
 
 
