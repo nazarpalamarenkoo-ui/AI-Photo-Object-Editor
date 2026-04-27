@@ -6,7 +6,6 @@ class DetectRequest(BaseModel):
     conf_threshold: float = Field(0.5, ge=0.0, le=1.0)
     classes: Optional[List[str]] = None
 
-
 class RemoveRequest(BaseModel):
     expand_mask_pixels: int = Field(5, ge=0, le=50)
     use_edge_blending: bool = True

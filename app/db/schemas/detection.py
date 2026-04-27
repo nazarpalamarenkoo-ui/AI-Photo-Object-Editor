@@ -18,5 +18,6 @@ class DetectionUpdate(DetectionBase):
 
 class DetectionResponse(DetectionBase):
     id: int
+    bbox_id: int
     class Config:
         from_attributes = True
