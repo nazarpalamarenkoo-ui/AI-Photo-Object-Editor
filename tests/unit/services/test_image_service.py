@@ -16,7 +16,6 @@ def mock_db():
 def mock_s3():
     s3 = MagicMock()
     s3.upload = AsyncMock(return_value='s3://bucket/uploads/123/test.jpg')
-    # Фікс: додаємо upload_bytes бо image_service тепер використовує його
     s3.upload_bytes = AsyncMock(return_value='s3://bucket/uploads/456/test.jpg')
     s3.download = AsyncMock(return_value=b'fake_image_bytes')
     s3.delete = AsyncMock(return_value=True)
@@ -28,7 +27,6 @@ def mock_s3():
 def mock_redis():
     redis = MagicMock()
     redis.invalidate_image = AsyncMock()
-    # Фікс: AsyncMock для cache_image
     redis.cache_image = AsyncMock(return_value='image:123:original')
     return redis
 
