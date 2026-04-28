@@ -293,10 +293,115 @@ class ColorMatcher:
         
         # Convert back to RGB
         matched_lab = np.clip(matched_lab, 0, 255).astype(np.uint8)
-        matched_rgb = cv2.cvtColor(matched_lab, cv2.COLOR_RGB2LAB).astype(np.float32)
+        matched_rgb = cv2.cvtColor(matched_lab, cv2.COLOR_LAB2RGB).astype(np.float32)
         
         return matched_rgb
     
+    def match_against_original(
+    self,
+    result_bytes: bytes,
+    original_image_bytes: bytes,
+    bbox: Dict[str, int],
+    method: Literal['mean_std', 'histogram', 'color_transfer'] = 'mean_std',
+    context_margin: int = 25
+    ) -> bytes:
+        """
+        Apply color matching to the object region using ORIGINAL image context.
+
+        Args:
+            result_bytes: Image with inserted object
+            original_image_bytes: Original image (before inpainting)
+            bbox: Target region {'x1','y1','x2','y2'}
+            method: Matching method ('mean_std', 'histogram', 'color_transfer')
+            context_margin: Pixels around bbox used for sampling background
+
+        Returns:
+            JPEG bytes with adjusted colors
+        """
+        
+        return self._match_against_original_sync(
+            result_bytes,
+            original_image_bytes,
+            bbox,
+            method,
+            context_margin
+        )
+    
+    def _match_against_original_sync(
+        self,
+        result_bytes: bytes,
+        original_image_bytes: bytes,
+        bbox: Dict[str, int],
+        method: str,
+        context_margin: int
+    ) -> bytes:
+        """
+        Perform color matching using background pixels from the original image.
+
+        Steps:
+            1. Extract region around bbox (expanded by context_margin)
+            2. Remove bbox area → keep only background pixels
+            3. Compute color statistics from context
+            4. Adjust object region to match context
+            5. Insert corrected region back into result image
+
+        Args:
+            result_bytes: Image after object insertion
+            original_image_bytes: Original image
+            bbox: Object region
+            method: Matching algorithm
+            context_margin: Context expansion size
+
+        Returns:
+            JPEG bytes
+        """
+        result = np.array(Image.open(BytesIO(result_bytes)).convert('RGB'), dtype=np.float32)
+        original = np.array(Image.open(BytesIO(original_image_bytes)).convert('RGB'), dtype=np.float32)
+
+        height, width = original.shape[:2]
+
+        x1, y1, x2, y2 = bbox['x1'], bbox['y1'], bbox['x2'], bbox['y2']
+
+        #context from ORIGINAL
+        ctx_x1 = max(0, x1 - context_margin)
+        ctx_y1 = max(0, y1 - context_margin)
+        ctx_x2 = min(width, x2 + context_margin)
+        ctx_y2 = min(height, y2 + context_margin)
+
+        context_region = original[ctx_y1:ctx_y2, ctx_x1:ctx_x2]
+
+        mask = np.ones(context_region.shape[:2], dtype=bool)
+
+        bx1 = x1 - ctx_x1
+        by1 = y1 - ctx_y1
+        bx2 = x2 - ctx_x1
+        by2 = y2 - ctx_y1
+
+        mask[by1:by2, bx1:bx2] = False
+
+        context_pixels = context_region[mask]
+
+        if len(context_pixels) == 0:
+            return result_bytes
+
+        object_region = result[y1:y2, x1:x2].copy()
+
+        if method == 'mean_std':
+            matched = self._match_mean_std(object_region, context_pixels)
+        elif method == 'histogram':
+            matched = self._match_histogram(object_region, context_pixels)
+        elif method == 'color_transfer':
+            matched = self._color_transfer(object_region, context_pixels)
+        else:
+            raise ValueError(f"Unknown method: {method}")
+
+        result[y1:y2, x1:x2] = matched
+
+        result = np.clip(result, 0, 255).astype(np.uint8)
+
+        buf = BytesIO()
+        Image.fromarray(result).save(buf, format='JPEG', quality=95)
+        return buf.getvalue()
     
 _color_matcher_instance = None
  
