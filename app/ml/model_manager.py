@@ -3,7 +3,7 @@ from typing import Optional, Dict, List
 from pathlib import Path
 import mlflow.artifacts
 import mlflow.tracking
-
+import os
 
 class ModelManager:
     """
@@ -277,19 +277,11 @@ _model_manager_instance = None
  
 
 def get_model_manager(
-    tracking_uri: str = "http://localhost:5000",
+    tracking_uri: str = None,
     experiment_name: str = "object-detection-system"
 ) -> ModelManager:
-    """
-    Singleton getter for ModelManager.
-    
-    Args:
-        1. tracking_uri: MLflow tracking URI (default: 'http://localhost:5000')
-        2. experiment_name: Experiment name (default: 'object-detection-system')
-    
-    Returns: ModelManager instance
-    """
     global _model_manager_instance
     if _model_manager_instance is None:
-        _model_manager_instance = ModelManager(tracking_uri, experiment_name)
+        uri = tracking_uri or os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+        _model_manager_instance = ModelManager(uri, experiment_name)
     return _model_manager_instance
