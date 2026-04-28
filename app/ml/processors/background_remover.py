@@ -23,7 +23,7 @@ class BackgroundRemover:
         3. JPEG fallback with white background compositing
     """
     
-    def __init__(self, rembg_available: bool = False):
+    def __init__(self, rembg_available: bool = True):
         """
         Initialize Background Remover.
         
@@ -273,7 +273,7 @@ class BackgroundRemover:
             buffer = BytesIO()
             rgb_img.save(buffer, format='JPEG', quality=95)
             return buffer.getvalue()
-        
+      
     def _remove_with_threshold(
         self,
         image_bytes: bytes,
@@ -333,11 +333,72 @@ class BackgroundRemover:
         
         return rgb_img
 
+    async def remove_and_resize(
+        self,
+        image_bytes: bytes,
+        target_size: tuple
+    ) -> bytes:
+        """
+        Remove background from an image and resize it to target dimensions.
 
+        Pipeline:
+            1. Calls background removal model (e.g. rembg / grabcut)
+            2. Cleans alpha channel (removes noise, smooths edges)
+            3. Resizes image using high-quality resampling
+            4. Returns RGBA PNG bytes
+
+        Notes:
+            - Alpha channel is post-processed to reduce artifacts
+            - Designed for compositing (not perfect segmentation)
+
+        Args:
+            image_bytes: Input image bytes
+            target_size: (width, height)
+
+        Returns:
+            RGBA PNG bytes
+        """
+        img = Image.open(BytesIO(image_bytes)).convert('RGBA')
+        orig_w, orig_h = img.size
+
+        no_bg_bytes = await self.remove_background(
+            image_bytes=image_bytes,
+            method='rembg',
+            return_format='png',
+        )
+        
+        def fix_alpha_sync(img_rgba):
+            arr = np.array(img_rgba)
+
+            alpha = arr[:, :, 3]
+
+            # remove garbage but KEEP gradients
+            alpha = cv2.medianBlur(alpha, 5)
+
+            # slightly sharpen mask edges
+            kernel = np.ones((3, 3), np.uint8)
+            alpha = cv2.erode(alpha, kernel, iterations=1)
+
+            arr[:, :, 3] = alpha
+
+            return Image.fromarray(arr, mode='RGBA')
+        
+        def resize_sync():
+            img = Image.open(BytesIO(no_bg_bytes)).convert('RGBA')
+            arr = np.array(img)
+            print("ALPHA MIN/MAX:", arr[:, :, 3].min(), arr[:, :, 3].max())
+            img = img.resize(target_size, Image.Resampling.LANCZOS)
+            img = fix_alpha_sync(img)
+            buf = BytesIO()
+            img.save(buf, format='PNG')
+            return buf.getvalue()
+
+        return await asyncio.to_thread(resize_sync)
+    
 _background_remover_instance = None
  
  
-def get_background_remover(rembg_available: bool = False) -> BackgroundRemover:
+def get_background_remover(rembg_available: bool = True) -> BackgroundRemover:
     """
     Singleton getter for BackgroundRemover.
     
