@@ -3,7 +3,7 @@ from typing import List, Dict, Optional
 from datetime import datetime
 
 import mlflow.tracking
-
+import os
 
 class ExperimentTracker:
     """
@@ -37,7 +37,7 @@ class ExperimentTracker:
         except Exception:
             # Experiment already exists
             experiment = mlflow.get_experiment_by_name(experiment_name)
-            self.experiment_id = experiment.experiment_id
+            self.experiment_id = experiment.experiment_id # type: ignore
             
         print(f"Experiment tracker ready: {experiment_name}")
         
@@ -283,16 +283,11 @@ _tracker_instance = None
 
 
 def get_tracker(
-    tracking_uri: str = "http://localhost:5000",
+    tracking_uri: str = None,
     experiment_name: str = "object-detection-system"
 ) -> ExperimentTracker:
-    """
-    Singleton getter for ExperimentTracker.
-    
-    tracking_uri: MLflow tracking URI
-    experiment_name: Experiment name
-    """
     global _tracker_instance
     if _tracker_instance is None:
-        _tracker_instance = ExperimentTracker(tracking_uri, experiment_name)
+        uri = tracking_uri or os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+        _tracker_instance = ExperimentTracker(uri, experiment_name)
     return _tracker_instance
