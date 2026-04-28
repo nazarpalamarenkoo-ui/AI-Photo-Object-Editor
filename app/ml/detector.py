@@ -2,7 +2,6 @@ import asyncio
 import time
 from pathlib import Path
 from typing import Optional, Dict, List
-from ultralytics import YOLO
 import numpy as np
 from PIL import Image
  
@@ -31,8 +30,8 @@ class YOLODetector:
     
     def __init__(
         self, 
-        model_path: str = 'yolov10n.pt', 
-        device: str = 'cuda', 
+        model_path: str = 'weights/yolov10m.pt', 
+        device: str = 'cpu', 
         conf_threshold: float = 0.5,
         tracker: Optional[ExperimentTracker] = None
     ):
@@ -46,17 +45,24 @@ class YOLODetector:
             tracker: ExperimentTracker for MLflow (default: auto-created)
         """
         
-        self.model_path = model_path
-        self.device = device
-        self.conf_threshold = conf_threshold
-        
-        self.tracker = tracker or get_tracker()
-        #load model
-        print(f"Loading YOLO model: {model_path}")
-        self.model = YOLO(model_path)
-        self.model.to(device)
-        
-        print(f"YOLO loaded. Classes: {len(self.model.names)}")
+        try:
+            from ultralytics import YOLO
+ 
+            self.model_path = model_path
+            self.device = device
+            self.conf_threshold = conf_threshold
+            self.tracker = tracker or get_tracker()
+ 
+            print(f"Loading YOLO model: {model_path}")
+            self.model = YOLO(model_path)
+            self.model.to(device)
+            print(f"YOLO loaded. Classes: {len(self.model.names)}")
+ 
+        except ImportError as e:
+            raise RuntimeError(
+                f"ultralytics not installed: {e}. "
+                "Set ML_ENABLED=false to run without ML."
+            )
         
     async def detect(
         self,
@@ -112,11 +118,11 @@ class YOLODetector:
         classes: Optional[List[str]] = None
     ) -> List[Dict]:
         # Run YOLO inference
-        results = self.model(
+        results = self.model.predict(
             image_path,
-            conf = conf_threshold,
-            device = self.device,
-            verbose = False
+            conf=conf_threshold,
+            device=self.device,
+            verbose=False
         )
         # Parse results        
         detections = []
@@ -135,6 +141,9 @@ class YOLODetector:
                 confidence = float(box.conf[0].cpu().numpy())
                 class_name = self.model.names[class_id]
 
+                if confidence < conf_threshold:
+                    continue
+                
                 # Filter by class if specified
                 if classes and class_name not in classes:
                     continue
@@ -209,7 +218,7 @@ class YOLODetector:
 _detector_instance = None
 
 def get_detector(
-    model_path: str = 'yolov10n.pt',
+    model_path: str = 'weights/yolov10m.pt',
     device: str = 'cuda',
     tracker: Optional[ExperimentTracker] = None
 ) -> YOLODetector:
