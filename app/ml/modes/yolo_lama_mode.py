@@ -12,6 +12,7 @@ from app.ml.inpainter import LaMaInpainter, InpaintMode, get_inpainter
 from app.ml.processors.edge_blender import EdgeBlender, get_edge_blender
 from app.ml.processors.color_matcher import ColorMatcher, get_color_matcher
 from app.ml.processors.background_remover import BackgroundRemover, get_background_remover
+from app.ml.processors.image_compositor import get_compositor
 
 class YoloLamaMode:
     """
@@ -47,14 +48,17 @@ class YoloLamaMode:
             2. inpainter: LaMa inpainter instance (default: auto-created)
             3. edge_blender: Edge blending processor (default: auto-created)
             4. color_matcher: Color matching processor (default: auto-created)
-            5. device: Device to use ('cuda' or 'cpu', default: 'cuda')
+            5. backgroud_remover: Background remover processor (default: auto-created)
+            6. compositor: Image compositor processor (default: auto-created)
+            7. device: Device to use ('cuda' or 'cpu', default: 'cuda')
         """
         self.device = device
         self.detector = detector or get_detector(device=device)
         self.inpainter = inpainter or get_inpainter(device=device)
         self.edge_blender = edge_blender or get_edge_blender()
         self.color_matcher = color_matcher or get_color_matcher()
-        self.background_remover = background_remover or get_background_remover(rembg_available=False)
+        self.background_remover = background_remover or get_background_remover(rembg_available=True)
+        self.compositor = get_compositor()
         print(f'YoloLamaMode initialized (device: {device})')
     
     async def _save_temp_image(self, image_bytes: bytes) -> Path:
@@ -79,51 +83,54 @@ class YoloLamaMode:
         await asyncio.to_thread(write_sync)
         return temp_path
     
-    async def _create_single_bbox_mask(
+    async def _create_remove_mask(
         self,
         image_bytes: bytes,
         bbox: Dict[str, int],
-        expand_pixels: int = 5
+        expand_pixels: int = 10
     ) -> bytes:
         """
-        Create binary mask from single bounding box.
-        
+        Create a binary mask for object removal based on bbox.
+
+        The mask is used for inpainting (LaMa) to define the region
+        that should be removed. The bbox is optionally expanded to
+        avoid visible artifacts on object boundaries.
+
+        Process:
+            1. Load image to get dimensions
+            2. Generate mask via inpainter (bbox → mask)
+            3. Encode mask as PNG bytes
+
         Args:
-            1. image_bytes: Input image bytes (for size reference)
-            2. bbox: Bounding box dict {'x1', 'y1', 'x2', 'y2'}
-            3. expand_pixels: Pixels to expand mask beyond bbox edges (default: 5)
-        
-        Returns: Mask image bytes (PNG, grayscale - white = mask region)
+            image_bytes: Input image
+            bbox: Target region {'x1','y1','x2','y2'}
+            expand_pixels: Pixels to expand bbox (for safer removal)
+
+        Returns:
+            PNG bytes of binary mask (255 = remove, 0 = keep)
         """
         def create_mask_sync():
-            
             img = Image.open(BytesIO(image_bytes))
             width, height = img.size
-            
-            mask = np.zeros((height, width), dtype=np.uint8)
-            
-            # Expand bbox and clamp to image bounds
-            x1 = max(0, bbox['x1'] - expand_pixels)
-            y1 = max(0, bbox['y1'] - expand_pixels)
-            x2 = min(width, bbox['x2'] + expand_pixels)
-            y2 = min(height, bbox['y2'] + expand_pixels)
-            
-            mask[y1:y2, x1:x2] = 255
-            
-            mask_img = Image.fromarray(mask, mode='L')
-            buffer = BytesIO()
-            mask_img.save(buffer, format='PNG')
-            
-            return buffer.getvalue()
-        
-        mask_bytes = await asyncio.to_thread(create_mask_sync)
-        return mask_bytes
+
+            mask = self.inpainter.create_remove_mask(
+                (height, width),
+                bbox,
+                expand_pixels=expand_pixels
+            )
+
+            buf = BytesIO()
+            Image.fromarray(mask).save(buf, format='PNG')
+            return buf.getvalue()
+
+        return await asyncio.to_thread(create_mask_sync)
     
+
     async def _create_combined_mask(
         self,
         image_bytes: bytes,
         bboxes: List[Dict[str, int]],
-        expand_pixels: int = 5
+        expand_pixels: int = 8
     ) -> bytes:
         """
         Create combined binary mask from multiple bounding boxes.
@@ -159,63 +166,6 @@ class YoloLamaMode:
         
         mask_bytes = await asyncio.to_thread(create_mask_sync)
         return mask_bytes
-    
-    async def _remove_replacement_background(
-        self,
-        replacement_image_bytes: bytes,
-        bbox: Dict[str, int]
-    ) -> bytes:
-        """
-        Remove background from replacement image and crop to bbox size.
- 
-        Uses GrabCut (no extra deps) to remove background.
-        Returns RGBA PNG with transparent background.
-        """
-        bbox_width = bbox['x2'] - bbox['x1']
-        bbox_height = bbox['y2'] - bbox['y1']
- 
-        # Remove background using GrabCut
-        no_bg_bytes = await self.background_remover.remove_background(
-            image_bytes=replacement_image_bytes,
-            method='grabcut',
-            return_format='png'
-        )
- 
-        # Resize to bbox dimensions keeping transparency
-        def resize_sync():
-            img = Image.open(BytesIO(no_bg_bytes)).convert('RGBA')
-            resized = img.resize((bbox_width, bbox_height), Image.Resampling.LANCZOS)
-            buffer = BytesIO()
-            resized.save(buffer, format='PNG')
-            return buffer.getvalue()
- 
-        return await asyncio.to_thread(resize_sync)
-    
-    async def _paste_with_alpha(
-        self,
-        base_image_bytes: bytes,
-        replacement_rgba_bytes: bytes,
-        bbox: Dict[str, int]
-    ) -> bytes:
-        """
-        Paste RGBA replacement into base image at bbox position.
-        Uses alpha channel as mask so transparent pixels are not pasted.
-        """
-        def paste_sync():
-            base = Image.open(BytesIO(base_image_bytes)).convert('RGB')
-            replacement = Image.open(BytesIO(replacement_rgba_bytes)).convert('RGBA')
- 
-            # Use alpha channel as paste mask
-            r, g, b, alpha = replacement.split()
-            replacement_rgb = Image.merge('RGB', (r, g, b))
- 
-            base.paste(replacement_rgb, (bbox['x1'], bbox['y1']), mask=alpha)
- 
-            buffer = BytesIO()
-            base.save(buffer, format='JPEG', quality=95)
-            return buffer.getvalue()
- 
-        return await asyncio.to_thread(paste_sync)
     
     
     async def detect_objects(
@@ -285,7 +235,7 @@ class YoloLamaMode:
         self,
         image_bytes: bytes,
         selected_bbox: Dict[str, int],
-        expand_mask_pixels: int = 5,
+        expand_mask_pixels: int = 30,
         use_edge_blending: bool = True
     ) -> Dict:
         """
@@ -309,7 +259,7 @@ class YoloLamaMode:
             }
         """
         # Create mask from selected bbox
-        mask_bytes = await self._create_single_bbox_mask(
+        mask_bytes = await self._create_remove_mask(
             image_bytes,
             selected_bbox,
             expand_pixels=expand_mask_pixels
@@ -325,6 +275,7 @@ class YoloLamaMode:
         
         result_bytes = inpaint_result['result_bytes']
         
+        result_bytes = await _normalize_size(result_bytes, image_bytes)
         # Apply edge blending for smooth transition
         if use_edge_blending:
             result_bytes = await self.edge_blender.auto_blend(
@@ -344,10 +295,10 @@ class YoloLamaMode:
         image_bytes: bytes,
         selected_bbox: Optional[Dict[str, int]],
         replacement_image_bytes: bytes,
-        expand_mask_pixels: int = 0,
+        expand_mask_pixels: int = 10,
         use_color_matching: bool = True,
-        use_edge_blending: bool = True,
-        color_match_method: str = 'mean_std'
+        use_edge_blending: bool = False,
+        color_match_method: str = 'color_transfer'
     ) -> Dict:
         """
         Replace object in image with replacement image.
@@ -378,14 +329,26 @@ class YoloLamaMode:
                 - metrics: Dict - inpainting metrics
             }
         """
-        # Remove background from replacement image
-        replacement_rgba_bytes = await self._remove_replacement_background(
-            replacement_image_bytes, selected_bbox
+        # Remove background + resize
+        if selected_bbox is None:
+            raise ValueError("selected_bbox is required")
+        
+        
+        bbox_w = selected_bbox['x2'] - selected_bbox['x1']
+        bbox_h = selected_bbox['y2'] - selected_bbox['y1']
+
+        expand_mask_pixels = int(min(bbox_w, bbox_h) * 0.25)
+        
+        replacement_rgba_bytes = await self.background_remover.remove_and_resize(
+            replacement_image_bytes,
+            (bbox_w, bbox_h)
         )
  
-        # Create mask
-        mask_bytes = await self._create_single_bbox_mask(
-            image_bytes, selected_bbox, expand_pixels=expand_mask_pixels
+        # Create mask for remove
+        mask_bytes = await self._create_remove_mask(
+            image_bytes,
+            selected_bbox,
+            expand_pixels=expand_mask_pixels
         )
  
         # LaMa — clean background (remove old object)
@@ -396,33 +359,28 @@ class YoloLamaMode:
             track_metrics=True
         )
         clean_bytes = inpaint_result['result_bytes']
- 
-        # Step 4: Paste replacement with alpha on clean background
-        result_bytes = await self._paste_with_alpha(
-            base_image_bytes=clean_bytes,
+        clean_bytes = await _normalize_size(clean_bytes, image_bytes)
+
+        #  Compose (paste + edge fix)
+        result_bytes = self.compositor.compose(
+            clean_bg_bytes=clean_bytes,
             replacement_rgba_bytes=replacement_rgba_bytes,
-            bbox=selected_bbox
+            bbox=selected_bbox,
+            edge_softness=0,
         )
- 
-        # Color matching
+        
         if use_color_matching:
-            result_bytes = await self.color_matcher.match_colors(
-                image_with_replacement_bytes=result_bytes,
-                bbox=selected_bbox,
-                method=color_match_method,
-                context_margin=20
-            )
- 
-        # Edge blending
-        if use_edge_blending:
-            result_bytes = await self.edge_blender.auto_blend(
+            result_bytes = self.color_matcher.match_against_original(
+                result_bytes=result_bytes,
                 original_image_bytes=image_bytes,
-                processed_image_bytes=result_bytes,
-                mask_bytes=mask_bytes,
-                expand_mask_pixels=expand_mask_pixels
+                bbox=selected_bbox,
+                method=color_match_method # type: ignore
             )
- 
-        return {'result_bytes': result_bytes, 'metrics': inpaint_result['metrics']}
+
+        return {
+            'result_bytes': result_bytes,
+            'metrics': inpaint_result['metrics']
+        }
         
     async def remove_multiple_objects(
         self,
@@ -467,6 +425,7 @@ class YoloLamaMode:
         )
         
         result_bytes = inpaint_result['result_bytes']
+        result_bytes = await _normalize_size(result_bytes, image_bytes)
         
         # Apply edge blending for smooth transitions
         if use_edge_blending:
@@ -489,10 +448,26 @@ class YoloLamaMode:
         Returns: List of class names (80 COCO classes)
         """
         return self.detector.get_class_names()
-    
-    
-_yolo_lama_mode_instance = None
+
+
+async def _normalize_size(processed_bytes: bytes, reference_bytes: bytes) -> bytes:
+    """
+    Ensure processed image has same size as reference image.
+    Fixes LaMa padding / resizing artifacts.
+    """
+    def sync():
+        ref = Image.open(BytesIO(reference_bytes))
+        proc = Image.open(BytesIO(processed_bytes)).convert('RGB')
+        if proc.size != ref.size:
+            proc = proc.resize(ref.size, Image.Resampling.LANCZOS)
+        buf = BytesIO()
+        proc.save(buf, format='JPEG', quality=95)
+        return buf.getvalue()
  
+    return await asyncio.to_thread(sync)
+ 
+ 
+_yolo_lama_mode_instance = None
  
 def get_yolo_lama_mode(device: str = 'cuda') -> YoloLamaMode:
     """
