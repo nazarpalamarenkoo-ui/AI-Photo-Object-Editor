@@ -5,10 +5,7 @@ from enum import Enum
 import numpy as np
 from PIL import Image
 from io import BytesIO
- 
-from lama_cleaner.model_manager import ModelManager
-from lama_cleaner.schema import Config, HDStrategy
- 
+import cv2
 from app.ml.experiment_tracker import ExperimentTracker, get_tracker
  
  
@@ -34,7 +31,7 @@ class LaMaInpainter:
 
     def __init__(
         self,
-        device: str = 'cuda',
+        device: str = 'cpu',
         tracker: Optional[ExperimentTracker] = None
     ):
         """
@@ -44,27 +41,32 @@ class LaMaInpainter:
             device: Device to use ('cuda' or 'cpu', default: 'cuda')
             tracker: ExperimentTracker for MLflow (default: auto-created)
         """
-        self.device = device
-        
-        # MLflow tracker (dependency injection)
-        self.tracker = tracker or get_tracker()
-        
-        # Load LaMa model
-        self.model_manager = ModelManager(
-            name='lama',
-            device=self.device
-        )
-        # LaMa setup config
-        self.config = Config(
-            ldm_steps=25,
-            ldm_sampler='plms',
-            hd_strategy=HDStrategy.ORIGINAL,
-            hd_strategy_crop_margin=128,
-            hd_strategy_crop_trigger_size=800,
-            hd_strategy_resize_limit=2048,
-        )
-        
-        print(f"LaMa Inpainter initialized (device: {device})")
+        try:
+            from lama_cleaner.model_manager import ModelManager
+            from lama_cleaner.schema import Config, HDStrategy
+ 
+            self.device = device
+            self.tracker = tracker or get_tracker()
+ 
+            self.model_manager = ModelManager(
+                name='lama',
+                device=self.device # type: ignore
+            )
+            self.config = Config(
+                ldm_steps=25,
+                ldm_sampler='plms',
+                hd_strategy=HDStrategy.CROP,
+                hd_strategy_crop_margin=32,
+                hd_strategy_crop_trigger_size=800,
+                hd_strategy_resize_limit=2048,
+            )
+            print(f"LaMa Inpainter initialized (device: {device})")
+ 
+        except ImportError as e:
+            raise RuntimeError(
+                f"lama-cleaner not installed or incompatible: {e}. "
+                "Set ML_ENABLED=false to run without ML."
+            )
     
     async def inpaint(
         self,
@@ -121,7 +123,7 @@ class LaMaInpainter:
                 image_bytes,
                 mask_bytes,
                 bbox,
-                replacement_image_bytes
+                replacement_image_bytes # type: ignore
             )
         
         processing_time = (time.time() - start_time) * 1000  # ms
@@ -195,7 +197,7 @@ class LaMaInpainter:
             mask = Image.open(BytesIO(mask_bytes)).convert('L')
             mask_array = np.array(mask)
         elif bbox:
-            mask_array = self._create_mask_from_bbox(
+            mask_array = self.create_remove_mask(
                 img_array.shape[:2],
                 bbox
             )
@@ -209,8 +211,13 @@ class LaMaInpainter:
             config=self.config
         )
         
+        if result_array.dtype != np.uint8:
+            result_array = result_array.clip(0, 255).astype(np.uint8)
+
+        result_array = result_array[:, :, ::-1]
         # Convert result to bytes
         result_img = Image.fromarray(result_array)
+        # Convert result to bytes
         result_buffer = BytesIO()
         result_img.save(result_buffer, format='JPEG', quality=95)
         
@@ -273,59 +280,92 @@ class LaMaInpainter:
         img_array = np.array(img)
 
         replacement_img = Image.open(BytesIO(replacement_image_bytes)).convert('RGB')
-        
-        # Get bbox from mask if not provided directly
+
         if not bbox:
-            if mask_bytes:
-                mask = Image.open(BytesIO(mask_bytes)).convert('L')
-                mask_array = np.array(mask)
-                bbox = self._get_bbox_from_mask(mask_array)
-            else:
-                raise ValueError("bbox or mask_bytes required for REPLACE mode")
-        
-        # Resize replacement to match bbox dimensions
-        bbox_width = bbox['x2'] - bbox['x1']
-        bbox_height = bbox['y2'] - bbox['y1']
+            raise ValueError("bbox required")
+
+        x1, y1, x2, y2 = bbox['x1'], bbox['y1'], bbox['x2'], bbox['y2']
+
+        bbox_width = x2 - x1
+        bbox_height = y2 - y1
+
         replacement_img = replacement_img.resize(
             (bbox_width, bbox_height),
             Image.Resampling.LANCZOS
         )
+
         replacement_array = np.array(replacement_img)
-        
-        # Paste replacement into bbox region
+
         result_array = img_array.copy()
-        result_array[
-            bbox['y1']:bbox['y2'],
-            bbox['x1']:bbox['x2']
-        ] = replacement_array
-        
+        result_array[y1:y2, x1:x2] = replacement_array
+
         result_img = Image.fromarray(result_array)
-        result_buffer = BytesIO()
-        result_img.save(result_buffer, format='JPEG', quality=95)
-        
-        return result_buffer.getvalue()
+        buffer = BytesIO()
+        result_img.save(buffer, format='JPEG', quality=95)
+
+        return buffer.getvalue()
     
-    def _create_mask_from_bbox(
-        self,
-        image_shape: tuple,
-        bbox: Dict[str, int]
-    ) -> np.ndarray:
+    def create_remove_mask(self, image_shape, bbox, expand_pixels=12):
         """
-        Create binary mask from bounding box.
-        
+        Create a binary mask for object removal (inpainting).
+
+        The bbox is expanded to ensure full object coverage and avoid
+        visible edge artifacts during inpainting.
+
+        Process:
+            - Expand bbox by expand_pixels
+            - Clamp to image boundaries
+            - Fill mask region with 255 (remove area)
+
         Args:
-            1. image_shape: (height, width) tuple
-            2. bbox: Bounding box dict {'x1', 'y1', 'x2', 'y2'}
-        
-        Returns: np.ndarray mask (uint8, 0 or 255)
+            image_shape: Tuple (H, W)
+            bbox: {'x1','y1','x2','y2'}
+            expand_pixels: Margin added around bbox
+
+        Returns:
+            np.ndarray mask (H, W), uint8:
+                255 → region to remove
+                0   → keep
         """
-        height, width = image_shape
-        mask = np.zeros((height, width), dtype=np.uint8)
-        mask[
-            bbox['y1']:bbox['y2'],
-            bbox['x1']:bbox['x2']
-        ] = 255
-        
+        H, W = image_shape
+        x1, y1, x2, y2 = bbox['x1'], bbox['y1'], bbox['x2'], bbox['y2']
+
+        x1 = max(0, x1 - expand_pixels)
+        y1 = max(0, y1 - expand_pixels)
+        x2 = min(W, x2 + expand_pixels)
+        y2 = min(H, y2 + expand_pixels)
+
+        mask = np.zeros((H, W), dtype=np.uint8)
+        mask[y1:y2, x1:x2] = 255
+
+        return mask
+
+    def create_replace_mask(self, image_shape, bbox):
+        """
+        Create a binary mask for object replacement.
+
+        Unlike remove mask, this uses the exact bbox without expansion.
+        Used when precise placement is required.
+
+        Process:
+            - Use bbox directly (no padding)
+            - Fill mask region with 255
+
+        Args:
+            image_shape: Tuple (H, W)
+            bbox: {'x1','y1','x2','y2'}
+
+        Returns:
+            np.ndarray mask (H, W), uint8:
+                255 → target region
+                0   → background
+        """
+        H, W = image_shape
+        x1, y1, x2, y2 = bbox['x1'], bbox['y1'], bbox['x2'], bbox['y2']
+
+        mask = np.zeros((H, W), dtype=np.uint8)
+        mask[y1:y2, x1:x2] = 255
+
         return mask
     
     def _get_bbox_from_mask(self, mask_array: np.ndarray) -> Dict[str, int]:
