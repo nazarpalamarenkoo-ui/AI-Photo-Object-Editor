@@ -1,57 +1,71 @@
 import pytest
+import asyncio
+import fakeredis.aioredis
+
+from app.storage.redis_storage import RedisImageCache
+
+
+@pytest.fixture
+def redis_cache(monkeypatch):
+    fake_redis = fakeredis.aioredis.FakeRedis()
+
+    monkeypatch.setattr(
+        "redis.asyncio.from_url",
+        lambda *args, **kwargs: fake_redis
+    )
+
+    return RedisImageCache()
 
 
 @pytest.mark.integration
 @pytest.mark.storage
 @pytest.mark.asyncio
-async def test_cache_image_with_mock(mock_redis_cache, mock_image_bytes):
-    cache = mock_redis_cache
-    
-    # Cache image
-    key = await cache.cache_image(123, mock_image_bytes, "processed")
-    
-    assert key == "image:123:processed"
-    
-    # Get cached
-    cached = await cache.get_cached_image(123, "processed")
-    
-    assert cached == mock_image_bytes
+async def test_cache_image_flow(redis_cache):
+    cache = redis_cache
+
+    key = await cache.cache_image(1, b"img")
+    assert key == "image:1:processed"
+
+    result = await cache.get_cache_image(1)
+    assert result == b"img"
 
 
 @pytest.mark.integration
-@pytest.mark.storage
 @pytest.mark.asyncio
-async def test_cache_detections_with_mock(mock_redis_cache):
-    cache = mock_redis_cache
-    
-    detections = [
-        {'x1': 10, 'y1': 10, 'x2': 100, 'y2': 100, 'class': 'person'}
-    ]
-    
-    # Cache detections
-    key = await cache.cache_detections(123, detections)
-    
-    # Get cached
-    cached = await cache.get_cached_detections(123)
-    
-    assert cached == detections
+async def test_cache_overwrite(redis_cache):
+    cache = redis_cache
+
+    await cache.cache_image(1, b"old")
+    await cache.cache_image(1, b"new")
+
+    result = await cache.get_cache_image(1)
+    assert result == b"new"
 
 
 @pytest.mark.integration
-@pytest.mark.storage
 @pytest.mark.asyncio
-async def test_invalidate_image_with_mock(mock_redis_cache, mock_image_bytes):
-    cache = mock_redis_cache
-    
-    # Cache multiple versions
-    await cache.cache_image(123, mock_image_bytes, "processed")
-    await cache.cache_image(123, mock_image_bytes, "thumbnail")
-    await cache.cache_detections(123, [])
-    
-    # Invalidate all
-    await cache.invalidate_image(123)
-    
-    # Verify deleted
-    assert await cache.get_cached_image(123, "processed") is None
-    assert await cache.get_cached_image(123, "thumbnail") is None
-    assert await cache.get_cached_detections(123) is None
+async def test_ttl_expiration(redis_cache):
+    cache = redis_cache
+
+    await cache.set("k", b"data", ttl=1)
+
+    await asyncio.sleep(1.1)
+
+    result = await cache.get("k")
+    assert result is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_invalidate_partial(redis_cache):
+    cache = redis_cache
+
+    await cache.cache_image(1, b"processed", "processed")
+    await cache.cache_image(1, b"thumb", "thumbnail")
+    await cache.cache_detections(1, [{"a": 1}])
+
+    await cache.invalidate_image(1)
+
+    assert await cache.get_cache_image(1, "processed") is None
+    assert await cache.get_cache_image(1, "thumbnail") is None
+    assert await cache.get_cached_detections(1) is None

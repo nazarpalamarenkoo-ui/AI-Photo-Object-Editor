@@ -5,7 +5,7 @@ from app.config.settings import settings
 
 class RedisImageCache:
     
-    def init(self):
+    def __init__(self):
         
         self.redis = redis.from_url(
             settings.REDIS_URL,
