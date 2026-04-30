@@ -6,14 +6,14 @@ from io import BytesIO
 from fastapi import UploadFile
 from unittest.mock import AsyncMock, MagicMock
 import pytest_asyncio
-
+from unittest.mock import patch, MagicMock
 from app.db.db_connect import Base
 from app.db.models.user import User
 from app.db.models.image import Image
 from app.db.models.detection import Detection
-from app.config.test_settings import test_setting
+from app.config.test_settings import test_settings
 
-TEST_DATABASE = test_setting.TEST_DATABASE_URL
+TEST_DATABASE = test_settings.TEST_DATABASE_URL
 
 @pytest.fixture(scope = 'session')
 def event_loop():
@@ -44,10 +44,8 @@ async def db_session(db_engine):
         autocommit=False
     )
     
-    # Create session
     async with async_session_maker() as session:
         yield session
-        # Cleanup
         await session.rollback()
         
 @pytest.fixture
@@ -63,33 +61,13 @@ def mock_image_bytes():
 
 @pytest.fixture
 def mock_s3_storage():
-    storage = AsyncMock()
-    
-    # Mock upload
-    async def mock_upload(file, path):
-        return f"s3://test-bucket/{path}"
-    storage.upload = mock_upload
-    
-    # Mock upload_bytes
-    async def mock_upload_bytes(data, path, content_type="image/jpeg"):
-        return f"s3://test-bucket/{path}"
-    storage.upload_bytes = mock_upload_bytes
-    
-    # Mock download
-    async def mock_download(path):
-        return b"fake downloaded data"
-    storage.download = mock_download
-    
-    # Mock delete
-    async def mock_delete(path):
-        return True
-    storage.delete = mock_delete
-    
-    # Mock exists
-    async def mock_exists(path):
-        return True
-    storage.exists = mock_exists
-    
+    storage = MagicMock()
+    storage.upload = AsyncMock(return_value="s3://test-bucket/uploads/test.jpg")
+    storage.upload_bytes = AsyncMock(return_value="s3://test-bucket/uploads/test.jpg")
+    storage.download = AsyncMock(return_value=b"fake downloaded data")
+    storage.delete = AsyncMock(return_value=True)
+    storage.exists = AsyncMock(return_value=True)
+    storage.get_presigned_url = AsyncMock(return_value="https://presigned.url/test.jpg")
     return storage
 
 
@@ -154,7 +132,22 @@ async def sample_user(db_session):
     await db_session.refresh(user)
     return user
 
-
+@pytest.fixture(autouse=True)
+def mock_mlflow_connection():
+    mock_client = MagicMock()
+    mock_client.get_experiment_by_name.return_value = None
+    mock_client.create_experiment.return_value = "test-exp-id"
+ 
+    with patch("mlflow.set_tracking_uri"), \
+         patch("mlflow.set_experiment"), \
+         patch("mlflow.create_experiment", return_value="test-exp-id"), \
+         patch("mlflow.start_run"), \
+         patch("mlflow.end_run"), \
+         patch("mlflow.log_metric"), \
+         patch("mlflow.set_tag"), \
+         patch("mlflow.MlflowClient", return_value=mock_client):
+        yield
+        
 @pytest_asyncio.fixture
 async def sample_image(db_session, sample_user):
     image = Image(
@@ -173,6 +166,7 @@ async def sample_image(db_session, sample_user):
 async def sample_detection(db_session, sample_image):
     detection = Detection(
         image_id=sample_image.id,
+        bbox_id=0,         
         x1=10, y1=10, x2=100, y2=100,
         detected_class="person",
         confidence=0.95
