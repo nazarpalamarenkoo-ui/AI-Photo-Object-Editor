@@ -1,0 +1,14 @@
+venv
+.venv
+__pycache__
+*.pyc
+.git
+.gitignore
+.pytest_cache
+mlruns
+.coverage
+.vscode
+alembic/__pycache__
+weights/*.pt
+weights/*.pth
+weights/lama_cache
