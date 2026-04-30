@@ -32,7 +32,7 @@ def get_ml_service(db: AsyncSession = Depends(get_db)) -> MLService:
 
 def _http_status(e: ValueError) -> int:
     msg = str(e).lower()
-    if "not found" in msg:
+    if "not found" in msg or "no valid detections" in msg:
         return 404
     if "unauthorized" in msg:
         return 403
@@ -86,8 +86,8 @@ async def replace_object(
     replacement_file: UploadFile = File(..., description="Replacement object image"),
     expand_mask_pixels: int = Query(0, ge=0, le=50),
     use_color_matching: bool = Query(True),
-    use_edge_blending: bool = Query(True),
-    color_match_method: Literal['mean_std', 'histogram', 'color_transfer'] = Query('mean_std'),
+    use_edge_blending: bool = Query(False),
+    color_match_method: Literal['mean_std', 'histogram', 'color_transfer'] = Query('color_transfer'),
     current_user: User = Depends(get_current_user),
     service: MLService = Depends(get_ml_service)
 ):
