@@ -11,6 +11,7 @@ from app.db.schemas.ml import (
     RemoveMultipleRequest,
     MLResultResponse
 )
+from app.db.schemas.image import ImageResponse
 from app.repository.image_repo import ImageRepository
 from app.repository.detection_repo import DetectionRepository
 from app.services.ml_service import MLService
@@ -67,14 +68,18 @@ async def remove_object(
     service: MLService = Depends(get_ml_service)
 ):
     """Remove detected object from image using LaMa inpainting."""
+    
     try:
         return await service.remove_object(
             image_id=image_id,
             bbox_id=bbox_id,
             user_id=current_user.id,
             expand_mask_pixels=body.expand_mask_pixels,
-            use_edge_blending=body.use_edge_blending
-        )
+            use_edge_blending=body.use_edge_blending,
+            ldm_steps=body.ldm.ldm_steps,
+            ldm_sampler=body.ldm.ldm_sampler,
+            hd_strategy=body.ldm.hd_strategy
+        )   
     except ValueError as e:
         raise HTTPException(status_code=_http_status(e), detail=str(e))
 
@@ -83,11 +88,14 @@ async def remove_object(
 async def replace_object(
     image_id: int,
     bbox_id: int,
-    replacement_file: UploadFile = File(..., description="Replacement object image"),
+    replacement_file: UploadFile = File(...),
     expand_mask_pixels: int = Query(0, ge=0, le=50),
-    use_color_matching: bool = Query(True),
+    use_color_matching: bool = Query(False),
     use_edge_blending: bool = Query(False),
     color_match_method: Literal['mean_std', 'histogram', 'color_transfer'] = Query('color_transfer'),
+    ldm_steps: int = Query(25, ge=5, le=50),
+    ldm_sampler: Literal['plms', 'ddim'] = Query('plms'),
+    hd_strategy: Literal['CROP', 'RESIZE', 'ORIGINAL'] = Query('CROP'),
     current_user: User = Depends(get_current_user),
     service: MLService = Depends(get_ml_service)
 ):
@@ -105,7 +113,10 @@ async def replace_object(
             expand_mask_pixels=expand_mask_pixels,
             use_color_matching=use_color_matching,
             use_edge_blending=use_edge_blending,
-            color_match_method=color_match_method
+            color_match_method=color_match_method,
+            ldm_steps=ldm_steps,
+            ldm_sampler=ldm_sampler,
+            hd_strategy=hd_strategy
         )
     except ValueError as e:
         raise HTTPException(status_code=_http_status(e), detail=str(e))
@@ -125,7 +136,10 @@ async def remove_multiple_objects(
             bbox_ids=body.bbox_ids,
             user_id=current_user.id,
             expand_mask_pixels=body.expand_mask_pixels,
-            use_edge_blending=body.use_edge_blending
+            use_edge_blending=body.use_edge_blending,
+            ldm_steps=body.ldm.ldm_steps,
+            ldm_sampler=body.ldm.ldm_sampler,
+            hd_strategy=body.ldm.hd_strategy
         )
     except ValueError as e:
         raise HTTPException(status_code=_http_status(e), detail=str(e))
@@ -153,3 +167,36 @@ async def get_supported_classes(
 ):
     """Get list of all 80 COCO classes supported by YOLO detector."""
     return service.get_supported_classes()
+
+@router.post("/images/{image_id}/save", response_model=ImageResponse)
+async def save_result(
+    image_id: int,
+    current_user: User = Depends(get_current_user),
+    service: MLService = Depends(get_ml_service)
+):
+    """Save current processed state as a new image in workspace."""
+    try:
+        return await service.save_result(image_id=image_id, user_id=current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=_http_status(e), detail=str(e))
+    
+@router.post("/images/{image_id}/undo")
+async def undo(image_id: int, current_user: User = Depends(get_current_user), service: MLService = Depends(get_ml_service)):
+    try:
+        return await service.undo(image_id, current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=_http_status(e), detail=str(e))
+
+@router.post("/images/{image_id}/redo")
+async def redo(image_id: int, current_user: User = Depends(get_current_user), service: MLService = Depends(get_ml_service)):
+    try:
+        return await service.redo(image_id, current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=_http_status(e), detail=str(e))
+
+@router.get("/images/{image_id}/history")
+async def get_history(image_id: int, current_user: User = Depends(get_current_user), service: MLService = Depends(get_ml_service)):
+    try:
+        return await service.get_history(image_id, current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=_http_status(e), detail=str(e))

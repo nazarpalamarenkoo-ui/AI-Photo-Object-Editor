@@ -1,15 +1,13 @@
 import pytest
-from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock
 from httpx import AsyncClient, ASGITransport
-from datetime import datetime
 
 from app.api.auth.auth import create_access_token
-from app.db.models.detection import Detection
-from app.repository.detection_repo import DetectionRepository
+from app.db.models.user import User
 
 
-def _make_app(db_session, mock_pipeline):
+def _make_app(db_session, pipeline=None, redis_storage=None, s3_storage=None):
+    """Build a FastAPI app with MLService wired to a real db_session and mocked S3/Redis."""
     from fastapi import FastAPI
     from app.api.v1.ml import router as ml_router, get_ml_service
     from app.db.db_connect import get_db
@@ -21,20 +19,13 @@ def _make_app(db_session, mock_pipeline):
     app.include_router(ml_router)
     app.dependency_overrides[get_db] = lambda: db_session
 
-    mock_s3 = MagicMock()
-    mock_s3.download = AsyncMock(return_value=b"fake image bytes")
-    mock_s3.upload_bytes = AsyncMock(return_value="s3://bucket/result.jpg")
-    mock_s3.get_presigned_url = AsyncMock(return_value="https://presigned.url/result.jpg")
+    mock_pipeline = pipeline or MagicMock()
 
-    mock_redis = MagicMock()
-    mock_redis.get_cache_image = AsyncMock(return_value=None)
-    mock_redis.cache_image = AsyncMock()
-    mock_redis.cache_detections = AsyncMock()
-    mock_redis.get_cached_detections = AsyncMock(return_value=None)
-    mock_redis.delete = AsyncMock()
+    mock_s3 = s3_storage or _default_mock_s3()
+    mock_redis = redis_storage or _default_mock_redis()
 
     def override_service():
-        svc = MLService(
+        return MLService(
             db=db_session,
             s3_storage=mock_s3,
             redis_storage=mock_redis,
@@ -42,10 +33,36 @@ def _make_app(db_session, mock_pipeline):
             detection_repo=DetectionRepository(db_session),
             pipeline=mock_pipeline
         )
-        return svc
 
     app.dependency_overrides[get_ml_service] = override_service
-    return app
+    return app, mock_s3, mock_redis
+
+
+def _default_mock_s3():
+    s3 = MagicMock()
+    s3.download = AsyncMock(return_value=b"fake image bytes")
+    s3.upload_bytes = AsyncMock(return_value="s3://bucket/result.jpg")
+    s3.get_presigned_url = AsyncMock(return_value="https://presigned.url/result.jpg")
+    return s3
+
+
+def _default_mock_redis():
+    redis = MagicMock()
+    # generic state cache
+    redis.get_cache_image = AsyncMock(return_value=None)
+    redis.cache_image = AsyncMock()
+    redis.delete = AsyncMock()
+    redis.clear_history = AsyncMock()
+    # undo/redo stacks
+    redis.pop_undo_state = AsyncMock(return_value=None)
+    redis.push_undo_state = AsyncMock()
+    redis.pop_redo_state = AsyncMock(return_value=None)
+    redis.push_redo_state = AsyncMock()
+    redis.get_history_labels = AsyncMock(return_value=[])
+    # detection cache (unused here but present on the real client)
+    redis.cache_detections = AsyncMock()
+    redis.get_cached_detections = AsyncMock(return_value=None)
+    return redis
 
 
 def _auth_headers(user):
@@ -53,82 +70,65 @@ def _auth_headers(user):
     return {"Authorization": f"Bearer {token}"}
 
 
-def _mock_pipeline_detect(detections):
-    pipeline = MagicMock()
-    pipeline.detect_objects = AsyncMock(return_value={
-        "detections": detections,
-        "image_size": (640, 480),
-        "metrics": {"num_detections": len(detections), "inference_time_ms": 50.0},
-        "timestamp": datetime.now().isoformat()
-    })
-    return pipeline
-
-
-def _mock_pipeline_remove():
-    pipeline = MagicMock()
-    pipeline.remove_object = AsyncMock(return_value={
-        "result_bytes": b"processed image",
-        "metrics": {"processing_time_ms": 200.0, "mode": "remove"},
-        "timestamp": datetime.now().isoformat()
-    })
-    return pipeline
-
-
-def _mock_pipeline_replace():
-    pipeline = MagicMock()
-    pipeline.replace_object = AsyncMock(return_value={
-        "result_bytes": b"replaced image",
-        "metrics": {"processing_time_ms": 300.0, "mode": "remove"},
-        "timestamp": datetime.now().isoformat()
-    })
-    return pipeline
-
-
-def _mock_pipeline_remove_multiple():
-    pipeline = MagicMock()
-    pipeline.remove_multiple_objects = AsyncMock(return_value={
-        "result_bytes": b"multi removed",
-        "metrics": {"processing_time_ms": 400.0, "mode": "remove"},
-        "timestamp": datetime.now().isoformat()
-    })
-    return pipeline
+async def _make_other_user(db_session):
+    other = User(username="otheruser", email="other@example.com", password_hash="hashed")
+    db_session.add(other)
+    await db_session.commit()
+    await db_session.refresh(other)
+    return other
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_detect_objects(db_session, sample_user, sample_image):
-    detections = [
-        {"bbox_id": 0, "x1": 10, "y1": 10, "x2": 100, "y2": 100, "detected_class": "person", "confidence": 0.95}
-    ]
-    pipeline = _mock_pipeline_detect(detections)
-    app = _make_app(db_session, pipeline)
+async def test_save_result_success(db_session, sample_user, sample_image):
+    app, mock_s3, mock_redis = _make_app(db_session)
+    mock_redis.get_cache_image = AsyncMock(return_value=b"processed image bytes")
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
-            f"/ml/images/{sample_image.id}/detect",
-            json={"conf_threshold": 0.5},
+            f"/ml/images/{sample_image.id}/save",
             headers=_auth_headers(sample_user)
         )
 
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data["detections"]) == 1
-    assert data["detections"][0]["detected_class"] == "person"
+    assert data["filename"] == f"edited_{sample_image.filename}"
+    assert data["storage_path"] == "s3://bucket/result.jpg"
+    assert data["cache_key"] is None
+    assert "id" in data
+    assert "uploaded_at" in data
 
-    saved = await DetectionRepository(db_session).get_by_image(sample_image.id)
-    assert len(saved) == 1
+    mock_redis.get_cache_image.assert_awaited_once_with(sample_image.id, suffix='current_state')
+    mock_s3.upload_bytes.assert_awaited_once()
+    _, kwargs = mock_s3.upload_bytes.await_args
+    assert kwargs["content_type"] == "image/jpeg"
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_detect_objects_not_found(db_session, sample_user):
-    pipeline = _mock_pipeline_detect([])
-    app = _make_app(db_session, pipeline)
+async def test_save_result_no_processed_state(db_session, sample_user, sample_image):
+    # default mock_redis.get_cache_image returns None -> nothing was processed yet
+    app, mock_s3, mock_redis = _make_app(db_session)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
-            "/ml/images/99999/detect",
-            json={"conf_threshold": 0.5},
+            f"/ml/images/{sample_image.id}/save",
+            headers=_auth_headers(sample_user)
+        )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "No processed result to save. Run remove/replace first."
+    mock_s3.upload_bytes.assert_not_called()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_save_result_image_not_found(db_session, sample_user):
+    app, _, _ = _make_app(db_session)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/ml/images/99999/save",
             headers=_auth_headers(sample_user)
         )
 
@@ -137,32 +137,94 @@ async def test_detect_objects_not_found(db_session, sample_user):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_remove_object(db_session, sample_user, sample_image, sample_detection):
-    pipeline = _mock_pipeline_remove()
-    app = _make_app(db_session, pipeline)
+async def test_save_result_unauthorized(db_session, sample_user, sample_image):
+    other_user = await _make_other_user(db_session)
+    app, _, mock_redis = _make_app(db_session)
+    mock_redis.get_cache_image = AsyncMock(return_value=b"processed image bytes")
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
-            f"/ml/images/{sample_image.id}/remove/{sample_detection.bbox_id}",
-            json={"expand_mask_pixels": 5, "use_edge_blending": True},
+            f"/ml/images/{sample_image.id}/save",
+            headers=_auth_headers(other_user)
+        )
+
+    assert resp.status_code == 403
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_undo_success(db_session, sample_user, sample_image):
+    app, mock_s3, mock_redis = _make_app(db_session)
+    mock_redis.get_cache_image = AsyncMock(return_value=b"current state bytes")
+    mock_redis.pop_undo_state = AsyncMock(return_value={"bytes": b"previous state bytes", "label": "remove bbox_id=0"})
+    mock_redis.get_history_labels = AsyncMock(return_value=["remove bbox_id=0"])
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            f"/ml/images/{sample_image.id}/undo",
             headers=_auth_headers(sample_user)
         )
 
     assert resp.status_code == 200
     data = resp.json()
-    assert "result_url" in data
-    assert "presigned_url" in data
+    assert data["presigned_url"] == "https://presigned.url/result.jpg"
+    assert data["label"] == "remove bbox_id=0"
+    assert data["history"] == ["remove bbox_id=0"]
+
+    # current state existed, so it must have been pushed onto the redo stack
+    mock_redis.push_redo_state.assert_awaited_once()
+    args, kwargs = mock_redis.push_redo_state.await_args
+    assert args[0] == sample_image.id
+    assert args[1] == b"current state bytes"
+
+    # the popped state must become the new current state
+    mock_redis.cache_image.assert_awaited_once()
+    _, cache_kwargs = mock_redis.cache_image.await_args
+    assert cache_kwargs["image_data"] == b"previous state bytes"
+    assert cache_kwargs["suffix"] == "current_state"
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_remove_object_bbox_not_found(db_session, sample_user, sample_image):
-    pipeline = _mock_pipeline_remove()
-    app = _make_app(db_session, pipeline)
+async def test_undo_no_current_state_skips_redo_push(db_session, sample_user, sample_image):
+    app, _, mock_redis = _make_app(db_session)
+    mock_redis.get_cache_image = AsyncMock(return_value=None)
+    mock_redis.pop_undo_state = AsyncMock(return_value={"bytes": b"previous state bytes", "label": "remove bbox_id=0"})
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
-            f"/ml/images/{sample_image.id}/remove/99",
+            f"/ml/images/{sample_image.id}/undo",
+            headers=_auth_headers(sample_user)
+        )
+
+    assert resp.status_code == 200
+    mock_redis.push_redo_state.assert_not_called()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_undo_nothing_to_undo(db_session, sample_user, sample_image):
+    app, _, mock_redis = _make_app(db_session)
+    mock_redis.pop_undo_state = AsyncMock(return_value=None)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            f"/ml/images/{sample_image.id}/undo",
+            headers=_auth_headers(sample_user)
+        )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Nothing to undo"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_undo_image_not_found(db_session, sample_user):
+    app, _, _ = _make_app(db_session)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/ml/images/99999/undo",
             headers=_auth_headers(sample_user)
         )
 
@@ -171,33 +233,73 @@ async def test_remove_object_bbox_not_found(db_session, sample_user, sample_imag
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_replace_object(db_session, sample_user, sample_image, sample_detection):
-    pipeline = _mock_pipeline_replace()
-    app = _make_app(db_session, pipeline)
+async def test_redo_success(db_session, sample_user, sample_image):
+    app, mock_s3, mock_redis = _make_app(db_session)
+    mock_redis.get_cache_image = AsyncMock(return_value=b"current state bytes")
+    mock_redis.pop_redo_state = AsyncMock(return_value={"bytes": b"next state bytes", "label": "redo"})
+    mock_redis.get_history_labels = AsyncMock(return_value=["remove bbox_id=0", "redo"])
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
-            f"/ml/images/{sample_image.id}/replace/{sample_detection.bbox_id}",
-            files={"replacement_file": ("dog.jpg", BytesIO(b"dog image bytes"), "image/jpeg")},
+            f"/ml/images/{sample_image.id}/redo",
             headers=_auth_headers(sample_user)
         )
 
     assert resp.status_code == 200
     data = resp.json()
-    assert "result_url" in data
-    assert "presigned_url" in data
+    assert data["presigned_url"] == "https://presigned.url/result.jpg"
+    assert data["label"] == "redo"
+    assert data["history"] == ["remove bbox_id=0", "redo"]
+
+    # current state existed, so it must have been pushed onto the undo stack
+    mock_redis.push_undo_state.assert_awaited_once()
+    args, kwargs = mock_redis.push_undo_state.await_args
+    assert args[0] == sample_image.id
+    assert args[1] == b"current state bytes"
+    assert kwargs.get("label") == "redo_checkpoint"
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_replace_object_not_found(db_session, sample_user, sample_image):
-    pipeline = _mock_pipeline_replace()
-    app = _make_app(db_session, pipeline)
+async def test_redo_no_current_state_skips_undo_push(db_session, sample_user, sample_image):
+    app, _, mock_redis = _make_app(db_session)
+    mock_redis.get_cache_image = AsyncMock(return_value=None)
+    mock_redis.pop_redo_state = AsyncMock(return_value={"bytes": b"next state bytes", "label": "redo"})
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
-            f"/ml/images/{sample_image.id}/replace/99",
-            files={"replacement_file": ("dog.jpg", BytesIO(b"data"), "image/jpeg")},
+            f"/ml/images/{sample_image.id}/redo",
+            headers=_auth_headers(sample_user)
+        )
+
+    assert resp.status_code == 200
+    mock_redis.push_undo_state.assert_not_called()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_redo_nothing_to_redo(db_session, sample_user, sample_image):
+    app, _, mock_redis = _make_app(db_session)
+    mock_redis.pop_redo_state = AsyncMock(return_value=None)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            f"/ml/images/{sample_image.id}/redo",
+            headers=_auth_headers(sample_user)
+        )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Nothing to redo"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_redo_image_not_found(db_session, sample_user):
+    app, _, _ = _make_app(db_session)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/ml/images/99999/redo",
             headers=_auth_headers(sample_user)
         )
 
@@ -206,31 +308,44 @@ async def test_replace_object_not_found(db_session, sample_user, sample_image):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_remove_multiple_objects(db_session, sample_user, sample_image, sample_detection):
-    pipeline = _mock_pipeline_remove_multiple()
-    app = _make_app(db_session, pipeline)
+async def test_get_history_success(db_session, sample_user, sample_image):
+    app, _, mock_redis = _make_app(db_session)
+    mock_redis.get_history_labels = AsyncMock(return_value=["remove bbox_id=0", "replace bbox_id=1"])
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/remove-multiple",
-            json={"bbox_ids": [sample_detection.bbox_id], "expand_mask_pixels": 5, "use_edge_blending": True},
+        resp = await client.get(
+            f"/ml/images/{sample_image.id}/history",
             headers=_auth_headers(sample_user)
         )
 
     assert resp.status_code == 200
-    assert "result_url" in resp.json()
+    assert resp.json() == {"history": ["remove bbox_id=0", "replace bbox_id=1"]}
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_remove_multiple_invalid_bbox_ids(db_session, sample_user, sample_image):
-    pipeline = _mock_pipeline_remove_multiple()
-    app = _make_app(db_session, pipeline)
+async def test_get_history_empty(db_session, sample_user, sample_image):
+    app, _, mock_redis = _make_app(db_session)
+    mock_redis.get_history_labels = AsyncMock(return_value=[])
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/remove-multiple",
-            json={"bbox_ids": [99, 100], "expand_mask_pixels": 5, "use_edge_blending": True},
+        resp = await client.get(
+            f"/ml/images/{sample_image.id}/history",
+            headers=_auth_headers(sample_user)
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"history": []}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_get_history_image_not_found(db_session, sample_user):
+    app, _, _ = _make_app(db_session)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(
+            "/ml/images/99999/history",
             headers=_auth_headers(sample_user)
         )
 
@@ -239,44 +354,14 @@ async def test_remove_multiple_invalid_bbox_ids(db_session, sample_user, sample_
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_reset_current_state(db_session, sample_user, sample_image):
-    pipeline = MagicMock()
-    app = _make_app(db_session, pipeline)
+async def test_get_history_unauthorized(db_session, sample_user, sample_image):
+    other_user = await _make_other_user(db_session)
+    app, _, _ = _make_app(db_session)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/reset",
-            headers=_auth_headers(sample_user)
+        resp = await client.get(
+            f"/ml/images/{sample_image.id}/history",
+            headers=_auth_headers(other_user)
         )
 
-    assert resp.status_code == 200
-    assert resp.json()["detail"] == "State reset to original image"
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_reset_not_found(db_session, sample_user):
-    pipeline = MagicMock()
-    app = _make_app(db_session, pipeline)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            "/ml/images/99999/reset",
-            headers=_auth_headers(sample_user)
-        )
-
-    assert resp.status_code == 404
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_get_supported_classes(db_session, sample_user):
-    pipeline = MagicMock()
-    pipeline.get_supported_classes = MagicMock(return_value=["person", "car", "dog"])
-    app = _make_app(db_session, pipeline)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/ml/classes", headers=_auth_headers(sample_user))
-
-    assert resp.status_code == 200
-    assert "person" in resp.json()
+    assert resp.status_code == 403
