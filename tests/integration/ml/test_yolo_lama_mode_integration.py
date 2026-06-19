@@ -47,7 +47,7 @@ def mock_detector():
 def mock_inpainter():
     inpainter = MagicMock()
 
-    def real_create_remove_mask(image_shape, bbox, expand_pixels=12):
+    def real_create_remove_mask(image_shape, bbox, expand_pixels=12, other_bboxes=None):
         H, W = image_shape
         x1 = max(0, bbox['x1'] - expand_pixels)
         y1 = max(0, bbox['y1'] - expand_pixels)
@@ -60,7 +60,8 @@ def mock_inpainter():
     inpainter.create_remove_mask = MagicMock(side_effect=real_create_remove_mask)
 
     async def mock_inpaint(image_bytes, mask_bytes=None, bbox=None, mode=None,
-                           replacement_image_bytes=None, track_metrics=True):
+                           replacement_image_bytes=None, track_metrics=True,
+                           ldm_steps=25, ldm_sampler='plms', hd_strategy='CROP'):
         return {
             'result_bytes': FAKE_RESULT_BYTES,
             'metrics': {
@@ -510,7 +511,213 @@ async def test_remove_object_without_edge_blending(mode, test_image_bytes, mock_
 
     mock_edge_blender.auto_blend.assert_not_called()
 
+@pytest.mark.integration
+@pytest.mark.ml
+@pytest.mark.asyncio
+async def test_remove_object_ldm_fast_preset(mode, test_image_bytes, mock_inpainter):
+    """Fast preset — 10 steps, plms, CROP."""
+    selected_bbox = {'x1': 100, 'y1': 100, 'x2': 200, 'y2': 200}
 
+    await mode.remove_object(
+        image_bytes=test_image_bytes,
+        selected_bbox=selected_bbox,
+        use_edge_blending=False,
+        ldm_steps=10,
+        ldm_sampler='plms',
+        hd_strategy='CROP'
+    )
+
+    call_kwargs = mock_inpainter.inpaint.call_args.kwargs
+    assert call_kwargs['ldm_steps'] == 10
+    assert call_kwargs['ldm_sampler'] == 'plms'
+    assert call_kwargs['hd_strategy'] == 'CROP'
+
+
+@pytest.mark.integration
+@pytest.mark.ml
+@pytest.mark.asyncio
+async def test_remove_object_ldm_quality_preset(mode, test_image_bytes, mock_inpainter):
+    """Quality preset — 25 steps."""
+    selected_bbox = {'x1': 100, 'y1': 100, 'x2': 200, 'y2': 200}
+
+    await mode.remove_object(
+        image_bytes=test_image_bytes,
+        selected_bbox=selected_bbox,
+        use_edge_blending=False,
+        ldm_steps=25,
+        ldm_sampler='plms',
+        hd_strategy='CROP'
+    )
+
+    call_kwargs = mock_inpainter.inpaint.call_args.kwargs
+    assert call_kwargs['ldm_steps'] == 25
+
+
+@pytest.mark.integration
+@pytest.mark.ml
+@pytest.mark.asyncio
+async def test_remove_object_ldm_custom_ddim(mode, test_image_bytes, mock_inpainter):
+    """Custom preset — ddim sampler."""
+    selected_bbox = {'x1': 100, 'y1': 100, 'x2': 200, 'y2': 200}
+
+    await mode.remove_object(
+        image_bytes=test_image_bytes,
+        selected_bbox=selected_bbox,
+        use_edge_blending=False,
+        ldm_steps=30,
+        ldm_sampler='ddim',
+        hd_strategy='RESIZE'
+    )
+
+    call_kwargs = mock_inpainter.inpaint.call_args.kwargs
+    assert call_kwargs['ldm_sampler'] == 'ddim'
+    assert call_kwargs['hd_strategy'] == 'RESIZE'
+
+
+@pytest.mark.integration
+@pytest.mark.ml
+@pytest.mark.asyncio
+async def test_replace_object_ldm_params_forwarded(mode, test_image_bytes, test_replacement_bytes, mock_inpainter):
+    selected_bbox = {'x1': 100, 'y1': 100, 'x2': 200, 'y2': 200}
+
+    await mode.replace_object(
+        image_bytes=test_image_bytes,
+        selected_bbox=selected_bbox,
+        replacement_image_bytes=test_replacement_bytes,
+        ldm_steps=15,
+        ldm_sampler='ddim',
+        hd_strategy='ORIGINAL'
+    )
+
+    call_kwargs = mock_inpainter.inpaint.call_args.kwargs
+    assert call_kwargs['ldm_steps'] == 15
+    assert call_kwargs['ldm_sampler'] == 'ddim'
+    assert call_kwargs['hd_strategy'] == 'ORIGINAL'
+
+
+@pytest.mark.integration
+@pytest.mark.ml
+@pytest.mark.asyncio
+async def test_remove_multiple_ldm_params_forwarded(mode, test_image_bytes, mock_inpainter):
+    selected_bboxes = [
+        {'x1': 100, 'y1': 100, 'x2': 200, 'y2': 200},
+        {'x1': 300, 'y1': 300, 'x2': 400, 'y2': 400},
+    ]
+
+    await mode.remove_multiple_objects(
+        image_bytes=test_image_bytes,
+        selected_bboxes=selected_bboxes,
+        ldm_steps=10,
+        ldm_sampler='ddim',
+        hd_strategy='RESIZE'
+    )
+
+    call_kwargs = mock_inpainter.inpaint.call_args.kwargs
+    assert call_kwargs['ldm_steps'] == 10
+    assert call_kwargs['ldm_sampler'] == 'ddim'
+    assert call_kwargs['hd_strategy'] == 'RESIZE'
+
+
+@pytest.mark.integration
+@pytest.mark.ml
+@pytest.mark.asyncio
+async def test_remove_object_with_scene_bboxes(mode, test_image_bytes, mock_inpainter):
+    selected_bbox = {'x1': 100, 'y1': 100, 'x2': 200, 'y2': 200}
+    scene = [
+        {'x1': 300, 'y1': 300, 'x2': 400, 'y2': 400},
+        {'x1': 500, 'y1': 100, 'x2': 600, 'y2': 200},
+    ]
+
+    result = await mode.remove_object(
+        image_bytes=test_image_bytes,
+        selected_bbox=selected_bbox,
+        scene_bboxes=scene,
+        use_edge_blending=False
+    )
+
+    assert 'result_bytes' in result
+    mock_inpainter.create_remove_mask.assert_called()
+    call_args = mock_inpainter.create_remove_mask.call_args
+    other = call_args.kwargs.get('other_bboxes') or (call_args.args[2] if len(call_args.args) > 2 else None)
+    if other is not None:
+        assert selected_bbox not in other
+
+
+@pytest.mark.integration
+@pytest.mark.ml
+@pytest.mark.asyncio
+async def test_remove_object_no_scene_bboxes(mode, test_image_bytes):
+    selected_bbox = {'x1': 100, 'y1': 100, 'x2': 200, 'y2': 200}
+
+    result = await mode.remove_object(
+        image_bytes=test_image_bytes,
+        selected_bbox=selected_bbox,
+        scene_bboxes=None,
+        use_edge_blending=False
+    )
+
+    assert 'result_bytes' in result
+
+
+@pytest.mark.integration
+@pytest.mark.ml
+@pytest.mark.asyncio
+async def test_replace_object_with_scene_bboxes(mode, test_image_bytes, test_replacement_bytes):
+    selected_bbox = {'x1': 100, 'y1': 100, 'x2': 200, 'y2': 200}
+    scene = [{'x1': 300, 'y1': 300, 'x2': 400, 'y2': 400}]
+
+    result = await mode.replace_object(
+        image_bytes=test_image_bytes,
+        selected_bbox=selected_bbox,
+        replacement_image_bytes=test_replacement_bytes,
+        scene_bboxes=scene
+    )
+
+    assert 'result_bytes' in result
+
+
+@pytest.mark.integration
+@pytest.mark.ml
+@pytest.mark.asyncio
+async def test_create_remove_mask_excludes_target_from_neighbors(mode, test_image_bytes):
+    target = {'x1': 100, 'y1': 100, 'x2': 200, 'y2': 200}
+    neighbor = {'x1': 300, 'y1': 100, 'x2': 400, 'y2': 200}
+    all_bboxes = [target, neighbor]
+
+    mask_bytes = await mode._create_remove_mask(
+        test_image_bytes,
+        target,
+        expand_pixels=5,
+        all_bboxes=all_bboxes
+    )
+
+    mask = np.array(Image.open(BytesIO(mask_bytes)).convert('L'))
+    assert np.any(mask[100:200, 100:200] == 255)
+    assert np.all(mask[100:200, 300:400] == 0)
+
+
+@pytest.mark.integration
+@pytest.mark.ml
+@pytest.mark.asyncio
+async def test_create_combined_mask_with_scene_bboxes(mode, test_image_bytes):
+    selected = [
+        {'x1': 50, 'y1': 50, 'x2': 150, 'y2': 150},
+    ]
+    scene = [
+        {'x1': 300, 'y1': 300, 'x2': 400, 'y2': 400},
+    ]
+
+    mask_bytes = await mode._create_combined_mask(
+        test_image_bytes,
+        selected,
+        expand_pixels=0,
+        scene_bboxes=scene
+    )
+
+    mask = np.array(Image.open(BytesIO(mask_bytes)).convert('L'))
+    assert np.any(mask[50:150, 50:150] == 255)
+    assert np.all(mask[300:400, 300:400] == 0)
+    
 @pytest.mark.integration
 @pytest.mark.ml
 @pytest.mark.asyncio
@@ -521,3 +728,4 @@ async def test_get_supported_classes(mode):
     assert isinstance(classes, list)
     assert 'person' in classes
     assert 'car' in classes
+    

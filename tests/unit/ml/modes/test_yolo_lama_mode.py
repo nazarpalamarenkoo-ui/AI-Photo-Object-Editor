@@ -70,18 +70,32 @@ async def test_detect_objects_bbox_id_increment():
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_mask_multiple_overlap():
-    mode = YoloLamaMode(MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock())
+    inpainter = MagicMock()
+
+    def real_create_remove_mask(image_shape, bbox, expand_pixels=12, other_bboxes=None):
+        H, W = image_shape
+        x1 = max(0, bbox['x1'] - expand_pixels)
+        y1 = max(0, bbox['y1'] - expand_pixels)
+        x2 = min(W, bbox['x2'] + expand_pixels)
+        y2 = min(H, bbox['y2'] + expand_pixels)
+        mask = np.zeros((H, W), dtype=np.uint8)
+        mask[y1:y2, x1:x2] = 255
+        return mask
+
+    inpainter.create_remove_mask = MagicMock(side_effect=real_create_remove_mask)
+
+    mode = YoloLamaMode(MagicMock(), inpainter, MagicMock(), MagicMock(), MagicMock())
 
     img = make_image((100, 100))
 
     bboxes = [
-        {"x1":10,"y1":10,"x2":50,"y2":50},
-        {"x1":30,"y1":30,"x2":80,"y2":80},
+        {"x1": 10, "y1": 10, "x2": 50, "y2": 50},
+        {"x1": 30, "y1": 30, "x2": 80, "y2": 80},
     ]
 
     mask_bytes = await mode._create_combined_mask(img, bboxes)
     mask = np.array(Image.open(BytesIO(mask_bytes)))
-    
+
     assert mask[40, 40] == 255
     assert mask[15, 15] == 255
     assert mask[90, 90] == 0
@@ -182,3 +196,144 @@ async def test_replace_object_inpainter_failure():
             selected_bbox=make_bbox(),
             replacement_image_bytes=make_image()
         )
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_remove_object_passes_ldm_params_to_inpainter():
+    inpainter = MagicMock()
+    inpainter.inpaint = AsyncMock(return_value={"result_bytes": make_image(), "metrics": {}})
+
+    mode = YoloLamaMode(MagicMock(), inpainter, MagicMock(), MagicMock(), MagicMock())
+    mode._create_remove_mask = AsyncMock(return_value=make_image())
+
+    await mode.remove_object(
+        image_bytes=make_image(),
+        selected_bbox=make_bbox(),
+        use_edge_blending=False,
+        ldm_steps=10,
+        ldm_sampler='ddim',
+        hd_strategy='RESIZE'
+    )
+
+    call_kwargs = inpainter.inpaint.call_args.kwargs
+    assert call_kwargs['ldm_steps'] == 10
+    assert call_kwargs['ldm_sampler'] == 'ddim'
+    assert call_kwargs['hd_strategy'] == 'RESIZE'
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_replace_object_passes_ldm_params_to_inpainter():
+    inpainter = MagicMock()
+    inpainter.inpaint = AsyncMock(return_value={"result_bytes": make_image(), "metrics": {}})
+
+    mode = YoloLamaMode(MagicMock(), inpainter, MagicMock(), MagicMock(), MagicMock())
+    mode.background_remover.remove_and_resize = AsyncMock(return_value=make_image())
+    mode._create_remove_mask = AsyncMock(return_value=make_image())
+    mode.compositor = MagicMock()
+    mode.compositor.compose = MagicMock(return_value=make_image())
+
+    await mode.replace_object(
+        image_bytes=make_image(),
+        selected_bbox=make_bbox(),
+        replacement_image_bytes=make_image(),
+        ldm_steps=10,
+        ldm_sampler='ddim',
+        hd_strategy='RESIZE'
+    )
+
+    call_kwargs = inpainter.inpaint.call_args.kwargs
+    assert call_kwargs['ldm_steps'] == 10
+    assert call_kwargs['ldm_sampler'] == 'ddim'
+    assert call_kwargs['hd_strategy'] == 'RESIZE'
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_remove_multiple_passes_ldm_params_to_inpainter():
+    inpainter = MagicMock()
+    inpainter.inpaint = AsyncMock(return_value={"result_bytes": make_image(), "metrics": {}})
+
+    mode = YoloLamaMode(MagicMock(), inpainter, MagicMock(), MagicMock(), MagicMock())
+    mode._create_combined_mask = AsyncMock(return_value=make_image())
+
+    await mode.remove_multiple_objects(
+        image_bytes=make_image(),
+        selected_bboxes=[make_bbox()],
+        use_edge_blending=False,
+        ldm_steps=10,
+        ldm_sampler='ddim',
+        hd_strategy='RESIZE'
+    )
+
+    call_kwargs = inpainter.inpaint.call_args.kwargs
+    assert call_kwargs['ldm_steps'] == 10
+    assert call_kwargs['ldm_sampler'] == 'ddim'
+    assert call_kwargs['hd_strategy'] == 'RESIZE'
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_remove_object_default_ldm_params():
+    inpainter = MagicMock()
+    inpainter.inpaint = AsyncMock(return_value={"result_bytes": make_image(), "metrics": {}})
+
+    mode = YoloLamaMode(MagicMock(), inpainter, MagicMock(), MagicMock(), MagicMock())
+    mode._create_remove_mask = AsyncMock(return_value=make_image())
+
+    await mode.remove_object(
+        image_bytes=make_image(),
+        selected_bbox=make_bbox(),
+        use_edge_blending=False
+    )
+
+    call_kwargs = inpainter.inpaint.call_args.kwargs
+    assert call_kwargs['ldm_steps'] == 25
+    assert call_kwargs['ldm_sampler'] == 'plms'
+    assert call_kwargs['hd_strategy'] == 'CROP'
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_remove_object_passes_scene_bboxes_to_mask():
+    inpainter = MagicMock()
+    inpainter.inpaint = AsyncMock(return_value={"result_bytes": make_image(), "metrics": {}})
+
+    mode = YoloLamaMode(MagicMock(), inpainter, MagicMock(), MagicMock(), MagicMock())
+    mode._create_remove_mask = AsyncMock(return_value=make_image())
+
+    scene = [{"x1": 200, "y1": 200, "x2": 300, "y2": 300}]
+
+    await mode.remove_object(
+        image_bytes=make_image(),
+        selected_bbox=make_bbox(),
+        use_edge_blending=False,
+        scene_bboxes=scene
+    )
+
+    call_kwargs = mode._create_remove_mask.call_args.kwargs
+    assert call_kwargs.get('all_bboxes') == scene
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_replace_object_passes_scene_bboxes_to_mask():
+    inpainter = MagicMock()
+    inpainter.inpaint = AsyncMock(return_value={"result_bytes": make_image(), "metrics": {}})
+
+    mode = YoloLamaMode(MagicMock(), inpainter, MagicMock(), MagicMock(), MagicMock())
+    mode.background_remover.remove_and_resize = AsyncMock(return_value=make_image())
+    mode._create_remove_mask = AsyncMock(return_value=make_image())
+    mode.compositor = MagicMock()
+    mode.compositor.compose = MagicMock(return_value=make_image())
+
+    scene = [{"x1": 200, "y1": 200, "x2": 300, "y2": 300}]
+
+    await mode.replace_object(
+        image_bytes=make_image(),
+        selected_bbox=make_bbox(),
+        replacement_image_bytes=make_image(),
+        scene_bboxes=scene
+    )
+
+    call_kwargs = mode._create_remove_mask.call_args.kwargs
+    assert call_kwargs.get('all_bboxes') == scene

@@ -84,27 +84,24 @@ class YoloLamaMode:
         return temp_path
     
     async def _create_remove_mask(
-        self,
-        image_bytes: bytes,
-        bbox: Dict[str, int],
-        expand_pixels: int = 10
+    self,
+    image_bytes: bytes,
+    bbox: Dict[str, int],
+    expand_pixels: int = 10,
+    all_bboxes: Optional[List[Dict[str, int]]] = None
     ) -> bytes:
         """
         Create a binary mask for object removal based on bbox.
 
-        The mask is used for inpainting (LaMa) to define the region
-        that should be removed. The bbox is optionally expanded to
-        avoid visible artifacts on object boundaries.
-
-        Process:
-            1. Load image to get dimensions
-            2. Generate mask via inpainter (bbox → mask)
-            3. Encode mask as PNG bytes
+        Passes all other detected bboxes to the inpainter so expansion
+        is safe and never overlaps neighboring objects.
 
         Args:
             image_bytes: Input image
             bbox: Target region {'x1','y1','x2','y2'}
-            expand_pixels: Pixels to expand bbox (for safer removal)
+            expand_pixels: Max pixels to expand bbox on each side
+            all_bboxes: All YOLO detections on this frame (including target).
+                        Used to compute safe expansion per side.
 
         Returns:
             PNG bytes of binary mask (255 = remove, 0 = keep)
@@ -113,10 +110,20 @@ class YoloLamaMode:
             img = Image.open(BytesIO(image_bytes))
             width, height = img.size
 
+            # Exclude the current target from the neighbors list
+            other_bboxes = [
+                b for b in (all_bboxes or [])
+                if not (
+                    b['x1'] == bbox['x1'] and b['y1'] == bbox['y1'] and
+                    b['x2'] == bbox['x2'] and b['y2'] == bbox['y2']
+                )
+            ] if all_bboxes else None
+
             mask = self.inpainter.create_remove_mask(
                 (height, width),
                 bbox,
-                expand_pixels=expand_pixels
+                expand_pixels=expand_pixels,
+                other_bboxes=other_bboxes
             )
 
             buf = BytesIO()
@@ -130,42 +137,52 @@ class YoloLamaMode:
         self,
         image_bytes: bytes,
         bboxes: List[Dict[str, int]],
-        expand_pixels: int = 8
+        expand_pixels: int = 8,
+        scene_bboxes: Optional[List[Dict[str, int]]] = None
     ) -> bytes:
         """
         Create combined binary mask from multiple bounding boxes.
-        
+
+        Each bbox is expanded safely: expansion on each side is limited by
+        the distance to the nearest *non-selected* bbox on the scene.
+        Note: selected bboxes don't constrain each other — they merge freely.
+
         Args:
-            1. image_bytes: Input image bytes (for size reference)
-            2. bboxes: List of bounding box dicts {'x1', 'y1', 'x2', 'y2'}
-            3. expand_pixels: Pixels to expand each mask beyond bbox edges (default: 5)
-        
-        Returns: Combined mask image bytes (PNG, grayscale - white = all masked regions)
+            image_bytes: Input image bytes (for size reference)
+            bboxes: List of target bboxes {'x1','y1','x2','y2'}
+            expand_pixels: Max expansion per side for each bbox (default: 8)
+
+        Returns:
+            Combined mask image bytes (PNG, grayscale)
         """
         def create_mask_sync():
-            
             img = Image.open(BytesIO(image_bytes))
             width, height = img.size
-            
             mask = np.zeros((height, width), dtype=np.uint8)
-            
-            # Union of all expanded bboxes
+
             for bbox in bboxes:
-                x1 = max(0, bbox['x1'] - expand_pixels)
-                y1 = max(0, bbox['y1'] - expand_pixels)
-                x2 = min(width, bbox['x2'] + expand_pixels)
-                y2 = min(height, bbox['y2'] + expand_pixels)
-                
-                mask[y1:y2, x1:x2] = 255
-            
+                external_obstacles = [
+                    b for b in (scene_bboxes or [])
+                    if not any(
+                        b['x1'] == s['x1'] and b['y1'] == s['y1']
+                        for s in bboxes
+                    )
+                ]
+
+                single_mask = self.inpainter.create_remove_mask(
+                    (height, width),
+                    bbox,
+                    expand_pixels=expand_pixels,
+                    other_bboxes=external_obstacles or None
+                )
+                mask = np.maximum(mask, single_mask)
+
             mask_img = Image.fromarray(mask, mode='L')
             buffer = BytesIO()
             mask_img.save(buffer, format='PNG')
-            
             return buffer.getvalue()
-        
-        mask_bytes = await asyncio.to_thread(create_mask_sync)
-        return mask_bytes
+
+        return await asyncio.to_thread(create_mask_sync)
     
     
     async def detect_objects(
@@ -236,7 +253,11 @@ class YoloLamaMode:
         image_bytes: bytes,
         selected_bbox: Dict[str, int],
         expand_mask_pixels: int = 30,
-        use_edge_blending: bool = True
+        use_edge_blending: bool = True,
+        scene_bboxes: Optional[List[Dict[str, int]]] = None,
+        ldm_steps: int = 25,
+        ldm_sampler: str = 'plms',
+        hd_strategy: str = 'CROP'
     ) -> Dict:
         """
         Remove object from image using LaMa inpainting.
@@ -262,7 +283,8 @@ class YoloLamaMode:
         mask_bytes = await self._create_remove_mask(
             image_bytes,
             selected_bbox,
-            expand_pixels=expand_mask_pixels
+            expand_pixels=expand_mask_pixels,
+            all_bboxes=scene_bboxes
         )
         
         # Run LaMa inpainting in REMOVE mode
@@ -270,7 +292,10 @@ class YoloLamaMode:
             image_bytes=image_bytes,
             mask_bytes=mask_bytes,
             mode=InpaintMode.REMOVE,
-            track_metrics=True
+            track_metrics=True,
+            ldm_steps=ldm_steps,
+            ldm_sampler=ldm_sampler,
+            hd_strategy=hd_strategy
         )
         
         result_bytes = inpaint_result['result_bytes']
@@ -296,9 +321,13 @@ class YoloLamaMode:
         selected_bbox: Optional[Dict[str, int]],
         replacement_image_bytes: bytes,
         expand_mask_pixels: int = 10,
-        use_color_matching: bool = True,
+        use_color_matching: bool = False,
         use_edge_blending: bool = False,
-        color_match_method: str = 'color_transfer'
+        color_match_method: str = 'color_transfer',
+        scene_bboxes: Optional[List[Dict[str, int]]] = None,
+        ldm_steps: int = 25,
+        ldm_sampler: str = 'plms',
+        hd_strategy: str = 'CROP'
     ) -> Dict:
         """
         Replace object in image with replacement image.
@@ -348,7 +377,8 @@ class YoloLamaMode:
         mask_bytes = await self._create_remove_mask(
             image_bytes,
             selected_bbox,
-            expand_pixels=expand_mask_pixels
+            expand_pixels=expand_mask_pixels,
+            all_bboxes=scene_bboxes
         )
  
         # LaMa — clean background (remove old object)
@@ -356,7 +386,10 @@ class YoloLamaMode:
             image_bytes=image_bytes,
             mask_bytes=mask_bytes,
             mode=InpaintMode.REMOVE,
-            track_metrics=True
+            track_metrics=True,
+            ldm_steps=ldm_steps,
+            ldm_sampler=ldm_sampler,
+            hd_strategy=hd_strategy
         )
         clean_bytes = inpaint_result['result_bytes']
         clean_bytes = await _normalize_size(clean_bytes, image_bytes)
@@ -387,7 +420,10 @@ class YoloLamaMode:
         image_bytes: bytes,
         selected_bboxes: List[Dict[str, int]],
         expand_mask_pixels: int = 5,
-        use_edge_blending: bool = True
+        use_edge_blending: bool = True,
+        ldm_steps: int = 25,
+        ldm_sampler: str = 'plms',
+        hd_strategy: str = 'CROP'
     ) -> Dict:
         """
         Remove multiple objects from image in one inpainting pass.
@@ -421,7 +457,10 @@ class YoloLamaMode:
             image_bytes=image_bytes,
             mask_bytes=mask_bytes,
             mode=InpaintMode.REMOVE,
-            track_metrics=True
+            track_metrics=True,
+            ldm_steps=ldm_steps,
+            ldm_sampler=ldm_sampler,
+            hd_strategy=hd_strategy
         )
         
         result_bytes = inpaint_result['result_bytes']
