@@ -52,7 +52,7 @@ class LaMaInpainter:
                 name='lama',
                 device=self.device # type: ignore
             )
-            self.config = Config(
+            self.default_config = Config(
                 ldm_steps=25,
                 ldm_sampler='plms',
                 hd_strategy=HDStrategy.CROP,
@@ -75,7 +75,10 @@ class LaMaInpainter:
         bbox: Optional[Dict[str, int]] = None,
         mode: InpaintMode = InpaintMode.REMOVE,
         replacement_image_bytes: Optional[bytes] = None,
-        track_metrics: bool = True
+        track_metrics: bool = True,
+        ldm_steps: int = 25,
+        ldm_sampler: str = 'plms',
+        hd_strategy: str = 'CROP'
     ) -> Dict:
         """
         Run inpainting on image.
@@ -109,6 +112,16 @@ class LaMaInpainter:
         if mode == InpaintMode.REPLACE and not replacement_image_bytes:
             raise ValueError("replacement_image_bytes required for REPLACE mode")
         
+        from lama_cleaner.schema import Config, HDStrategy
+        config = Config(
+            ldm_steps=ldm_steps,
+            ldm_sampler=ldm_sampler,
+            hd_strategy=getattr(HDStrategy, hd_strategy),
+            hd_strategy_crop_margin=32,
+            hd_strategy_crop_trigger_size=800,
+            hd_strategy_resize_limit=2048,
+        )
+
         start_time = time.time()
         
         # Run inpainting based on mode
@@ -116,14 +129,16 @@ class LaMaInpainter:
             result_bytes = await self._inpaint_remove(
                 image_bytes,
                 mask_bytes,
-                bbox
+                bbox,
+                config
             )
-        else:  # REPLACE
+        else:
             result_bytes = await self._inpaint_replace(
                 image_bytes,
                 mask_bytes,
                 bbox,
-                replacement_image_bytes # type: ignore
+                replacement_image_bytes,
+                config
             )
         
         processing_time = (time.time() - start_time) * 1000  # ms
@@ -150,7 +165,8 @@ class LaMaInpainter:
         self,
         image_bytes: bytes,
         mask_bytes: Optional[bytes] = None,
-        bbox: Optional[Dict[str, int]] = None
+        bbox: Optional[Dict[str, int]] = None,
+        config=None
     ) -> bytes:
         """
         Run REMOVE inpainting asynchronously.
@@ -166,7 +182,8 @@ class LaMaInpainter:
             self._inpaint_remove_sync,
             image_bytes,
             mask_bytes,
-            bbox
+            bbox,
+            config
         )
         return result_bytes
     
@@ -174,7 +191,8 @@ class LaMaInpainter:
         self,
         image_bytes: bytes,
         mask_bytes: Optional[bytes] = None,
-        bbox: Optional[Dict[str, int]] = None
+        bbox: Optional[Dict[str, int]] = None,
+        config = None
     ) -> bytes:
         """
         Run REMOVE inpainting synchronously (blocking).
@@ -208,7 +226,7 @@ class LaMaInpainter:
         result_array = self.model_manager(
             image=img_array,
             mask=mask_array,
-            config=self.config
+            config=config or self.default_config
         )
         
         if result_array.dtype != np.uint8:
@@ -228,7 +246,8 @@ class LaMaInpainter:
         image_bytes: bytes,
         mask_bytes: Optional[bytes],
         bbox: Optional[Dict[str, int]],
-        replacement_image_bytes: bytes
+        replacement_image_bytes: bytes,
+        config = None
     ) -> bytes:
         """
         Run REPLACE inpainting asynchronously.
@@ -246,7 +265,8 @@ class LaMaInpainter:
             image_bytes,
             mask_bytes,
             bbox,
-            replacement_image_bytes
+            replacement_image_bytes,
+            config
         )
         return result_bytes
     
@@ -255,7 +275,8 @@ class LaMaInpainter:
         image_bytes: bytes,
         mask_bytes: Optional[bytes],
         bbox: Optional[Dict[str, int]],
-        replacement_image_bytes: bytes
+        replacement_image_bytes: bytes,
+        config=None
     ) -> bytes:
         """
         Run REPLACE inpainting synchronously (blocking).
@@ -305,22 +326,32 @@ class LaMaInpainter:
 
         return buffer.getvalue()
     
-    def create_remove_mask(self, image_shape, bbox, expand_pixels=12):
+    def create_remove_mask(
+        self,
+        image_shape,
+        bbox,
+        expand_pixels=12,
+        other_bboxes=None
+    ):
         """
         Create a binary mask for object removal (inpainting).
 
-        The bbox is expanded to ensure full object coverage and avoid
-        visible edge artifacts during inpainting.
+        Expands bbox asymmetrically based on available free space on each side,
+        taking into account other detected bboxes to avoid overlapping them.
 
         Process:
-            - Expand bbox by expand_pixels
-            - Clamp to image boundaries
-            - Fill mask region with 255 (remove area)
+            - For each side, compute max safe expansion = distance to nearest
+            neighboring bbox on that side (with a small safety margin).
+            - Clamp expansion to [0, expand_pixels] on each side.
+            - Fill mask region with 255 (remove area).
 
         Args:
             image_shape: Tuple (H, W)
-            bbox: {'x1','y1','x2','y2'}
-            expand_pixels: Margin added around bbox
+            bbox: {'x1','y1','x2','y2'} — target object bbox
+            expand_pixels: Desired expansion on each side (hard upper limit)
+            other_bboxes: List of other detected bbox dicts to avoid overlapping.
+                        Each: {'x1','y1','x2','y2'}. Pass all YOLO detections
+                        except the current target.
 
         Returns:
             np.ndarray mask (H, W), uint8:
@@ -330,13 +361,59 @@ class LaMaInpainter:
         H, W = image_shape
         x1, y1, x2, y2 = bbox['x1'], bbox['y1'], bbox['x2'], bbox['y2']
 
-        x1 = max(0, x1 - expand_pixels)
-        y1 = max(0, y1 - expand_pixels)
-        x2 = min(W, x2 + expand_pixels)
-        y2 = min(H, y2 + expand_pixels)
+        # Safety margin — keep this gap between expanded mask and neighbor bbox
+        SAFETY_MARGIN = 3
+
+        # Default: expand freely up to expand_pixels on each side
+        exp_left  = expand_pixels
+        exp_right = expand_pixels
+        exp_top   = expand_pixels
+        exp_bottom = expand_pixels
+
+        if other_bboxes:
+            for ob in other_bboxes:
+                ox1, oy1, ox2, oy2 = ob['x1'], ob['y1'], ob['x2'], ob['y2']
+
+                # Check horizontal overlap (neighbor is vertically adjacent to target)
+                h_overlap = oy1 < y2 and oy2 > y1
+
+                # Check vertical overlap (neighbor is horizontally adjacent to target)
+                v_overlap = ox1 < x2 and ox2 > x1
+
+                if h_overlap:
+                    # Neighbor to the right
+                    if ox1 >= x2:
+                        gap = ox1 - x2
+                        safe = max(0, gap - SAFETY_MARGIN)
+                        exp_right = min(exp_right, safe)
+
+                    # Neighbor to the left
+                    if ox2 <= x1:
+                        gap = x1 - ox2
+                        safe = max(0, gap - SAFETY_MARGIN)
+                        exp_left = min(exp_left, safe)
+
+                if v_overlap:
+                    # Neighbor below
+                    if oy1 >= y2:
+                        gap = oy1 - y2
+                        safe = max(0, gap - SAFETY_MARGIN)
+                        exp_bottom = min(exp_bottom, safe)
+
+                    # Neighbor above
+                    if oy2 <= y1:
+                        gap = y1 - oy2
+                        safe = max(0, gap - SAFETY_MARGIN)
+                        exp_top = min(exp_top, safe)
+
+        # Apply asymmetric expansion, clamped to image boundaries
+        x1_exp = max(0, x1 - exp_left)
+        y1_exp = max(0, y1 - exp_top)
+        x2_exp = min(W, x2 + exp_right)
+        y2_exp = min(H, y2 + exp_bottom)
 
         mask = np.zeros((H, W), dtype=np.uint8)
-        mask[y1:y2, x1:x2] = 255
+        mask[y1_exp:y2_exp, x1_exp:x2_exp] = 255
 
         return mask
 
