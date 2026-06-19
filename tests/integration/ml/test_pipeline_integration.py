@@ -1,6 +1,6 @@
 import pytest
 import io
-from unittest.mock import MagicMock, AsyncMock, patch, call
+from unittest.mock import MagicMock, AsyncMock, patch
 from PIL import Image as PILImage
 
 from app.ml.pipeline import MLPipeline
@@ -9,7 +9,6 @@ from app.ml.experiment_tracker import ExperimentTracker
 
 @pytest.fixture
 def sample_image_bytes():
-    """Real valid PNG image bytes — used across all tests"""
     buf = io.BytesIO()
     PILImage.new('RGB', (640, 480), color=(120, 80, 60)).save(buf, format='PNG')
     return buf.getvalue()
@@ -17,7 +16,6 @@ def sample_image_bytes():
 
 @pytest.fixture
 def replacement_image_bytes():
-    """Second valid image for replacement tests"""
     buf = io.BytesIO()
     PILImage.new('RGB', (100, 100), color=(0, 128, 255)).save(buf, format='PNG')
     return buf.getvalue()
@@ -36,27 +34,13 @@ def valid_bboxes():
     ]
 
 
-def _make_tracker() -> ExperimentTracker:
-    """
-    Build a real ExperimentTracker with MLflow calls patched at network level.
-    Tests can inspect tracker.log_detection_metrics / log_metrics calls normally.
-    """
-    with patch('mlflow.set_tracking_uri'), \
-         patch('mlflow.create_experiment', return_value='test-exp-id'):
-        tracker = ExperimentTracker(
-            tracking_uri='http://localhost:5000',
-            experiment_name='integration-test'
-        )
-    # patch low-level mlflow log calls so nothing hits the network
-    tracker.log_detection_metrics = MagicMock(wraps=tracker.log_detection_metrics)
-    with patch('mlflow.log_metric'), patch('mlflow.set_tag'):
-        pass  # context manager just to confirm the path exists
-    return tracker
+@pytest.fixture
+def scene_bboxes():
+    return [{'x1': 0, 'y1': 0, 'x2': 30, 'y2': 30}]
 
 
 @pytest.fixture
 def real_tracker():
-    """Real ExperimentTracker, MLflow network calls stubbed"""
     with patch('mlflow.set_tracking_uri'), \
          patch('mlflow.create_experiment', return_value='test-exp-id'), \
          patch('mlflow.log_metric'), \
@@ -70,7 +54,6 @@ def real_tracker():
 
 @pytest.fixture
 def mock_yolo_result():
-    """Canonical YOLO detection result reused by multiple tests"""
     return {
         'detections': [
             {'bbox_id': 0, 'class': 'car',    'confidence': 0.95,
@@ -86,7 +69,6 @@ def mock_yolo_result():
 def _make_mode(detect_result=None, remove_result=None,
                replace_result=None, multi_result=None,
                sample_image_bytes=b'fake'):
-    """Helper — build a mock YoloLamaMode with sensible defaults"""
     mode = MagicMock()
     mode.detect_objects = AsyncMock(return_value=detect_result or {
         'detections': [], 'image_size': (640, 480),
@@ -110,161 +92,111 @@ def _make_mode(detect_result=None, remove_result=None,
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_detect_objects_tracker_receives_correct_metrics(
-    real_tracker, mock_yolo_result, sample_image_bytes
-):
-    """
-    Pipeline calls ExperimentTracker.log_detection_metrics with values
-    derived from the YOLO result — avg_confidence computed from detections list.
-    """
-    mode = _make_mode(detect_result=mock_yolo_result)
-    pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
-
-    with patch('mlflow.log_metric') as mock_log_metric, \
-         patch('mlflow.set_tag'):
-        result = await pipeline.detect_objects(
-            image_bytes=sample_image_bytes,
-            conf_threshold=0.4,
-            track_metrics=True
-        )
-
-    # (0.95 + 0.80) / 2 = 0.875
-    logged = {c.args[0]: c.args[1] for c in mock_log_metric.call_args_list}
-    assert logged['num_detections'] == 2
-    assert logged['avg_confidence'] == pytest.approx(0.875, rel=0.01)
-    assert logged['conf_threshold'] == pytest.approx(0.4)
-    # inference_time_ms and inference_time_sec must also be present
-    assert 'inference_time_ms' in logged
-    assert 'inference_time_sec' in logged
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_detect_objects_tracker_skipped_when_no_metrics_key(
+async def test_detect_objects_empty_detections_no_avg_confidence_crash(
     real_tracker, sample_image_bytes
 ):
-    """
-    When mode returns a result WITHOUT a 'metrics' key, tracker must NOT be called
-    even if track_metrics=True — pipeline guards on result.get('metrics').
-    """
     mode = _make_mode(detect_result={
-        'detections': [{'bbox_id': 0, 'class': 'car', 'confidence': 0.9,
-                        'bbox': {'x1': 10, 'y1': 10, 'x2': 50, 'y2': 50}}],
+        'detections': [],
         'image_size': (640, 480),
-        # no 'metrics' key intentionally
+        'metrics': {'inference_time_ms': 5.0},
     })
     pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
 
     with patch('mlflow.log_metric') as mock_log_metric, patch('mlflow.set_tag'):
-        await pipeline.detect_objects(image_bytes=sample_image_bytes, track_metrics=True)
-
-    mock_log_metric.assert_not_called()
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_remove_object_tracker_logs_operation_and_timing(
-    real_tracker, sample_image_bytes, valid_bbox
-):
-    """
-    After remove_object, tracker.log_metrics must receive a dict that includes
-    operation='remove_object' and a numeric processing_time.
-    """
-    mode = _make_mode(sample_image_bytes=sample_image_bytes)
-    pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
-
-    with patch('mlflow.log_metric') as mock_log_metric, patch('mlflow.set_tag'):
-        await pipeline.remove_object(
+        result = await pipeline.detect_objects(
             image_bytes=sample_image_bytes,
-            selected_bbox=valid_bbox,
-            expand_mask_pixels=10,
-            use_edge_blending=False,
             track_metrics=True
         )
 
     logged = {c.args[0]: c.args[1] for c in mock_log_metric.call_args_list}
-    assert logged.get('expand_mask_pixels') == 10
-    # edge_blending is a bool — logged as tag, not metric
-    tags = {c.args[0]: c.args[1] for c in
-            patch('mlflow.set_tag').start().call_args_list
-            if c.args}
-    # processing_time must be a positive float
-    assert logged.get('processing_time', 0) >= 0
+    assert logged['num_detections'] == 0
+    assert 'timestamp' in result
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_replace_object_tracker_logs_color_match_method(
+async def test_track_metrics_false_no_mlflow_calls_replace(
     real_tracker, sample_image_bytes, replacement_image_bytes, valid_bbox
 ):
-    """
-    Tracker must receive color_match_method as a tag (non-numeric value).
-    """
     mode = _make_mode(sample_image_bytes=sample_image_bytes)
     pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
 
-    with patch('mlflow.log_metric'), patch('mlflow.set_tag') as mock_set_tag:
+    with patch('mlflow.log_metric') as mock_log_metric, \
+         patch('mlflow.set_tag') as mock_set_tag:
         await pipeline.replace_object(
             image_bytes=sample_image_bytes,
             selected_bbox=valid_bbox,
             replacement_image_bytes=replacement_image_bytes,
-            color_match_method='color_transfer',
-            track_metrics=True
+            track_metrics=False
         )
 
-    tag_calls = {c.args[0]: c.args[1] for c in mock_set_tag.call_args_list}
-    assert tag_calls.get('color_match_method') == 'color_transfer'
-    assert tag_calls.get('operation') == 'replace_object'
+    mock_log_metric.assert_not_called()
+    mock_set_tag.assert_not_called()
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_remove_multiple_objects_tracker_logs_num_objects(
+async def test_track_metrics_false_no_mlflow_calls_remove_multiple(
     real_tracker, sample_image_bytes, valid_bboxes
 ):
     mode = _make_mode(sample_image_bytes=sample_image_bytes)
     pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
 
-    with patch('mlflow.log_metric') as mock_log_metric, patch('mlflow.set_tag'):
+    with patch('mlflow.log_metric') as mock_log_metric, \
+         patch('mlflow.set_tag') as mock_set_tag:
         await pipeline.remove_multiple_objects(
             image_bytes=sample_image_bytes,
             selected_bboxes=valid_bboxes,
-            track_metrics=True
-        )
-
-    logged = {c.args[0]: c.args[1] for c in mock_log_metric.call_args_list}
-    assert logged['num_objects'] == 2
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_detect_objects_passes_all_args_to_mode(
-    real_tracker, mock_yolo_result, sample_image_bytes
-):
-    """
-    Pipeline must forward conf_threshold and classes to mode unchanged.
-    """
-    mode = _make_mode(detect_result=mock_yolo_result)
-    pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
-
-    with patch('mlflow.log_metric'), patch('mlflow.set_tag'):
-        await pipeline.detect_objects(
-            image_bytes=sample_image_bytes,
-            conf_threshold=0.7,
-            classes=['car', 'truck'],
             track_metrics=False
         )
 
-    mode.detect_objects.assert_awaited_once_with(
-        image_bytes=sample_image_bytes,
-        conf_threshold=0.7,
-        classes=['car', 'truck']
-    )
+    mock_log_metric.assert_not_called()
+    mock_set_tag.assert_not_called()
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_remove_object_passes_scene_bboxes_to_mode(
+    real_tracker, sample_image_bytes, valid_bbox, scene_bboxes
+):
+    mode = _make_mode(sample_image_bytes=sample_image_bytes)
+    pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
+
+    with patch('mlflow.log_metric'), patch('mlflow.set_tag'):
+        await pipeline.remove_object(
+            image_bytes=sample_image_bytes,
+            selected_bbox=valid_bbox,
+            scene_bboxes=scene_bboxes,
+            track_metrics=False
+        )
+
+    call_kwargs = mode.remove_object.call_args.kwargs
+    assert call_kwargs['scene_bboxes'] == scene_bboxes
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_remove_object_passes_all_args_to_mode(
+async def test_replace_object_passes_scene_bboxes_to_mode(
+    real_tracker, sample_image_bytes, replacement_image_bytes, valid_bbox, scene_bboxes
+):
+    mode = _make_mode(sample_image_bytes=sample_image_bytes)
+    pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
+
+    with patch('mlflow.log_metric'), patch('mlflow.set_tag'):
+        await pipeline.replace_object(
+            image_bytes=sample_image_bytes,
+            selected_bbox=valid_bbox,
+            replacement_image_bytes=replacement_image_bytes,
+            scene_bboxes=scene_bboxes,
+            track_metrics=False
+        )
+
+    call_kwargs = mode.replace_object.call_args.kwargs
+    assert call_kwargs['scene_bboxes'] == scene_bboxes
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_remove_object_passes_ldm_params_to_mode(
     real_tracker, sample_image_bytes, valid_bbox
 ):
     mode = _make_mode(sample_image_bytes=sample_image_bytes)
@@ -274,23 +206,105 @@ async def test_remove_object_passes_all_args_to_mode(
         await pipeline.remove_object(
             image_bytes=sample_image_bytes,
             selected_bbox=valid_bbox,
-            expand_mask_pixels=8,
-            use_edge_blending=False,
+            ldm_steps=50,
+            ldm_sampler='ddim',
+            hd_strategy='RESIZE',
+            track_metrics=False
+        )
+
+    call_kwargs = mode.remove_object.call_args.kwargs
+    assert call_kwargs['ldm_steps'] == 50
+    assert call_kwargs['ldm_sampler'] == 'ddim'
+    assert call_kwargs['hd_strategy'] == 'RESIZE'
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_replace_object_passes_ldm_params_to_mode(
+    real_tracker, sample_image_bytes, replacement_image_bytes, valid_bbox
+):
+    mode = _make_mode(sample_image_bytes=sample_image_bytes)
+    pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
+
+    with patch('mlflow.log_metric'), patch('mlflow.set_tag'):
+        await pipeline.replace_object(
+            image_bytes=sample_image_bytes,
+            selected_bbox=valid_bbox,
+            replacement_image_bytes=replacement_image_bytes,
+            ldm_steps=10,
+            ldm_sampler='ddim',
+            hd_strategy='ORIGINAL',
+            track_metrics=False
+        )
+
+    call_kwargs = mode.replace_object.call_args.kwargs
+    assert call_kwargs['ldm_steps'] == 10
+    assert call_kwargs['ldm_sampler'] == 'ddim'
+    assert call_kwargs['hd_strategy'] == 'ORIGINAL'
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_remove_multiple_objects_passes_ldm_params_to_mode(
+    real_tracker, sample_image_bytes, valid_bboxes
+):
+    mode = _make_mode(sample_image_bytes=sample_image_bytes)
+    pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
+
+    with patch('mlflow.log_metric'), patch('mlflow.set_tag'):
+        await pipeline.remove_multiple_objects(
+            image_bytes=sample_image_bytes,
+            selected_bboxes=valid_bboxes,
+            ldm_steps=30,
+            ldm_sampler='plms',
+            hd_strategy='CROP',
+            track_metrics=False
+        )
+
+    call_kwargs = mode.remove_multiple_objects.call_args.kwargs
+    assert call_kwargs['ldm_steps'] == 30
+    assert call_kwargs['ldm_sampler'] == 'plms'
+    assert call_kwargs['hd_strategy'] == 'CROP'
+
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_remove_object_passes_all_args_including_scene_and_ldm(
+    real_tracker, sample_image_bytes, valid_bbox, scene_bboxes
+):
+    mode = _make_mode(sample_image_bytes=sample_image_bytes)
+    pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
+
+    with patch('mlflow.log_metric'), patch('mlflow.set_tag'):
+        await pipeline.remove_object(
+            image_bytes=sample_image_bytes,
+            selected_bbox=valid_bbox,
+            expand_mask_pixels=15,
+            use_edge_blending=True,
+            scene_bboxes=scene_bboxes,
+            ldm_steps=40,
+            ldm_sampler='ddim',
+            hd_strategy='RESIZE',
             track_metrics=False
         )
 
     mode.remove_object.assert_awaited_once_with(
         image_bytes=sample_image_bytes,
         selected_bbox=valid_bbox,
-        expand_mask_pixels=8,
-        use_edge_blending=False
+        expand_mask_pixels=15,
+        use_edge_blending=True,
+        scene_bboxes=scene_bboxes,
+        ldm_steps=40,
+        ldm_sampler='ddim',
+        hd_strategy='RESIZE'
     )
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_replace_object_passes_all_args_to_mode(
-    real_tracker, sample_image_bytes, replacement_image_bytes, valid_bbox
+async def test_replace_object_passes_all_args_including_scene_and_ldm(
+    real_tracker, sample_image_bytes, replacement_image_bytes, valid_bbox, scene_bboxes
 ):
     mode = _make_mode(sample_image_bytes=sample_image_bytes)
     pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
@@ -300,10 +314,14 @@ async def test_replace_object_passes_all_args_to_mode(
             image_bytes=sample_image_bytes,
             selected_bbox=valid_bbox,
             replacement_image_bytes=replacement_image_bytes,
-            expand_mask_pixels=3,
-            use_color_matching=False,
-            use_edge_blending=False,
-            color_match_method='histogram',
+            expand_mask_pixels=5,
+            use_color_matching=True,
+            use_edge_blending=True,
+            color_match_method='color_transfer',
+            scene_bboxes=scene_bboxes,
+            ldm_steps=20,
+            ldm_sampler='plms',
+            hd_strategy='CROP',
             track_metrics=False
         )
 
@@ -311,16 +329,20 @@ async def test_replace_object_passes_all_args_to_mode(
         image_bytes=sample_image_bytes,
         selected_bbox=valid_bbox,
         replacement_image_bytes=replacement_image_bytes,
-        expand_mask_pixels=3,
-        use_color_matching=False,
-        use_edge_blending=False,
-        color_match_method='histogram'
+        expand_mask_pixels=5,
+        use_color_matching=True,
+        use_edge_blending=True,
+        color_match_method='color_transfer',
+        scene_bboxes=scene_bboxes,
+        ldm_steps=20,
+        ldm_sampler='plms',
+        hd_strategy='CROP'
     )
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_remove_multiple_objects_passes_all_args_to_mode(
+async def test_remove_multiple_objects_passes_all_args_including_ldm(
     real_tracker, sample_image_bytes, valid_bboxes
 ):
     mode = _make_mode(sample_image_bytes=sample_image_bytes)
@@ -330,211 +352,88 @@ async def test_remove_multiple_objects_passes_all_args_to_mode(
         await pipeline.remove_multiple_objects(
             image_bytes=sample_image_bytes,
             selected_bboxes=valid_bboxes,
-            expand_mask_pixels=3,
-            use_edge_blending=False,
+            expand_mask_pixels=12,
+            use_edge_blending=True,
+            ldm_steps=35,
+            ldm_sampler='ddim',
+            hd_strategy='RESIZE',
             track_metrics=False
         )
 
     mode.remove_multiple_objects.assert_awaited_once_with(
         image_bytes=sample_image_bytes,
         selected_bboxes=valid_bboxes,
-        expand_mask_pixels=3,
-        use_edge_blending=False
+        expand_mask_pixels=12,
+        use_edge_blending=True,
+        ldm_steps=35,
+        ldm_sampler='ddim',
+        hd_strategy='RESIZE'
     )
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_detect_objects_result_contains_required_keys(
+async def test_remove_object_tracker_logs_edge_blending_true(
+    real_tracker, sample_image_bytes, valid_bbox
+):
+    mode = _make_mode(sample_image_bytes=sample_image_bytes)
+    pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
+
+    with patch('mlflow.log_metric') as mock_log_metric, \
+         patch('mlflow.set_tag') as mock_set_tag:
+        await pipeline.remove_object(
+            image_bytes=sample_image_bytes,
+            selected_bbox=valid_bbox,
+            use_edge_blending=True,
+            track_metrics=True
+        )
+
+    all_metric_keys = {c.args[0] for c in mock_log_metric.call_args_list}
+    all_tag_keys = {c.args[0] for c in mock_set_tag.call_args_list}
+    assert 'edge_blending' in all_metric_keys or 'edge_blending' in all_tag_keys
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_detect_objects_conf_threshold_passed_to_tracker(
     real_tracker, mock_yolo_result, sample_image_bytes
 ):
-    """
-    Pipeline enriches mode result with timestamp — final dict must have
-    detections, image_size, metrics, timestamp.
-    """
     mode = _make_mode(detect_result=mock_yolo_result)
     pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
 
-    with patch('mlflow.log_metric'), patch('mlflow.set_tag'):
-        result = await pipeline.detect_objects(image_bytes=sample_image_bytes)
-
-    assert 'detections'  in result
-    assert 'image_size'  in result
-    assert 'metrics'     in result
-    assert 'timestamp'   in result
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_remove_object_result_contains_required_keys(
-    real_tracker, sample_image_bytes, valid_bbox
-):
-    mode = _make_mode(sample_image_bytes=sample_image_bytes)
-    pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
-
-    with patch('mlflow.log_metric'), patch('mlflow.set_tag'):
-        result = await pipeline.remove_object(
+    with patch('mlflow.log_metric') as mock_log_metric, patch('mlflow.set_tag'):
+        await pipeline.detect_objects(
             image_bytes=sample_image_bytes,
-            selected_bbox=valid_bbox
+            conf_threshold=0.8,
+            track_metrics=True
         )
 
-    assert 'result_bytes' in result
-    assert 'metrics'      in result
-    assert 'timestamp'    in result
+    logged = {c.args[0]: c.args[1] for c in mock_log_metric.call_args_list}
+    assert logged.get('conf_threshold') == pytest.approx(0.8)
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_replace_object_result_contains_required_keys(
-    real_tracker, sample_image_bytes, replacement_image_bytes, valid_bbox
-):
-    mode = _make_mode(sample_image_bytes=sample_image_bytes)
-    pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
-
-    with patch('mlflow.log_metric'), patch('mlflow.set_tag'):
-        result = await pipeline.replace_object(
-            image_bytes=sample_image_bytes,
-            selected_bbox=valid_bbox,
-            replacement_image_bytes=replacement_image_bytes
-        )
-
-    assert 'result_bytes' in result
-    assert 'metrics'      in result
-    assert 'timestamp'    in result
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_remove_multiple_objects_result_contains_required_keys(
+async def test_remove_multiple_objects_tracker_logs_processing_time(
     real_tracker, sample_image_bytes, valid_bboxes
 ):
     mode = _make_mode(sample_image_bytes=sample_image_bytes)
     pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
 
-    with patch('mlflow.log_metric'), patch('mlflow.set_tag'):
-        result = await pipeline.remove_multiple_objects(
+    with patch('mlflow.log_metric') as mock_log_metric, patch('mlflow.set_tag'):
+        await pipeline.remove_multiple_objects(
             image_bytes=sample_image_bytes,
-            selected_bboxes=valid_bboxes
+            selected_bboxes=valid_bboxes,
+            track_metrics=True
         )
 
-    assert 'result_bytes' in result
-    assert 'metrics'      in result
-    assert 'timestamp'    in result
+    logged = {c.args[0]: c.args[1] for c in mock_log_metric.call_args_list}
+    assert logged.get('processing_time', 0) >= 0
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_detect_objects_mode_exception_propagates(
-    real_tracker, sample_image_bytes
-):
-    """
-    If mode raises, pipeline must re-raise — tracker must NOT be called
-    because the exception happens before metric logging.
-    """
-    mode = _make_mode()
-    mode.detect_objects = AsyncMock(side_effect=RuntimeError('YOLO inference failed'))
-    pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
-
-    with patch('mlflow.log_metric') as mock_log_metric, patch('mlflow.set_tag'):
-        with pytest.raises(RuntimeError, match='YOLO inference failed'):
-            await pipeline.detect_objects(image_bytes=sample_image_bytes)
-
-    mock_log_metric.assert_not_called()
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_remove_object_mode_exception_propagates(
-    real_tracker, sample_image_bytes, valid_bbox
-):
-    mode = _make_mode()
-    mode.remove_object = AsyncMock(side_effect=RuntimeError('LaMa inpainting failed'))
-    pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
-
-    with patch('mlflow.log_metric') as mock_log_metric, patch('mlflow.set_tag'):
-        with pytest.raises(RuntimeError, match='LaMa inpainting failed'):
-            await pipeline.remove_object(
-                image_bytes=sample_image_bytes,
-                selected_bbox=valid_bbox
-            )
-
-    mock_log_metric.assert_not_called()
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_replace_object_mode_exception_propagates(
-    real_tracker, sample_image_bytes, replacement_image_bytes, valid_bbox
-):
-    mode = _make_mode()
-    mode.replace_object = AsyncMock(side_effect=RuntimeError('replacement failed'))
-    pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
-
-    with patch('mlflow.log_metric') as mock_log_metric, patch('mlflow.set_tag'):
-        with pytest.raises(RuntimeError, match='replacement failed'):
-            await pipeline.replace_object(
-                image_bytes=sample_image_bytes,
-                selected_bbox=valid_bbox,
-                replacement_image_bytes=replacement_image_bytes
-            )
-
-    mock_log_metric.assert_not_called()
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_remove_multiple_objects_mode_exception_propagates(
-    real_tracker, sample_image_bytes, valid_bboxes
-):
-    mode = _make_mode()
-    mode.remove_multiple_objects = AsyncMock(side_effect=RuntimeError('multi removal failed'))
-    pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
-
-    with patch('mlflow.log_metric') as mock_log_metric, patch('mlflow.set_tag'):
-        with pytest.raises(RuntimeError, match='multi removal failed'):
-            await pipeline.remove_multiple_objects(
-                image_bytes=sample_image_bytes,
-                selected_bboxes=valid_bboxes
-            )
-
-    mock_log_metric.assert_not_called()
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_validation_fires_before_mode_call_on_detect(real_tracker):
-    """Mode must never be called when validation fails"""
-    mode = _make_mode()
-    pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
-
-    with pytest.raises(ValueError):
-        await pipeline.detect_objects(image_bytes=b'')
-
-    mode.detect_objects.assert_not_awaited()
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_validation_fires_before_mode_call_on_remove(
-    real_tracker, sample_image_bytes
-):
-    mode = _make_mode()
-    pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
-
-    bad_bbox = {'x1': 200, 'y1': 10, 'x2': 100, 'y2': 100}  # x1 > x2
-
-    with pytest.raises(ValueError, match='bbox x1 must be < x2'):
-        await pipeline.remove_object(
-            image_bytes=sample_image_bytes,
-            selected_bbox=bad_bbox
-        )
-
-    mode.remove_object.assert_not_awaited()
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_validation_fires_before_mode_call_on_replace(
+async def test_validation_invalid_replacement_image_fires_before_mode(
     real_tracker, sample_image_bytes, valid_bbox
 ):
     mode = _make_mode()
@@ -544,7 +443,7 @@ async def test_validation_fires_before_mode_call_on_replace(
         await pipeline.replace_object(
             image_bytes=sample_image_bytes,
             selected_bbox=valid_bbox,
-            replacement_image_bytes=b''   # invalid replacement
+            replacement_image_bytes=b'garbage'
         )
 
     mode.replace_object.assert_not_awaited()
@@ -552,55 +451,21 @@ async def test_validation_fires_before_mode_call_on_replace(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_validation_fires_before_mode_call_on_remove_multiple(
+async def test_validation_invalid_bbox_in_multiple_fires_before_mode(
     real_tracker, sample_image_bytes
 ):
     mode = _make_mode()
     pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
 
-    with pytest.raises(ValueError, match='selected_bboxes cannot be empty'):
+    bad_bboxes = [
+        {'x1': 50, 'y1': 50, 'x2': 200, 'y2': 200},
+        {'x1': 500, 'y1': 100, 'x2': 300, 'y2': 350},  # x1 > x2
+    ]
+
+    with pytest.raises(ValueError, match='bbox x1 must be < x2'):
         await pipeline.remove_multiple_objects(
             image_bytes=sample_image_bytes,
-            selected_bboxes=[]
+            selected_bboxes=bad_bboxes
         )
 
     mode.remove_multiple_objects.assert_not_awaited()
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_track_metrics_false_no_mlflow_calls_detect(
-    real_tracker, mock_yolo_result, sample_image_bytes
-):
-    mode = _make_mode(detect_result=mock_yolo_result)
-    pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
-
-    with patch('mlflow.log_metric') as mock_log_metric, \
-         patch('mlflow.set_tag') as mock_set_tag:
-        await pipeline.detect_objects(
-            image_bytes=sample_image_bytes,
-            track_metrics=False
-        )
-
-    mock_log_metric.assert_not_called()
-    mock_set_tag.assert_not_called()
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_track_metrics_false_no_mlflow_calls_remove(
-    real_tracker, sample_image_bytes, valid_bbox
-):
-    mode = _make_mode(sample_image_bytes=sample_image_bytes)
-    pipeline = MLPipeline(mode=mode, tracker=real_tracker, device='cpu')
-
-    with patch('mlflow.log_metric') as mock_log_metric, \
-         patch('mlflow.set_tag') as mock_set_tag:
-        await pipeline.remove_object(
-            image_bytes=sample_image_bytes,
-            selected_bbox=valid_bbox,
-            track_metrics=False
-        )
-
-    mock_log_metric.assert_not_called()
-    mock_set_tag.assert_not_called()

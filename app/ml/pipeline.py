@@ -1,5 +1,4 @@
 import asyncio
-from tracemalloc import start
 from typing import Optional, List, Dict, Literal
 from io import BytesIO
 from datetime import datetime
@@ -7,7 +6,6 @@ import time
 
 from PIL import Image
 
-from app.ml.modes import yolo_lama_mode
 from app.ml.modes.yolo_lama_mode import YoloLamaMode, get_yolo_lama_mode
 from app.ml.experiment_tracker import ExperimentTracker, get_tracker
 
@@ -124,9 +122,13 @@ class MLPipeline:
         self,
         image_bytes: bytes,
         selected_bbox: Dict[str, int],
-        expand_mask_pixels: int = 5,
+        expand_mask_pixels: int = 10,
         use_edge_blending: bool = True,
-        track_metrics: bool = True
+        track_metrics: bool = True,
+        scene_bboxes: Optional[List[Dict[str, int]]] = None,
+        ldm_steps: int = 25,
+        ldm_sampler: str = 'plms',
+        hd_strategy: str = 'CROP',
     ) -> Dict:
         
         """
@@ -161,10 +163,14 @@ class MLPipeline:
             
             # Run removal
             result = await self.mode.remove_object(
-                image_bytes = image_bytes,
-                selected_bbox = selected_bbox,
-                expand_mask_pixels = expand_mask_pixels,
-                use_edge_blending = use_edge_blending
+                image_bytes=image_bytes,
+                selected_bbox=selected_bbox,
+                expand_mask_pixels=expand_mask_pixels,
+                use_edge_blending=use_edge_blending,
+                scene_bboxes=scene_bboxes,
+                ldm_steps=ldm_steps,
+                ldm_sampler=ldm_sampler,
+                hd_strategy=hd_strategy
             )
 
             # Add timestamp
@@ -191,11 +197,15 @@ class MLPipeline:
         image_bytes: bytes,
         selected_bbox: Dict[str, int],
         replacement_image_bytes: bytes,
-        expand_mask_pixels: int = 0,
+        expand_mask_pixels: int = 25,
         use_color_matching: bool = True,
         use_edge_blending: bool = True,
         color_match_method: Literal['mean_std', 'histogram', 'color_transfer'] = 'mean_std',
-        track_metrics: bool = True
+        scene_bboxes: Optional[List[Dict[str, int]]] = None,
+        track_metrics: bool = True,
+        ldm_steps: int = 25,
+        ldm_sampler: str = 'plms',
+        hd_strategy: str = 'CROP',
     ) -> Dict:
         
         """
@@ -238,13 +248,17 @@ class MLPipeline:
             
             # Run replacement
             result = await self.mode.replace_object(
-                image_bytes = image_bytes,
-                selected_bbox = selected_bbox,
-                replacement_image_bytes = replacement_image_bytes,
-                expand_mask_pixels = expand_mask_pixels,
-                use_color_matching = use_color_matching,
-                use_edge_blending = use_edge_blending,
-                color_match_method = color_match_method
+                image_bytes=image_bytes,
+                selected_bbox=selected_bbox,
+                replacement_image_bytes=replacement_image_bytes,
+                expand_mask_pixels=expand_mask_pixels,
+                use_color_matching=use_color_matching,
+                use_edge_blending=use_edge_blending,
+                color_match_method=color_match_method,
+                scene_bboxes=scene_bboxes,
+                ldm_steps=ldm_steps,
+                ldm_sampler=ldm_sampler,
+                hd_strategy=hd_strategy
             )
             
             # Add timestamp
@@ -272,9 +286,13 @@ class MLPipeline:
         self,
         image_bytes: bytes,
         selected_bboxes: List[Dict[str, int]],
-        expand_mask_pixels: int = 5,
+        expand_mask_pixels: int = 10,
         use_edge_blending: bool = True,
-        track_metrics: bool = True
+        scene_bboxes: Optional[List[Dict[str, int]]] = None,
+        track_metrics: bool = True,
+        ldm_steps: int = 25,
+        ldm_sampler: str = 'plms',
+        hd_strategy: str = 'CROP',
     ) -> Dict:
     
         """
@@ -317,7 +335,10 @@ class MLPipeline:
                 image_bytes = image_bytes,
                 selected_bboxes = selected_bboxes,
                 expand_mask_pixels = expand_mask_pixels,
-                use_edge_blending = use_edge_blending
+                use_edge_blending = use_edge_blending,
+                ldm_steps=ldm_steps,
+                ldm_sampler=ldm_sampler,
+                hd_strategy=hd_strategy
             )
             
             result['timestamp'] = datetime.now().isoformat()
