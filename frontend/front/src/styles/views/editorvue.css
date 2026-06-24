@@ -1,0 +1,121 @@
+.editor-page {
+  --bg: #f4f3f0;
+  --bg-panel: #ffffff;
+  --bg-sidebar: #fafaf8;
+  --bg-toolbar: #f0efe9;
+  --bg-canvas: #e8e6e0;
+  --border: #e0ddd8;
+  --border-subtle: #ebe8e2;
+  --text-primary: #1a1917;
+  --text-secondary: #6b6762;
+  --text-muted: #a09d99;
+  --accent: #7dc200;
+  --accent-bright: #b3f000;
+  --btn-primary-bg: #1a1917;
+  --btn-primary-text: #f4f3f0;
+  --danger: #e53e3e;
+  --danger-bg: rgba(229, 62, 62, 0.1);
+  --radius: 6px;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: 'DM Sans', 'Outfit', 'Helvetica Neue', sans-serif;
+  transition: background 0.2s, color 0.2s;
+}
+
+.editor-page.dark {
+  --bg: #111110;
+  --bg-panel: #1a1917;
+  --bg-sidebar: #161513;
+  --bg-toolbar: #141310;
+  --bg-canvas: #0d0c0b;
+  --border: #2a2825;
+  --border-subtle: #201f1c;
+  --text-primary: #e8e5e0;
+  --text-secondary: #8a8580;
+  --text-muted: #555250;
+  --accent: #b3f000;
+  --accent-bright: #c8ff00;
+  --btn-primary-bg: #b3f000;
+  --btn-primary-text: #0d1a00;
+  --danger: #ff6b6b;
+  --danger-bg: rgba(255, 107, 107, 0.1);
+}
+
+.editor-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  height: calc(100vh - 48px);
+}
+
+.action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius);
+  border: none;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  width: 100%;
+  transition: opacity 0.15s, background 0.15s;
+}
+.action-btn.danger {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+}
+.action-btn.danger:hover:not(:disabled) {
+  background: var(--danger);
+  color: #fff;
+}
+.action-btn.accent {
+  background: var(--accent);
+  color: var(--btn-primary-text);
+}
+.action-btn.accent:hover:not(:disabled) { filter: brightness(1.1); }
+.action-btn:disabled { opacity: 0.4; cursor: default; }
+
+.section-header {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.badge {
+  background: var(--accent);
+  color: var(--btn-primary-text);
+  border-radius: 3px;
+  padding: 0.1rem 0.35rem;
+  font-size: 0.65rem;
+  font-weight: 700;
+}
+
+.center-full {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.spinner {
+  width: 28px;
+  height: 28px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }

@@ -1,0 +1,35 @@
+# dependencies
+node_modules/
+
+# build
+dist/
+
+# env
+.env
+.env.*
+!.env.example
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.vscode/
+
+.idea/
+public/
+# coverage
+coverage/
+
+# tests
+.nyc_output/
+
+# vite
+vite.svg
+
+# typescript
+*.tsbuildinfo

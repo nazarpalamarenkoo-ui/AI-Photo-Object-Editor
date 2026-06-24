@@ -1,0 +1,116 @@
+.dashboard {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.navbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 2rem;
+  height: 60px;
+  background: var(--p-surface-0);
+  border-bottom: 1px solid var(--p-surface-200);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.navbar-left {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.navbar-logo {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--p-primary-500);
+}
+
+.navbar-right {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.navbar-user {
+  font-size: 0.9rem;
+  color: var(--p-surface-600);
+}
+
+.content {
+  flex: 1;
+  max-width: 680px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+.profile-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.card {
+  background: var(--p-surface-0);
+  border: 1px solid var(--p-surface-200);
+  border-radius: 12px;
+  padding: 2rem;
+}
+
+.card-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-bottom: 1.5rem;
+  color: var(--p-surface-900);
+}
+
+.profile-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.field label {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--p-surface-700);
+}
+
+.field :deep(.p-inputtext),
+.field :deep(.p-password-input) {
+  width: 100%;
+}
+
+.field :deep(.p-password) {
+  width: 100%;
+}
+
+.error-msg {
+  color: var(--p-red-500);
+  font-size: 0.8rem;
+  min-height: 1rem;
+}
+
+.danger-card {
+  border-color: var(--p-red-200);
+}
+
+.danger-title {
+  color: var(--p-red-500);
+}
+
+.danger-text {
+  color: var(--p-surface-500);
+  font-size: 0.9rem;
+  margin-bottom: 1.25rem;
+}

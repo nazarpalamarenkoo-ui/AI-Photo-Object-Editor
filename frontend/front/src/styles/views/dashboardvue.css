@@ -1,0 +1,54 @@
+.dashboard {
+  --bg: #f4f3f0;
+  --bg-panel: #ffffff;
+  --bg-card: #ffffff;
+  --bg-card-hover: #f9f8f6;
+  --border: #e4e2de;
+  --border-subtle: #ede9e4;
+  --text-primary: #1a1917;
+  --text-secondary: #6b6762;
+  --text-muted: #a09d99;
+  --accent: #b3f000;
+  --accent-text: #2d3a00;
+  --accent-hover: #c8ff00;
+  --btn-primary-bg: #1a1917;
+  --btn-primary-text: #f4f3f0;
+  --btn-primary-hover: #2d2b28;
+  --danger: #e53e3e;
+  --radius: 8px;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: 'DM Sans', 'Outfit', 'Helvetica Neue', sans-serif;
+  transition: background 0.2s, color 0.2s;
+}
+
+.dashboard.dark {
+  --bg: #111110;
+  --bg-panel: #1a1917;
+  --bg-card: #1e1d1b;
+  --bg-card-hover: #252320;
+  --border: #2a2825;
+  --border-subtle: #232220;
+  --text-primary: #e8e5e0;
+  --text-secondary: #8a8580;
+  --text-muted: #555250;
+  --btn-primary-bg: #b3f000;
+  --btn-primary-text: #1a1a00;
+  --btn-primary-hover: #c8ff00;
+}
+
+.spinner {
+  width: 28px;
+  height: 28px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
