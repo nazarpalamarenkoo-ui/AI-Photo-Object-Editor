@@ -1,0 +1,132 @@
+import time
+from typing import Dict, List, Optional, Tuple
+from datetime import datetime
+
+from app.ml.modes.sam_lama_mode import SAMLamaMode
+from app.ml.experiment_tracker import ExperimentTracker
+from app.ml.pipeline.validator import Validator
+
+
+class SegmentationMixin:
+    sam_lama_mode: SAMLamaMode
+    tracker: ExperimentTracker
+    validator: Validator
+
+    async def sam_segment_objects(
+        self,
+        image_bytes: bytes,
+        min_area: int = 500,
+        max_segments: int = 50,
+        track_metrics: bool = True,
+    ) -> Dict:
+        """
+        Auto-segmentation of the entire image using SAM2 (no prompts).
+
+        Args:
+            image_bytes:    Input image bytes
+            min_area:       Minimum segment area in pixels (noise filter, default: 500)
+            max_segments:   Maximum number of segments in response (default: 50)
+            track_metrics:  Track metrics to MLflow (default: True)
+
+        Returns:
+            Dict:
+                - segments:    List[Dict] — bbox, area, mask_bytes, mask_id, bbox_id,
+                                           stability_score, predicted_iou
+                - metrics:     Dict
+                - image_size:  Tuple[int, int] — (W, H)
+                - timestamp:   str
+        """
+        start_time = time.time()
+
+        try:
+            self.validator.validate_image_bytes(image_bytes)
+
+            result = await self.sam_lama_mode.segment_objects(
+                image_bytes=image_bytes,
+                min_area=min_area,
+                max_segments=max_segments,
+            )
+
+            result["timestamp"] = datetime.now().isoformat()
+
+            if track_metrics:
+                self.tracker.log_metrics({
+                    "operation": "sam_segment_auto",
+                    "num_segments": len(result["segments"]),
+                    "processing_time": time.time() - start_time,
+                    "min_area": min_area,
+                })
+
+            return result
+
+        except Exception as e:
+            print(f"SAM auto-segmentation failed: {e}")
+            raise
+
+    async def sam_segment_with_prompt(
+        self,
+        image_bytes: bytes,
+        point_coords: Optional[List[Tuple[int, int]]] = None,
+        point_labels: Optional[List[int]] = None,
+        bbox: Optional[Dict[str, int]] = None,
+        track_metrics: bool = True,
+    ) -> Dict:
+        """
+        Prompt-based segmentation using SAM2 (points and/or bounding box).
+
+        At least one of point_coords or bbox must be provided.
+
+        Args:
+            image_bytes:    Input image bytes
+            point_coords:   List of points [(x, y), ...]
+            point_labels:   1 = foreground, 0 = background for each point
+            bbox:           {'x1','y1','x2','y2'} — used as a spatial prompt
+            track_metrics:  Track metrics to MLflow (default: True)
+
+        Returns:
+            Dict:
+                - segments:    List[Dict] — sorted by stability_score descending;
+                               each entry: bbox, area, mask_bytes, mask_id, bbox_id,
+                               stability_score, predicted_iou
+                - metrics:     Dict
+                - image_size:  Tuple[int, int] — (W, H)
+                - timestamp:   str
+        """
+        start_time = time.time()
+
+        try:
+            self.validator.validate_image_bytes(image_bytes)
+
+            if point_coords is None and bbox is None:
+                raise ValueError("Provide at least one of: point_coords or bbox")
+
+            if point_coords is not None and point_labels is not None:
+                if len(point_coords) != len(point_labels):
+                    raise ValueError("point_coords and point_labels must have the same length")
+
+            if bbox is not None:
+                self.validator.validate_bbox(bbox)
+
+            result = await self.sam_lama_mode.segment_with_prompt(
+                image_bytes=image_bytes,
+                point_coords=point_coords,
+                point_labels=point_labels,
+                bbox=bbox,
+            )
+
+            result["timestamp"] = datetime.now().isoformat()
+
+            if track_metrics:
+                self.tracker.log_metrics({
+                    "operation": "sam_segment_prompt",
+                    "num_segments": len(result["segments"]),
+                    "processing_time": time.time() - start_time,
+                    "has_points": point_coords is not None,
+                    "has_bbox": bbox is not None,
+                })
+
+            return result
+
+        except Exception as e:
+            print(f"SAM prompt segmentation failed: {e}")
+            raise
