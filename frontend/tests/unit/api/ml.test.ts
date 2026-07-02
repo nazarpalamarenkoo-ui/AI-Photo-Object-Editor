@@ -1,13 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { MLResultResponse, LdmConfig, Image } from '@/types/Index'
+import type {
+  SegmentResponse,
+  ExtractResponse,
+  PasteResponse,
+  MLResultResponse,
+  LdmConfig,
+} from '@/types/Index'
 
 vi.mock('@/api/clients', () => ({
   default: {
     get: vi.fn(),
     post: vi.fn(),
     patch: vi.fn(),
-    delete: vi.fn()
-  }
+    delete: vi.fn(),
+  },
 }))
 
 import apiClient from '@/api/clients'
@@ -15,159 +21,190 @@ import { mlApi, PRESETS } from '@/api/ml'
 
 const mockedClient = vi.mocked(apiClient, true)
 
+const qualityLdm: LdmConfig = { ldm_steps: 25, ldm_sampler: 'plms', hd_strategy: 'CROP' }
+const fastLdm: LdmConfig = { ldm_steps: 10, ldm_sampler: 'plms', hd_strategy: 'CROP' }
+
+const fakeSegmentResponse: SegmentResponse = {
+  segments: [
+    {
+      mask_id: 0,
+      bbox_id: 0,
+      bbox: { x1: 10, y1: 10, x2: 100, y2: 200 },
+      area: 9000,
+      stability_score: 0.95,
+    },
+  ],
+  metrics: { num_segments: 1, avg_stability: 0.95 },
+  image_size: [640, 480],
+  timestamp: '2026-01-01T00:00:00Z',
+}
+
+const fakeExtractResponse: ExtractResponse = {
+  extracted_url: 's3://bucket/extracted.png',
+  presigned_url: 'https://storage.example.com/extracted.png?sig=abc',
+  object_size: [90, 190],
+  area_pixels: 12000,
+  cropped_bbox: { x1: 2, y1: 2, x2: 92, y2: 192 },
+  timestamp: '2026-01-01T00:00:00Z',
+}
+
+const fakePasteResponse: PasteResponse = {
+  result_url: 's3://bucket/pasted.jpg',
+  presigned_url: 'https://storage.example.com/pasted.jpg?sig=xyz',
+  paste_bbox: { x1: 50, y1: 60, x2: 140, y2: 250 },
+  object_size: [90, 190],
+  timestamp: '2026-01-01T00:00:00Z',
+}
+
 const fakeMLResult: MLResultResponse = {
   result_url: 's3://bucket/result.jpg',
   presigned_url: 'https://storage.example.com/result.jpg?sig=abc',
-  metrics: { processing_time_ms: 250.5, mask_size_pixels: 10000 },
-  timestamp: '2026-01-01T00:00:00Z'
+  metrics: { processing_time_ms: 250.5 },
+  timestamp: '2026-01-01T00:00:00Z',
 }
-
-const fakeSavedImage: Image = {
-  id: 99,
-  filename: 'edited_photo.jpg',
-  storage_path: 'saved/1/99/result.jpg',
-  status: 'processed',
-  uploaded_at: '2026-01-01T00:00:00Z',
-  user_id: 1
-}
-
-const fakeUndoRedo = {
-  presigned_url: 'https://storage.example.com/undo.jpg?sig=xyz',
-  label: 'remove bbox_id=5',
-  history: ['remove bbox_id=5', 'replace bbox_id=2']
-}
-
-const qualityLdm: LdmConfig = { ldm_steps: 25, ldm_sampler: 'plms', hd_strategy: 'CROP' }
-const fastLdm: LdmConfig = { ldm_steps: 10, ldm_sampler: 'plms', hd_strategy: 'CROP' }
 
 beforeEach(() => {
   vi.clearAllMocks()
 })
 
+describe('mlApi: segmentObjects', () => {
+  it('posts to correct url with default params', async () => {
+    mockedClient.post.mockResolvedValue({ data: fakeSegmentResponse })
 
-describe('PRESETS', () => {
-  it('has fast preset with 10 steps', () => {
-    expect(PRESETS.fast.ldm_steps).toBe(10)
-    expect(PRESETS.fast.ldm_sampler).toBe('plms')
-    expect(PRESETS.fast.hd_strategy).toBe('CROP')
-  })
-
-  it('has quality preset with 25 steps', () => {
-    expect(PRESETS.quality.ldm_steps).toBe(25)
-    expect(PRESETS.quality.ldm_sampler).toBe('plms')
-    expect(PRESETS.quality.hd_strategy).toBe('CROP')
-  })
-})
-
-
-describe('mlApi: detectObjects', () => {
-  it('posts to correct url with params', async () => {
-    mockedClient.post.mockResolvedValue({ data: { detections: [], metrics: {} } })
-
-    await mlApi.detectObjects(42, { conf_threshold: 0.7 })
+    await mlApi.segmentObjects(1)
 
     expect(mockedClient.post).toHaveBeenCalledWith(
-      '/ml/images/42/detect',
-      { conf_threshold: 0.7 }
+      '/ml/images/1/segment',
+      { min_area: 500, max_segments: 50 }
     )
   })
 
-  it('uses empty params by default', async () => {
-    mockedClient.post.mockResolvedValue({ data: { detections: [] } })
+  it('passes custom minArea and maxSegments', async () => {
+    mockedClient.post.mockResolvedValue({ data: fakeSegmentResponse })
 
-    await mlApi.detectObjects(1)
+    await mlApi.segmentObjects(1, 1000, 10)
 
-    expect(mockedClient.post).toHaveBeenCalledWith('/ml/images/1/detect', {})
+    expect(mockedClient.post).toHaveBeenCalledWith(
+      '/ml/images/1/segment',
+      { min_area: 1000, max_segments: 10 }
+    )
   })
 
-  it('returns detection result', async () => {
-    const fakeDetect = { detections: [{ bbox_id: 0, detected_class: 'person' }], metrics: {} }
-    mockedClient.post.mockResolvedValue({ data: fakeDetect })
+  it('returns SegmentResponse', async () => {
+    mockedClient.post.mockResolvedValue({ data: fakeSegmentResponse })
 
-    const result = await mlApi.detectObjects(1)
+    const result = await mlApi.segmentObjects(1)
 
-    expect(result).toEqual(fakeDetect)
+    expect(result).toEqual(fakeSegmentResponse)
   })
 
   it('propagates error', async () => {
-    mockedClient.post.mockRejectedValue(new Error('detection failed'))
+    mockedClient.post.mockRejectedValue(new Error('segmentation failed'))
 
-    await expect(mlApi.detectObjects(1)).rejects.toThrow('detection failed')
+    await expect(mlApi.segmentObjects(1)).rejects.toThrow('segmentation failed')
   })
 })
 
+describe('mlApi: segmentWithPrompt', () => {
+  it('posts point_coords and point_labels', async () => {
+    mockedClient.post.mockResolvedValue({ data: fakeSegmentResponse })
 
-describe('mlApi: removeObject', () => {
-  it('posts to correct url with default params', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
-
-    await mlApi.removeObject(1, 5)
+    await mlApi.segmentWithPrompt(1, {
+      pointCoords: [[120, 340]],
+      pointLabels: [1],
+    })
 
     expect(mockedClient.post).toHaveBeenCalledWith(
-      '/ml/images/1/remove/5',
+      '/ml/images/1/segment/prompt',
       {
-        expand_mask_pixels: 5,
-        use_edge_blending: false,
-        ldm: qualityLdm
+        point_coords: [[120, 340]],
+        point_labels: [1],
+        bbox: undefined,
       }
     )
   })
 
-  it('passes custom expandMaskPixels and useEdgeBlending', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+  it('posts bbox prompt', async () => {
+    mockedClient.post.mockResolvedValue({ data: fakeSegmentResponse })
 
-    await mlApi.removeObject(2, 3, 10, true)
+    await mlApi.segmentWithPrompt(1, {
+      bbox: { x1: 10, y1: 10, x2: 100, y2: 100 },
+    })
 
     const [, body] = mockedClient.post.mock.calls[0]
-    expect((body as any).expand_mask_pixels).toBe(10)
-    expect((body as any).use_edge_blending).toBe(true)
+    expect((body as any).bbox).toEqual({ x1: 10, y1: 10, x2: 100, y2: 100 })
+    expect((body as any).point_coords).toBeUndefined()
   })
 
-  it('passes custom ldm config', async () => {
+  it('returns SegmentResponse', async () => {
+    mockedClient.post.mockResolvedValue({ data: fakeSegmentResponse })
+
+    const result = await mlApi.segmentWithPrompt(1, { pointCoords: [[1, 1]], pointLabels: [1] })
+
+    expect(result).toEqual(fakeSegmentResponse)
+  })
+
+  it('propagates error', async () => {
+    mockedClient.post.mockRejectedValue(new Error('prompt segmentation failed'))
+
+    await expect(
+      mlApi.segmentWithPrompt(1, { pointCoords: [[1, 1]], pointLabels: [1] })
+    ).rejects.toThrow('prompt segmentation failed')
+  })
+})
+
+describe('mlApi: samRemoveObject', () => {
+  it('posts to correct url with default params', async () => {
     mockedClient.post.mockResolvedValue({ data: fakeMLResult })
 
-    await mlApi.removeObject(1, 0, 5, false, fastLdm)
+    await mlApi.samRemoveObject(1, 3)
+
+    expect(mockedClient.post).toHaveBeenCalledWith(
+      '/ml/images/1/segment/3/remove',
+      {
+        expand_mask_pixels: 12,
+        use_edge_blending: true,
+        ldm: qualityLdm,
+      }
+    )
+  })
+
+  it('passes custom expandMaskPixels, useEdgeBlending and ldm', async () => {
+    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+
+    await mlApi.samRemoveObject(1, 3, 20, false, fastLdm)
 
     const [, body] = mockedClient.post.mock.calls[0]
+    expect((body as any).expand_mask_pixels).toBe(20)
+    expect((body as any).use_edge_blending).toBe(false)
     expect((body as any).ldm).toEqual(fastLdm)
-  })
-
-  it('uses quality preset as default ldm', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
-
-    await mlApi.removeObject(1, 0)
-
-    const [, body] = mockedClient.post.mock.calls[0]
-    expect((body as any).ldm).toEqual(qualityLdm)
   })
 
   it('returns MLResultResponse', async () => {
     mockedClient.post.mockResolvedValue({ data: fakeMLResult })
 
-    const result = await mlApi.removeObject(1, 0)
+    const result = await mlApi.samRemoveObject(1, 3)
 
     expect(result).toEqual(fakeMLResult)
   })
 
   it('propagates error', async () => {
-    mockedClient.post.mockRejectedValue(new Error('remove failed'))
+    mockedClient.post.mockRejectedValue(new Error('sam remove failed'))
 
-    await expect(mlApi.removeObject(1, 0)).rejects.toThrow('remove failed')
+    await expect(mlApi.samRemoveObject(1, 3)).rejects.toThrow('sam remove failed')
   })
 })
 
-
-describe('mlApi: replaceObject', () => {
+describe('mlApi: samReplaceObject', () => {
   const fakeFile = new File(['img'], 'replacement.png', { type: 'image/png' })
 
   it('posts multipart/form-data to correct url', async () => {
     mockedClient.post.mockResolvedValue({ data: fakeMLResult })
 
-    await mlApi.replaceObject(1, 2, fakeFile)
+    await mlApi.samReplaceObject(1, 3, fakeFile)
 
-    expect(mockedClient.post).toHaveBeenCalledTimes(1)
     const [url, body] = mockedClient.post.mock.calls[0]
-    expect(url).toBe('/ml/images/1/replace/2')
+    expect(url).toBe('/ml/images/1/segment/3/replace')
     expect(body).toBeInstanceOf(FormData)
     expect((body as FormData).get('replacement_file')).toBe(fakeFile)
   })
@@ -175,56 +212,43 @@ describe('mlApi: replaceObject', () => {
   it('sends default query params', async () => {
     mockedClient.post.mockResolvedValue({ data: fakeMLResult })
 
-    await mlApi.replaceObject(1, 2, fakeFile)
+    await mlApi.samReplaceObject(1, 3, fakeFile)
 
     const [, , config] = mockedClient.post.mock.calls[0]
     expect((config as any).params).toEqual({
-      expand_mask_pixels: 0,
-      use_color_matching: false,
+      expand_mask_pixels: 8,
+      use_color_matching: true,
       use_edge_blending: false,
       color_match_method: 'color_transfer',
       ldm_steps: 25,
       ldm_sampler: 'plms',
-      hd_strategy: 'CROP'
+      hd_strategy: 'CROP',
     })
   })
 
-  it('passes custom ldm params', async () => {
+  it('passes custom options', async () => {
     mockedClient.post.mockResolvedValue({ data: fakeMLResult })
 
-    await mlApi.replaceObject(1, 2, fakeFile, {
-      ldmSteps: 10,
-      ldmSampler: 'ddim',
-      hdStrategy: 'RESIZE'
-    })
-
-    const [, , config] = mockedClient.post.mock.calls[0]
-    expect((config as any).params.ldm_steps).toBe(10)
-    expect((config as any).params.ldm_sampler).toBe('ddim')
-    expect((config as any).params.hd_strategy).toBe('RESIZE')
-  })
-
-  it('passes custom color matching options', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
-
-    await mlApi.replaceObject(1, 2, fakeFile, {
-      useColorMatching: true,
-      colorMatchMethod: 'histogram',
+    await mlApi.samReplaceObject(1, 3, fakeFile, {
+      expandMaskPixels: 15,
+      useColorMatching: false,
       useEdgeBlending: true,
-      expandMaskPixels: 15
+      colorMatchMethod: 'histogram',
+      ldm: fastLdm,
     })
 
     const [, , config] = mockedClient.post.mock.calls[0]
-    expect((config as any).params.use_color_matching).toBe(true)
-    expect((config as any).params.color_match_method).toBe('histogram')
-    expect((config as any).params.use_edge_blending).toBe(true)
     expect((config as any).params.expand_mask_pixels).toBe(15)
+    expect((config as any).params.use_color_matching).toBe(false)
+    expect((config as any).params.use_edge_blending).toBe(true)
+    expect((config as any).params.color_match_method).toBe('histogram')
+    expect((config as any).params.ldm_steps).toBe(10)
   })
 
   it('sets multipart/form-data header', async () => {
     mockedClient.post.mockResolvedValue({ data: fakeMLResult })
 
-    await mlApi.replaceObject(1, 2, fakeFile)
+    await mlApi.samReplaceObject(1, 3, fakeFile)
 
     const [, , config] = mockedClient.post.mock.calls[0]
     expect((config as any).headers['Content-Type']).toBe('multipart/form-data')
@@ -233,218 +257,115 @@ describe('mlApi: replaceObject', () => {
   it('returns MLResultResponse', async () => {
     mockedClient.post.mockResolvedValue({ data: fakeMLResult })
 
-    const result = await mlApi.replaceObject(1, 2, fakeFile)
+    const result = await mlApi.samReplaceObject(1, 3, fakeFile)
 
     expect(result).toEqual(fakeMLResult)
   })
 
   it('propagates error', async () => {
-    mockedClient.post.mockRejectedValue(new Error('replace failed'))
+    mockedClient.post.mockRejectedValue(new Error('sam replace failed'))
 
-    await expect(mlApi.replaceObject(1, 2, fakeFile)).rejects.toThrow('replace failed')
+    await expect(mlApi.samReplaceObject(1, 3, fakeFile)).rejects.toThrow('sam replace failed')
   })
 })
 
+describe('mlApi: extractObject', () => {
+  it('posts to correct url with default padding', async () => {
+    mockedClient.post.mockResolvedValue({ data: fakeExtractResponse })
 
-describe('mlApi: removeMultipleObjects', () => {
-  it('posts to correct url with default params', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
-
-    await mlApi.removeMultipleObjects(1, [0, 1, 2])
+    await mlApi.extractObject(1, 4)
 
     expect(mockedClient.post).toHaveBeenCalledWith(
-      '/ml/images/1/remove-multiple',
+      '/ml/images/1/segment/4/extract',
+      { padding_pixels: 8 }
+    )
+  })
+
+  it('passes custom paddingPixels', async () => {
+    mockedClient.post.mockResolvedValue({ data: fakeExtractResponse })
+
+    await mlApi.extractObject(1, 4, 20)
+
+    expect(mockedClient.post).toHaveBeenCalledWith(
+      '/ml/images/1/segment/4/extract',
+      { padding_pixels: 20 }
+    )
+  })
+
+  it('returns ExtractResponse', async () => {
+    mockedClient.post.mockResolvedValue({ data: fakeExtractResponse })
+
+    const result = await mlApi.extractObject(1, 4)
+
+    expect(result).toEqual(fakeExtractResponse)
+  })
+
+  it('propagates error', async () => {
+    mockedClient.post.mockRejectedValue(new Error('extract failed'))
+
+    await expect(mlApi.extractObject(1, 4)).rejects.toThrow('extract failed')
+  })
+})
+
+describe('mlApi: pasteExtractedObject', () => {
+  const targetBbox = { x1: 50, y1: 60, x2: 140, y2: 250 }
+
+  it('posts to correct url with default options', async () => {
+    mockedClient.post.mockResolvedValue({ data: fakePasteResponse })
+
+    await mlApi.pasteExtractedObject(1, {
+      extractedUrl: 's3://bucket/extracted.png',
+      targetBbox,
+    })
+
+    expect(mockedClient.post).toHaveBeenCalledWith(
+      '/ml/images/1/paste',
       {
-        bbox_ids: [0, 1, 2],
-        expand_mask_pixels: 5,
-        use_edge_blending: false,
-        ldm: qualityLdm
+        extracted_url: 's3://bucket/extracted.png',
+        target_bbox: targetBbox,
+        scale: 1.0,
+        use_color_matching: true,
+        use_edge_blending: true,
+        color_match_method: 'color_transfer',
       }
     )
   })
 
-  it('passes custom expandMaskPixels', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+  it('passes custom scale and matching options', async () => {
+    mockedClient.post.mockResolvedValue({ data: fakePasteResponse })
 
-    await mlApi.removeMultipleObjects(1, [0, 1], 20, true)
-
-    const [, body] = mockedClient.post.mock.calls[0]
-    expect((body as any).expand_mask_pixels).toBe(20)
-    expect((body as any).use_edge_blending).toBe(true)
-  })
-
-  it('passes custom ldm config', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
-
-    await mlApi.removeMultipleObjects(1, [0], 5, false, fastLdm)
+    await mlApi.pasteExtractedObject(1, {
+      extractedUrl: 's3://bucket/extracted.png',
+      targetBbox,
+      scale: 1.5,
+      useColorMatching: false,
+      useEdgeBlending: false,
+      colorMatchMethod: 'histogram',
+    })
 
     const [, body] = mockedClient.post.mock.calls[0]
-    expect((body as any).ldm).toEqual(fastLdm)
+    expect((body as any).scale).toBe(1.5)
+    expect((body as any).use_color_matching).toBe(false)
+    expect((body as any).use_edge_blending).toBe(false)
+    expect((body as any).color_match_method).toBe('histogram')
   })
 
-  it('uses quality preset as default ldm', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+  it('returns PasteResponse', async () => {
+    mockedClient.post.mockResolvedValue({ data: fakePasteResponse })
 
-    await mlApi.removeMultipleObjects(1, [0, 1])
+    const result = await mlApi.pasteExtractedObject(1, {
+      extractedUrl: 's3://bucket/extracted.png',
+      targetBbox,
+    })
 
-    const [, body] = mockedClient.post.mock.calls[0]
-    expect((body as any).ldm).toEqual(qualityLdm)
-  })
-
-  it('returns MLResultResponse', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
-
-    const result = await mlApi.removeMultipleObjects(1, [0])
-
-    expect(result).toEqual(fakeMLResult)
+    expect(result).toEqual(fakePasteResponse)
   })
 
   it('propagates error', async () => {
-    mockedClient.post.mockRejectedValue(new Error('remove multiple failed'))
+    mockedClient.post.mockRejectedValue(new Error('paste failed'))
 
-    await expect(mlApi.removeMultipleObjects(1, [0])).rejects.toThrow('remove multiple failed')
-  })
-})
-
-
-describe('mlApi: getSupportedClasses', () => {
-  it('gets classes from correct url', async () => {
-    mockedClient.get.mockResolvedValue({ data: ['person', 'car', 'dog'] })
-
-    const result = await mlApi.getSupportedClasses()
-
-    expect(mockedClient.get).toHaveBeenCalledWith('/ml/classes')
-    expect(result).toEqual(['person', 'car', 'dog'])
-  })
-
-  it('propagates error', async () => {
-    mockedClient.get.mockRejectedValue(new Error('server error'))
-
-    await expect(mlApi.getSupportedClasses()).rejects.toThrow('server error')
-  })
-})
-
-
-describe('mlApi: saveResult', () => {
-  it('posts to correct url', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeSavedImage })
-
-    const result = await mlApi.saveResult(42)
-
-    expect(mockedClient.post).toHaveBeenCalledWith('/ml/images/42/save')
-    expect(result).toEqual(fakeSavedImage)
-  })
-
-  it('propagates error', async () => {
-    mockedClient.post.mockRejectedValue(new Error('nothing to save'))
-
-    await expect(mlApi.saveResult(1)).rejects.toThrow('nothing to save')
-  })
-})
-
-
-describe('mlApi: undo', () => {
-  it('posts to correct url', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeUndoRedo })
-
-    const result = await mlApi.undo(5)
-
-    expect(mockedClient.post).toHaveBeenCalledWith('/ml/images/5/undo')
-    expect(result).toEqual(fakeUndoRedo)
-  })
-
-  it('returns presigned_url, label and history', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeUndoRedo })
-
-    const result = await mlApi.undo(1)
-
-    expect(result.presigned_url).toBe(fakeUndoRedo.presigned_url)
-    expect(result.label).toBe('remove bbox_id=5')
-    expect(result.history).toHaveLength(2)
-  })
-
-  it('propagates error when nothing to undo', async () => {
-    mockedClient.post.mockRejectedValue(new Error('Nothing to undo'))
-
-    await expect(mlApi.undo(1)).rejects.toThrow('Nothing to undo')
-  })
-})
-
-
-describe('mlApi: redo', () => {
-  it('posts to correct url', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeUndoRedo })
-
-    const result = await mlApi.redo(7)
-
-    expect(mockedClient.post).toHaveBeenCalledWith('/ml/images/7/redo')
-    expect(result).toEqual(fakeUndoRedo)
-  })
-
-  it('returns presigned_url, label and history', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeUndoRedo })
-
-    const result = await mlApi.redo(1)
-
-    expect(result.presigned_url).toBeDefined()
-    expect(Array.isArray(result.history)).toBe(true)
-  })
-
-  it('propagates error when nothing to redo', async () => {
-    mockedClient.post.mockRejectedValue(new Error('Nothing to redo'))
-
-    await expect(mlApi.redo(1)).rejects.toThrow('Nothing to redo')
-  })
-})
-
-
-describe('mlApi: getHistory', () => {
-  it('gets history from correct url', async () => {
-    mockedClient.get.mockResolvedValue({ data: { history: ['remove bbox_id=1', 'replace bbox_id=2'] } })
-
-    const result = await mlApi.getHistory(3)
-
-    expect(mockedClient.get).toHaveBeenCalledWith('/ml/images/3/history')
-    expect(result.history).toHaveLength(2)
-    expect(result.history[0]).toBe('remove bbox_id=1')
-  })
-
-  it('returns empty history when no operations', async () => {
-    mockedClient.get.mockResolvedValue({ data: { history: [] } })
-
-    const result = await mlApi.getHistory(1)
-
-    expect(result.history).toEqual([])
-  })
-
-  it('propagates error', async () => {
-    mockedClient.get.mockRejectedValue(new Error('image not found'))
-
-    await expect(mlApi.getHistory(999)).rejects.toThrow('image not found')
-  })
-})
-
-
-describe('mlApi: resetState', () => {
-  it('posts to correct url', async () => {
-    mockedClient.post.mockResolvedValue({ data: { detail: 'State reset to original image' } })
-
-    await mlApi.resetState(10)
-
-    expect(mockedClient.post).toHaveBeenCalledWith('/ml/images/10/reset')
-  })
-
-  it('returns void', async () => {
-    mockedClient.post.mockResolvedValue({ data: undefined })
-
-    const result = await mlApi.resetState(1)
-
-    expect(result).toBeUndefined()
-  })
-
-  it('propagates error', async () => {
-    mockedClient.post.mockRejectedValue(new Error('image not found'))
-
-    await expect(mlApi.resetState(999)).rejects.toThrow('image not found')
+    await expect(
+      mlApi.pasteExtractedObject(1, { extractedUrl: 's3://x.png', targetBbox })
+    ).rejects.toThrow('paste failed')
   })
 })
