@@ -3,6 +3,10 @@ import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
 from io import BytesIO
+import numpy as np
+import sys
+import types
+from PIL import Image as PILImage
 from fastapi import UploadFile
 from unittest.mock import AsyncMock, MagicMock
 import pytest_asyncio
@@ -11,6 +15,8 @@ from app.db.db_connect import Base
 from app.db.models.user import User
 from app.db.models.image import Image
 from app.db.models.detection import Detection
+from app.repository.image_repo import ImageRepository
+from app.repository.detection_repo import DetectionRepository
 from app.config.test_settings import test_settings
 
 TEST_DATABASE = test_settings.TEST_DATABASE_URL
@@ -54,10 +60,23 @@ def mock_upload_file():
         filename="test.jpg",
         file=BytesIO(b"fake image data"),
     )
+    
+@pytest_asyncio.fixture
+async def image_repo(db_session):
+    return ImageRepository(db_session)
+
+@pytest_asyncio.fixture
+async def detection_repo(db_session):
+    return DetectionRepository(db_session)
 
 @pytest.fixture
-def mock_image_bytes():
-    return b"fake image bytes content"
+def image_bytes():
+    img = PILImage.new("RGB", (20, 20), "black")
+
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+
+    return buf.getvalue()
 
 @pytest.fixture
 def mock_s3_storage():
@@ -147,7 +166,19 @@ def mock_mlflow_connection():
          patch("mlflow.set_tag"), \
          patch("mlflow.MlflowClient", return_value=mock_client):
         yield
-        
+
+@pytest.fixture
+def tracker():
+    tracker = MagicMock()
+
+    tracker.log_metrics = MagicMock()
+    tracker.log_params = MagicMock()
+    tracker.start_run = MagicMock()
+    tracker.end_run = MagicMock()
+
+    return tracker
+
+
 @pytest_asyncio.fixture
 async def sample_image(db_session, sample_user):
     image = Image(
@@ -192,3 +223,72 @@ async def multiple_images(db_session, sample_user):
     for img in images:
         await db_session.refresh(img)
     return images
+
+
+@pytest.fixture
+def fake_sam2_env(monkeypatch):
+    build_sam2 = MagicMock(return_value=MagicMock(name="sam_model"))
+
+    predictor_instance = MagicMock()
+    predictor_instance.predict.return_value = (
+        np.array([
+            np.pad(np.ones((4, 4), dtype=bool), ((0, 16), (0, 16))),
+            np.pad(np.ones((3, 3), dtype=bool), ((5, 12), (5, 12))),
+            np.zeros((20, 20), dtype=bool),
+        ]),
+        np.array([0.6, 0.9, 0.99]),
+        None,
+    )
+
+    predictor_cls = MagicMock(return_value=predictor_instance)
+
+    auto_gen_instance = MagicMock()
+    auto_gen_instance.generate.return_value = [
+        {
+            "segmentation": np.pad(np.ones((6, 6), dtype=np.uint8), ((0, 14), (0, 14))),
+            "bbox": [0, 0, 6, 6],
+            "area": 36,
+            "stability_score": 0.80,
+            "predicted_iou": 0.81,
+        },
+        {
+            "segmentation": np.pad(np.ones((3, 3), dtype=np.uint8), ((10, 7), (10, 7))),
+            "bbox": [10, 10, 3, 3],
+            "area": 9,
+            "stability_score": 0.95,
+            "predicted_iou": 0.96,
+        },
+    ]
+
+    auto_gen_cls = MagicMock(return_value=auto_gen_instance)
+
+    build_module = types.ModuleType("sam2.build_sam")
+    build_module.build_sam2 = build_sam2
+
+    predictor_module = types.ModuleType("sam2.sam2_image_predictor")
+    predictor_module.SAM2ImagePredictor = predictor_cls
+
+    auto_module = types.ModuleType("sam2.automatic_mask_generator")
+    auto_module.SAM2AutomaticMaskGenerator = auto_gen_cls
+
+    monkeypatch.setitem(sys.modules, "sam2.build_sam", build_module)
+    monkeypatch.setitem(sys.modules, "sam2.sam2_image_predictor", predictor_module)
+    monkeypatch.setitem(sys.modules, "sam2.automatic_mask_generator", auto_module)
+
+    yield {
+        "build_sam2": build_sam2,
+        "predictor_cls": predictor_cls,
+        "predictor_instance": predictor_instance,
+        "auto_gen_cls": auto_gen_cls,
+        "auto_gen_instance": auto_gen_instance,
+    }
+    
+@pytest.fixture
+def segmentor(fake_sam2_env, tracker):
+    from app.ml.segmentor import SAM2Segmentor
+
+    return SAM2Segmentor(
+        model_path="weights/fake.pt",
+        device="cpu",
+        tracker=tracker,
+    )
