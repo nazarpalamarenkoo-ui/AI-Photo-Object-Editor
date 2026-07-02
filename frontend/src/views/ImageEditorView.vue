@@ -17,14 +17,15 @@
       <EditorToolbar
         v-model:activeTool="activeTool"
         v-model:modelConfig="modelPreset"
+        v-model:mode="mode"
         :zoom="zoom"
         :canUndo="canUndo"
         :mlLoading="mlLoading"
+        :busy="detecting || segmenting || mlLoading"
         @zoom="zoom = $event"
-        @update:preset="modelPreset = $event"
         @undo="handleUndo"
         @redo="handleRedo"
-        @reset="handleReset(imageUrl)"
+        @reset="onReset"
       />
 
       <EditorCanvas
@@ -33,32 +34,39 @@
         :imageLoaded="imageLoaded"
         :naturalSize="naturalSize"
         :zoom="zoom"
-        :detections="detections"
-        :selectedBboxIds="selectedBboxIds"
-        :detecting="detecting"
+        :regions="regions"
+        :selectedIds="selectedIds"
+        :running="mode === 'yolo' ? detecting : segmenting"
+        :mode="mode"
         :confThreshold="confThreshold"
         @image-load="onImageLoad"
-        @toggle-selection="toggleSelection"
-        @detect="handleDetect"
-        @clear="handleClearDetections()"
+        @toggle-selection="onToggleSelection"
+        @run="onRun"
+        @clear="onClearRegions"
         @update:confThreshold="confThreshold = $event"
       />
 
       <EditorSidebar
-        :detections="detections"
-        :selectedBboxIds="selectedBboxIds"
-        v-model:useEdgeBlending="useEdgeBlending"
+        :mode="mode"
+        :regions="regions"
+        :selectedIds="selectedIds"
+        v-model:useEdgeBlending="activeUseEdgeBlending"
         :mlLoading="mlLoading"
-        :replacementFile="replacementFile"
+        :replacementFile="activeReplacementFile"
+        :extractedUrl="extractedUrl"
         :resultUrl="currentImageUrl"
         :mlError="combinedError"
         :saveLoading="saveLoading"
         :savedSuccess="savedSuccess"
         :history="history"
-        @toggle-selection="toggleSelection"
+        @toggle-selection="onToggleSelection"
         @remove="handleRemove(selectedBboxIds, modelPreset)"
         @replace="handleReplace(selectedBboxIds, modelPreset)"
-        @replacement-select="onReplacementSelect"
+        @sam-remove="handleSamRemove(modelPreset)"
+        @sam-replace="handleSamReplace(modelPreset)"
+        @extract="onExtract"
+        @paste="onPaste"
+        @replacement-select="onReplacementSelectActive"
         @clear-error="clearAllErrors"
         @save="handleSave(imageId)"
       />
@@ -75,8 +83,10 @@ import { useAuthStore } from '@/stores/auth'
 import { useImageEditor } from '@/composables/useImageEditor'
 import { useDetections } from '@/composables/useDetections'
 import { useMlOperations } from '@/composables/useMlOperations'
+import { useSegmentation } from '@/composables/useSegmentation'
+import { useAssets } from '@/composables/useAssets'
 import { PRESETS } from '@/api/ml'
-import type { LdmConfig } from '@/types/Index'
+import type { LdmConfig, EditingMode, RegionItem } from '@/types/Index'
 
 import EditorNavbar from '@/components/EditorNavbar.vue'
 import EditorToolbar from '@/components/EditorToolbar.vue'
@@ -99,6 +109,7 @@ function toggleTheme() {
 const activeTool = ref('select')
 const zoom = ref(1)
 const modelPreset = ref<LdmConfig>(PRESETS.quality)
+const mode = ref<EditingMode>('yolo')
 
 const {
   image, imageUrl, loading,
@@ -120,17 +131,103 @@ const {
   history, canUndo, handleUndo, handleRedo, handleReset, fetchHistory,
 } = useMlOperations(imageId, detections, selectedBboxIds)
 
-const combinedError = computed(() => mlError.value || detectError.value)
+const {
+  segments, regions: samRegions, selectedMaskId, segmenting,
+  mlError: samError, useEdgeBlending: samUseEdgeBlending, replacementFile: samReplacementFile,
+  handleSegment, toggleMaskSelection, handleSamRemove, handleSamReplace,
+  onReplacementSelect: onSamReplacementSelect, clearSegments,
+} = useSegmentation(imageId, currentImageUrl, history)
+
+const {
+  mlError: assetError, extractedUrl,
+  handleExtract, handlePaste, clearExtracted,
+} = useAssets(imageId, currentImageUrl, history)
+
+
+const regions = computed<RegionItem[]>(() =>
+  mode.value === 'yolo'
+    ? (detections.value ?? []).map(d => ({
+        id: d.bbox_id, bbox: { x1: d.x1, y1: d.y1, x2: d.x2, y2: d.y2 },
+        label: d.detected_class, confidence: d.confidence,
+      }))
+    : samRegions.value
+)
+
+const selectedIds = computed<number[]>(() =>
+  mode.value === 'yolo'
+    ? selectedBboxIds.value
+    : selectedMaskId.value !== null ? [selectedMaskId.value] : []
+)
+
+const activeUseEdgeBlending = computed({
+  get: () => (mode.value === 'yolo' ? useEdgeBlending.value : samUseEdgeBlending.value),
+  set: (v: boolean) => {
+    if (mode.value === 'yolo') useEdgeBlending.value = v
+    else samUseEdgeBlending.value = v
+  },
+})
+
+const activeReplacementFile = computed(() =>
+  mode.value === 'yolo' ? replacementFile.value : samReplacementFile.value
+)
+
+function onReplacementSelectActive(event: Event) {
+  if (mode.value === 'yolo') onReplacementSelect(event)
+  else onSamReplacementSelect(event)
+}
+
+function onToggleSelection(id: number) {
+  if (mode.value === 'yolo') toggleSelection(id)
+  else toggleMaskSelection(id)
+}
+
+function onRun() {
+  if (mode.value === 'yolo') handleDetect()
+  else handleSegment()
+}
+
+async function onClearRegions() {
+  if (mode.value === 'yolo') await handleClearDetections()
+  else clearSegments()
+}
+
+function onReset() {
+  handleReset(imageUrl.value)
+  clearSegments()
+  clearExtracted()
+}
+
+async function onExtract() {
+  if (selectedMaskId.value === null) return
+  await handleExtract(selectedMaskId.value)
+}
+
+async function onPaste() {
+  if (selectedMaskId.value === null) return
+  const seg = segments.value.find(s => s.mask_id === selectedMaskId.value)
+  if (!seg) return
+  await handlePaste({ targetBbox: seg.bbox })
+}
+
+watch(mode, () => {
+  selectedBboxIds.value = []
+  selectedMaskId.value = null
+  clearExtracted()
+})
+
+const combinedError = computed(() =>
+  mlError.value || detectError.value || samError.value || assetError.value
+)
 
 function clearAllErrors() {
   mlError.value = ''
   detectError.value = ''
+  samError.value = ''
+  assetError.value = ''
 }
 
 watch(imageUrl, (url) => {
-  if (url && !currentImageUrl.value) {
-    currentImageUrl.value = url
-  }
+  if (url && !currentImageUrl.value) currentImageUrl.value = url
 }, { immediate: true })
 
 onMounted(() => {
