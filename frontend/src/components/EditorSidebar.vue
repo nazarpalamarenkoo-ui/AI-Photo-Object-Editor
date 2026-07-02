@@ -15,32 +15,32 @@
       </div>
     </div>
 
-    <div class="sidebar-section" v-if="detections.length > 0">
+    <div class="sidebar-section" v-if="regions.length > 0">
       <div class="section-header">
-        Detected segments
-        <span class="badge">{{ detections.length }}</span>
+        {{ mode === 'yolo' ? 'Detected objects' : 'Segments' }}
+        <span class="badge">{{ regions.length }}</span>
       </div>
       <div class="detection-list">
         <div
-          v-for="det in detections"
-          :key="det.bbox_id"
-          :class="['det-item', { selected: selectedBboxIds.includes(det.bbox_id) }]"
-          @click="$emit('toggle-selection', det.bbox_id)"
+          v-for="r in regions"
+          :key="r.id"
+          :class="['det-item', { selected: selectedIds.includes(r.id) }]"
+          @click="$emit('toggle-selection', r.id)"
         >
           <span
             class="det-dot"
-            :style="{ background: selectedBboxIds.includes(det.bbox_id) ? '#ff6b6b' : '#b3f000' }"
+            :style="{ background: selectedIds.includes(r.id) ? '#ff6b6b' : '#b3f000' }"
           />
-          <span class="det-class">{{ det.detected_class }}</span>
-          <span class="det-conf">{{ (det.confidence * 100).toFixed(0) }}%</span>
+          <span class="det-class">{{ r.label }}</span>
+          <span class="det-conf" v-if="r.confidence != null">{{ (r.confidence * 100).toFixed(0) }}%</span>
         </div>
       </div>
-      <div class="selection-hint" v-if="selectedBboxIds.length > 0">
-        {{ selectedBboxIds.length }} selected
+      <div class="selection-hint" v-if="selectedIds.length > 0">
+        {{ selectedIds.length }} selected
       </div>
     </div>
 
-    <div class="sidebar-section" v-if="selectedBboxIds.length > 0">
+    <div class="sidebar-section" v-if="mode === 'yolo' && selectedIds.length > 0">
       <div class="section-header">Operations</div>
 
       <div class="toggle-row">
@@ -60,7 +60,7 @@
           {{ mlLoading ? 'Processing…' : 'Remove selected' }}
         </button>
 
-        <template v-if="selectedBboxIds.length === 1">
+        <template v-if="selectedIds.length === 1">
           <div class="replace-area">
             <label class="replace-upload">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
@@ -83,6 +83,73 @@
             Swap object
           </button>
         </template>
+      </div>
+    </div>
+
+    <div class="sidebar-section" v-if="mode === 'sam' && selectedIds.length === 1">
+      <div class="section-header">Operations</div>
+
+      <div class="toggle-row">
+        <span class="toggle-label">Edge feather</span>
+        <button
+          :class="['toggle-btn', { on: useEdgeBlending }]"
+          @click="$emit('update:useEdgeBlending', !useEdgeBlending)"
+        >{{ useEdgeBlending ? 'On' : 'Off' }}</button>
+      </div>
+
+      <div class="action-stack">
+        <button class="action-btn danger" :disabled="mlLoading" @click="$emit('sam-remove')">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <polyline points="3 6 5 6 21 6"/>
+            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+          </svg>
+          {{ mlLoading ? 'Processing…' : 'Remove object' }}
+        </button>
+
+        <div class="replace-area">
+          <label class="replace-upload">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            {{ replacementFile ? replacementFile.name : 'Choose replacement image' }}
+            <input type="file" accept="image/*" style="display:none" @change="$emit('replacement-select', $event)"/>
+          </label>
+        </div>
+        <button
+          v-if="replacementFile"
+          class="action-btn accent"
+          :disabled="mlLoading"
+          @click="$emit('sam-replace')"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <polyline points="1 4 1 10 7 10"/>
+            <path d="M3.51 15a9 9 0 1 0 .49-4"/>
+          </svg>
+          Swap object
+        </button>
+
+        <div class="action-divider" />
+
+        <button class="action-btn ghost" :disabled="mlLoading" @click="$emit('extract')">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <rect x="3" y="3" width="18" height="18" rx="2"/>
+            <path d="M9 9h6v6H9z"/>
+          </svg>
+          Extract object
+        </button>
+
+        <button
+          v-if="extractedUrl"
+          class="action-btn accent"
+          :disabled="mlLoading"
+          @click="$emit('paste')"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
+            <rect x="8" y="2" width="8" height="4" rx="1"/>
+          </svg>
+          Paste back
+        </button>
       </div>
     </div>
 
@@ -129,14 +196,16 @@
 </template>
 
 <script setup lang="ts">
-import type { Detection } from '@/types/Index'
+import type { RegionItem, EditingMode } from '@/types/Index'
 
 const props = defineProps<{
-  detections: Detection[]
-  selectedBboxIds: number[]
+  mode: EditingMode
+  regions: RegionItem[]
+  selectedIds: number[]
   useEdgeBlending: boolean
   mlLoading: boolean
   replacementFile: File | null
+  extractedUrl: string | null
   resultUrl: string
   mlError: string
   saveLoading: boolean
@@ -145,13 +214,17 @@ const props = defineProps<{
 }>()
 
 defineEmits<{
-  'toggle-selection': [bboxId: number]
+  'toggle-selection': [id: number]
   'update:useEdgeBlending': [value: boolean]
   remove: []
   replace: []
+  'sam-remove': []
+  'sam-replace': []
+  extract: []
+  paste: []
   'replacement-select': [event: Event]
   'clear-error': []
-  'save': []
+  save: []
 }>()
 
 async function handleDownload() {

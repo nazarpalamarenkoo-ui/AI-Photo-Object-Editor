@@ -288,3 +288,8 @@
   font-size: 0.7rem;
   padding: 0;
 }
+.action-divider {
+  height: 1px;
+  background: var(--border, rgba(255,255,255,0.08));
+  margin: 4px 0;
+}

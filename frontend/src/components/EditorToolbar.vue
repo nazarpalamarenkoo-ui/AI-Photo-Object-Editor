@@ -1,4 +1,3 @@
-```vue
 <template>
   <aside class="toolbar">
     <div class="tool-group">
@@ -11,6 +10,27 @@
       >
         <component :is="tool.icon" />
         <span class="tool-shortcut">{{ tool.shortcut }}</span>
+      </button>
+    </div>
+
+    <div class="tool-divider" />
+
+    <div class="tool-group mode-switch">
+      <button
+        :class="['tool-btn', { active: mode === 'yolo' }]"
+        :disabled="busy"
+        title="Detection mode (YOLO)"
+        @click="$emit('update:mode', 'yolo')"
+      >
+        YOLO
+      </button>
+      <button
+        :class="['tool-btn', { active: mode === 'sam' }]"
+        :disabled="busy"
+        title="Segmentation mode (SAM)"
+        @click="$emit('update:mode', 'sam')"
+      >
+        SAM
       </button>
     </div>
 
@@ -48,7 +68,7 @@
       <button
         class="tool-btn"
         title="Undo [Ctrl+Z]"
-        :disabled="!canUndo || mlLoading"
+        :disabled="!canUndo || mlLoading || busy"
         @click="$emit('undo')"
       >
         <UndoIcon />
@@ -57,7 +77,7 @@
       <button
         class="tool-btn"
         title="Redo [Ctrl+Y]"
-        :disabled="mlLoading"
+        :disabled="mlLoading || busy"
         @click="$emit('redo')"
       >
         <RedoIcon />
@@ -66,7 +86,7 @@
       <button
         class="tool-btn"
         title="Reset to original"
-        :disabled="mlLoading"
+        :disabled="mlLoading || busy"
         @click="$emit('reset')"
       >
         <ResetIcon />
@@ -165,7 +185,7 @@ import {
   tools
 } from '../composables/useEditorIcons'
 
-import type { LdmConfig } from '@/types/Index'
+import type { LdmConfig, EditingMode } from '@/types/Index'
 import { PRESETS } from '@/api/ml'
 
 const props = defineProps<{
@@ -174,6 +194,8 @@ const props = defineProps<{
   canUndo: boolean
   mlLoading: boolean
   modelConfig: LdmConfig
+  mode: EditingMode
+  busy: boolean
 }>()
 
 const emit = defineEmits<{
@@ -183,6 +205,7 @@ const emit = defineEmits<{
   redo: []
   reset: []
   'update:modelConfig': [value: LdmConfig]
+  'update:mode': [value: EditingMode]
 }>()
 
 const settingsOpen = ref(false)
@@ -241,4 +264,3 @@ onUnmounted(() => {
 <style scoped>
 @import '@/styles/components/editortoolbar.css';
 </style>
-
