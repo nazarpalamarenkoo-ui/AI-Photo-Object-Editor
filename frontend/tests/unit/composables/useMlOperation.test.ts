@@ -32,7 +32,6 @@ const fakeImage: Image = {
   user_id: 1
 }
 
-
 const makeDetection = (bboxId: number): Detection => ({
   id: bboxId,
   image_id: 7,
@@ -100,7 +99,6 @@ describe('useMlOperations: canUndo', () => {
   })
 
   it('is false after reset clears history', async () => {
-    // Fixed: resetState returns void, not {}
     mockedMlApi.resetState.mockResolvedValue(undefined)
 
     const detections = ref<Detection[]>([makeDetection(1)])
@@ -323,9 +321,7 @@ describe('useMlOperations: handleReplace', () => {
       file,
       {
         useEdgeBlending: true,
-        ldmSteps: PRESETS.quality.ldm_steps,
-        ldmSampler: PRESETS.quality.ldm_sampler,
-        hdStrategy: PRESETS.quality.hd_strategy
+        ldm: PRESETS.quality
       }
     )
   })

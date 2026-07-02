@@ -67,9 +67,7 @@ export function useMlOperations(
         replacementFile.value,
         {
           useEdgeBlending: useEdgeBlending.value,
-          ldmSteps: ldm.ldm_steps,
-          ldmSampler: ldm.ldm_sampler,
-          hdStrategy: ldm.hd_strategy,
+          ldm,
         }
       )
       currentImageUrl.value = result.presigned_url
@@ -115,7 +113,7 @@ export function useMlOperations(
       mlLoading.value = false
     }
   }
-
+  
   async function handleReset(originalUrl: string) {
     mlLoading.value = true
     mlError.value = ''
