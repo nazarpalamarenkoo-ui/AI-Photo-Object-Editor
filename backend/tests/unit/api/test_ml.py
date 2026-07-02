@@ -4,20 +4,35 @@ from fastapi import HTTPException, UploadFile
 
 from app.api.v1.ml import (
     detect_objects,
-    remove_object,
-    replace_object,
-    remove_multiple_objects,
-    reset_current_state,
     get_supported_classes,
+    remove_object,
+    remove_multiple_objects,
+    replace_object,
+    reset_current_state,
     save_result,
     undo,
     redo,
     get_history,
+    segment_objects,
+    segment_with_prompt,
+    sam_remove_object,
+    sam_replace_object,
+    extract_object,
+    paste_extracted_object,
+    _http_status,
 )
 from app.db.schemas.ml import (
+    BboxSchema,
     DetectRequest,
     RemoveRequest,
     RemoveMultipleRequest,
+    ReplaceRequest,
+    SegmentRequest,
+    SegmentWithPromptRequest,
+    SamRemoveRequest,
+    SamReplaceRequest,
+    ExtractRequest,
+    PasteRequest,
 )
 
 @pytest.fixture
@@ -28,19 +43,43 @@ def mock_user():
 
 
 @pytest.fixture
-def mock_service():
+def mock_detector_service():
     service = MagicMock()
     service.detect_objects = AsyncMock()
+    service.get_supported_classes = MagicMock()
+    return service
+
+
+@pytest.fixture
+def mock_editor_service():
+    service = MagicMock()
     service.remove_object = AsyncMock()
-    service.replace_object = AsyncMock()
     service.remove_multiple_objects = AsyncMock()
+    service.replace_object = AsyncMock()
     service._get_image_authorized = AsyncMock()
     service.reset_current_state = AsyncMock()
-    service.get_supported_classes = MagicMock()
     service.save_result = AsyncMock()
     service.undo = AsyncMock()
     service.redo = AsyncMock()
     service.get_history = AsyncMock()
+    return service
+
+
+@pytest.fixture
+def mock_segmentation_service():
+    service = MagicMock()
+    service.segment_objects = AsyncMock()
+    service.segment_with_prompt = AsyncMock()
+    service.sam_remove_object = AsyncMock()
+    service.sam_replace_object = AsyncMock()
+    return service
+
+
+@pytest.fixture
+def mock_asset_service():
+    service = MagicMock()
+    service.extract_object = AsyncMock()
+    service.paste_extracted_object = AsyncMock()
     return service
 
 
@@ -52,298 +91,667 @@ def mock_file():
 
 
 @pytest.mark.unit
+class TestHttpStatusHelper:
+    def test_not_found_maps_to_404(self):
+        assert _http_status(ValueError("Image not found")) == 404
+
+    def test_no_valid_detections_maps_to_404(self):
+        assert _http_status(ValueError("no valid detections")) == 404
+
+    def test_unauthorized_maps_to_403(self):
+        assert _http_status(ValueError("Unauthorized access")) == 403
+
+    def test_generic_error_maps_to_400(self):
+        assert _http_status(ValueError("bad confidence threshold")) == 400
+
+    def test_case_insensitive_matching(self):
+        assert _http_status(ValueError("IMAGE NOT FOUND")) == 404
+        assert _http_status(ValueError("UNAUTHORIZED")) == 403
+
+@pytest.mark.unit
 @pytest.mark.asyncio
-async def test_replace_success_full_params(mock_user, mock_service, mock_file):
-    mock_service.replace_object.return_value = {"result": "ok"}
+class TestDetectObjects:
+    async def test_success(self, mock_user, mock_detector_service):
+        mock_detector_service.detect_objects.return_value = {"detections": []}
+        body = DetectRequest(conf_threshold=0.6, classes=["person"])
 
-    result = await replace_object(
-        image_id=1,
-        bbox_id=2,
-        replacement_file=mock_file,
-        expand_mask_pixels=15,
-        use_color_matching=True,
-        use_edge_blending=True,
-        color_match_method="histogram",
-        ldm_steps=40,
-        ldm_sampler="ddim",
-        hd_strategy="RESIZE",
-        current_user=mock_user,
-        service=mock_service
-    )
+        result = await detect_objects(
+            image_id=1, body=body, current_user=mock_user, service=mock_detector_service
+        )
 
-    mock_service.replace_object.assert_called_once_with(
-        image_id=1,
-        bbox_id=2,
-        replace_image_bytes=b"image-bytes",
-        user_id=1,
-        expand_mask_pixels=15,
-        use_color_matching=True,
-        use_edge_blending=True,
-        color_match_method="histogram",
-        ldm_steps=40,
-        ldm_sampler="ddim",
-        hd_strategy="RESIZE"
-    )
-    assert result["result"] == "ok"
+        mock_detector_service.detect_objects.assert_called_once_with(
+            image_id=1, user_id=1, conf_threshold=0.6, classes=["person"]
+        )
+        assert result == {"detections": []}
+
+    async def test_default_body(self, mock_user, mock_detector_service):
+        mock_detector_service.detect_objects.return_value = {"detections": []}
+
+        await detect_objects(
+            image_id=1, current_user=mock_user, service=mock_detector_service
+        )
+
+        mock_detector_service.detect_objects.assert_called_once_with(
+            image_id=1, user_id=1, conf_threshold=0.5, classes=None
+        )
+
+    async def test_not_found(self, mock_user, mock_detector_service):
+        mock_detector_service.detect_objects.side_effect = ValueError("Image not found")
+
+        with pytest.raises(HTTPException) as exc:
+            await detect_objects(image_id=1, current_user=mock_user, service=mock_detector_service)
+
+        assert exc.value.status_code == 404
+
+    async def test_generic_error_returns_400(self, mock_user, mock_detector_service):
+        mock_detector_service.detect_objects.side_effect = ValueError("bad confidence threshold")
+
+        with pytest.raises(HTTPException) as exc:
+            await detect_objects(image_id=1, current_user=mock_user, service=mock_detector_service)
+
+        assert exc.value.status_code == 400
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_replace_unauthorized(mock_user, mock_service, mock_file):
-    mock_service.replace_object.side_effect = ValueError("unauthorized access")
+class TestGetSupportedClasses:
+    async def test_success(self, mock_user, mock_detector_service):
+        mock_detector_service.get_supported_classes.return_value = ["person", "car"]
 
-    with pytest.raises(HTTPException) as exc:
-        await replace_object(
+        result = await get_supported_classes(current_user=mock_user, service=mock_detector_service)
+
+        assert result == ["person", "car"]
+        mock_detector_service.get_supported_classes.assert_called_once()
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestRemoveObject:
+    async def test_success_default_body(self, mock_user, mock_editor_service):
+        mock_editor_service.remove_object.return_value = {"result_url": "s3://out.jpg"}
+
+        result = await remove_object(
+            image_id=1, bbox_id=2, current_user=mock_user, service=mock_editor_service
+        )
+
+        mock_editor_service.remove_object.assert_called_once_with(
+            image_id=1,
+            bbox_id=2,
+            user_id=1,
+            expand_mask_pixels=5,
+            use_edge_blending=True,
+            ldm_steps=25,
+            ldm_sampler='plms',
+            hd_strategy='CROP',
+        )
+        assert result["result_url"] == "s3://out.jpg"
+
+    async def test_custom_body(self, mock_user, mock_editor_service):
+        from app.db.schemas.ml import LdmConfig
+
+        body = RemoveRequest(
+            expand_mask_pixels=20,
+            use_edge_blending=False,
+            ldm=LdmConfig(ldm_steps=40, ldm_sampler="ddim", hd_strategy="RESIZE"),
+        )
+
+        await remove_object(image_id=1, bbox_id=2, body=body, current_user=mock_user, service=mock_editor_service)
+
+        mock_editor_service.remove_object.assert_called_once_with(
+            image_id=1,
+            bbox_id=2,
+            user_id=1,
+            expand_mask_pixels=20,
+            use_edge_blending=False,
+            ldm_steps=40,
+            ldm_sampler="ddim",
+            hd_strategy="RESIZE",
+        )
+
+    async def test_not_found(self, mock_user, mock_editor_service):
+        mock_editor_service.remove_object.side_effect = ValueError("bbox not found")
+
+        with pytest.raises(HTTPException) as exc:
+            await remove_object(image_id=1, bbox_id=2, current_user=mock_user, service=mock_editor_service)
+
+        assert exc.value.status_code == 404
+
+    async def test_unauthorized(self, mock_user, mock_editor_service):
+        mock_editor_service.remove_object.side_effect = ValueError("unauthorized")
+
+        with pytest.raises(HTTPException) as exc:
+            await remove_object(image_id=1, bbox_id=2, current_user=mock_user, service=mock_editor_service)
+
+        assert exc.value.status_code == 403
+
+    async def test_generic_error(self, mock_user, mock_editor_service):
+        mock_editor_service.remove_object.side_effect = ValueError("mask generation failed")
+
+        with pytest.raises(HTTPException) as exc:
+            await remove_object(image_id=1, bbox_id=2, current_user=mock_user, service=mock_editor_service)
+
+        assert exc.value.status_code == 400
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestRemoveMultipleObjects:
+    async def test_success(self, mock_user, mock_editor_service):
+        mock_editor_service.remove_multiple_objects.return_value = {"result_url": "s3://out.jpg"}
+        body = RemoveMultipleRequest(bbox_ids=[1, 2, 3])
+
+        result = await remove_multiple_objects(
+            image_id=1, body=body, current_user=mock_user, service=mock_editor_service
+        )
+
+        mock_editor_service.remove_multiple_objects.assert_called_once_with(
+            image_id=1,
+            bbox_ids=[1, 2, 3],
+            user_id=1,
+            expand_mask_pixels=5,
+            use_edge_blending=True,
+            ldm_steps=25,
+            ldm_sampler='plms',
+            hd_strategy='CROP',
+        )
+        assert result["result_url"] == "s3://out.jpg"
+
+    async def test_unauthorized(self, mock_user, mock_editor_service):
+        mock_editor_service.remove_multiple_objects.side_effect = ValueError("unauthorized")
+        body = RemoveMultipleRequest(bbox_ids=[1, 2])
+
+        with pytest.raises(HTTPException) as exc:
+            await remove_multiple_objects(image_id=1, body=body, current_user=mock_user, service=mock_editor_service)
+
+        assert exc.value.status_code == 403
+
+    async def test_generic_error(self, mock_user, mock_editor_service):
+        mock_editor_service.remove_multiple_objects.side_effect = ValueError("no overlapping masks")
+        body = RemoveMultipleRequest(bbox_ids=[1, 2])
+
+        with pytest.raises(HTTPException) as exc:
+            await remove_multiple_objects(image_id=1, body=body, current_user=mock_user, service=mock_editor_service)
+
+        assert exc.value.status_code == 400
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestReplaceObject:
+    async def test_success_full_params(self, mock_user, mock_editor_service, mock_file):
+        mock_editor_service.replace_object.return_value = {"result": "ok"}
+        body = ReplaceRequest(
+            expand_mask_pixels=15,
+            use_color_matching=True,
+            use_edge_blending=True,
+            color_match_method="histogram",
+        )
+
+        result = await replace_object(
             image_id=1,
             bbox_id=2,
             replacement_file=mock_file,
+            body=body,
             current_user=mock_user,
-            service=mock_service
+            service=mock_editor_service,
         )
 
-    assert exc.value.status_code == 403
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_replace_generic_value_error_returns_400(mock_user, mock_service, mock_file):
-    mock_service.replace_object.side_effect = ValueError("invalid color match method")
-
-    with pytest.raises(HTTPException) as exc:
-        await replace_object(
+        mock_editor_service.replace_object.assert_called_once_with(
             image_id=1,
             bbox_id=2,
-            replacement_file=mock_file,
-            current_user=mock_user,
-            service=mock_service
+            replace_image_bytes=b"image-bytes",
+            user_id=1,
+            expand_mask_pixels=15,
+            use_color_matching=True,
+            use_edge_blending=True,
+            color_match_method="histogram",
+            ldm_steps=25,
+            ldm_sampler='plms',
+            hd_strategy='CROP',
+        )
+        assert result["result"] == "ok"
+
+    async def test_unauthorized(self, mock_user, mock_editor_service, mock_file):
+        mock_editor_service.replace_object.side_effect = ValueError("unauthorized access")
+        body = ReplaceRequest()
+
+        with pytest.raises(HTTPException) as exc:
+            await replace_object(
+                image_id=1,
+                bbox_id=2,
+                replacement_file=mock_file,
+                body=body,
+                current_user=mock_user,
+                service=mock_editor_service,
+            )
+
+        assert exc.value.status_code == 403
+
+    async def test_generic_value_error_returns_400(self, mock_user, mock_editor_service, mock_file):
+        mock_editor_service.replace_object.side_effect = ValueError("invalid color match method")
+        body = ReplaceRequest()
+
+        with pytest.raises(HTTPException) as exc:
+            await replace_object(
+                image_id=1,
+                bbox_id=2,
+                replacement_file=mock_file,
+                body=body,
+                current_user=mock_user,
+                service=mock_editor_service,
+            )
+
+        assert exc.value.status_code == 400
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestResetCurrentState:
+    async def test_success(self, mock_user, mock_editor_service):
+        result = await reset_current_state(image_id=1, current_user=mock_user, service=mock_editor_service)
+
+        mock_editor_service._get_image_authorized.assert_awaited_once_with(1, 1)
+        mock_editor_service.reset_current_state.assert_awaited_once_with(1)
+        assert result == {"detail": "State reset to original image"}
+
+    async def test_not_found(self, mock_user, mock_editor_service):
+        mock_editor_service._get_image_authorized.side_effect = ValueError("not found")
+
+        with pytest.raises(HTTPException) as exc:
+            await reset_current_state(image_id=1, current_user=mock_user, service=mock_editor_service)
+
+        assert exc.value.status_code == 404
+
+    async def test_generic_error(self, mock_user, mock_editor_service):
+        mock_editor_service._get_image_authorized.side_effect = ValueError("corrupted state")
+
+        with pytest.raises(HTTPException) as exc:
+            await reset_current_state(image_id=1, current_user=mock_user, service=mock_editor_service)
+
+        assert exc.value.status_code == 400
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestSaveResult:
+    async def test_success(self, mock_user, mock_editor_service):
+        mock_editor_service.save_result.return_value = {"id": 42, "filename": "result.jpg"}
+
+        result = await save_result(image_id=1, current_user=mock_user, service=mock_editor_service)
+
+        mock_editor_service.save_result.assert_called_once_with(image_id=1, user_id=1)
+        assert result["id"] == 42
+
+    async def test_not_found(self, mock_user, mock_editor_service):
+        mock_editor_service.save_result.side_effect = ValueError("image not found")
+
+        with pytest.raises(HTTPException) as exc:
+            await save_result(image_id=1, current_user=mock_user, service=mock_editor_service)
+
+        assert exc.value.status_code == 404
+
+    async def test_unauthorized(self, mock_user, mock_editor_service):
+        mock_editor_service.save_result.side_effect = ValueError("unauthorized")
+
+        with pytest.raises(HTTPException) as exc:
+            await save_result(image_id=1, current_user=mock_user, service=mock_editor_service)
+
+        assert exc.value.status_code == 403
+
+    async def test_generic_error(self, mock_user, mock_editor_service):
+        mock_editor_service.save_result.side_effect = ValueError("no processed state to save")
+
+        with pytest.raises(HTTPException) as exc:
+            await save_result(image_id=1, current_user=mock_user, service=mock_editor_service)
+
+        assert exc.value.status_code == 400
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestUndo:
+    async def test_success(self, mock_user, mock_editor_service):
+        mock_editor_service.undo.return_value = {"detail": "Undone"}
+
+        result = await undo(image_id=1, current_user=mock_user, service=mock_editor_service)
+
+        mock_editor_service.undo.assert_called_once_with(1, 1)
+        assert result["detail"] == "Undone"
+
+    async def test_not_found(self, mock_user, mock_editor_service):
+        mock_editor_service.undo.side_effect = ValueError("not found")
+
+        with pytest.raises(HTTPException) as exc:
+            await undo(image_id=1, current_user=mock_user, service=mock_editor_service)
+
+        assert exc.value.status_code == 404
+
+    async def test_unauthorized(self, mock_user, mock_editor_service):
+        mock_editor_service.undo.side_effect = ValueError("unauthorized")
+
+        with pytest.raises(HTTPException) as exc:
+            await undo(image_id=1, current_user=mock_user, service=mock_editor_service)
+
+        assert exc.value.status_code == 403
+
+    async def test_nothing_to_undo(self, mock_user, mock_editor_service):
+        mock_editor_service.undo.side_effect = ValueError("nothing to undo")
+
+        with pytest.raises(HTTPException) as exc:
+            await undo(image_id=1, current_user=mock_user, service=mock_editor_service)
+
+        assert exc.value.status_code == 400
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestRedo:
+    async def test_success(self, mock_user, mock_editor_service):
+        mock_editor_service.redo.return_value = {"detail": "Redone"}
+
+        result = await redo(image_id=1, current_user=mock_user, service=mock_editor_service)
+
+        mock_editor_service.redo.assert_called_once_with(1, 1)
+        assert result["detail"] == "Redone"
+
+    async def test_not_found(self, mock_user, mock_editor_service):
+        mock_editor_service.redo.side_effect = ValueError("not found")
+
+        with pytest.raises(HTTPException) as exc:
+            await redo(image_id=1, current_user=mock_user, service=mock_editor_service)
+
+        assert exc.value.status_code == 404
+
+    async def test_unauthorized(self, mock_user, mock_editor_service):
+        mock_editor_service.redo.side_effect = ValueError("unauthorized")
+
+        with pytest.raises(HTTPException) as exc:
+            await redo(image_id=1, current_user=mock_user, service=mock_editor_service)
+
+        assert exc.value.status_code == 403
+
+    async def test_nothing_to_redo(self, mock_user, mock_editor_service):
+        mock_editor_service.redo.side_effect = ValueError("nothing to redo")
+
+        with pytest.raises(HTTPException) as exc:
+            await redo(image_id=1, current_user=mock_user, service=mock_editor_service)
+
+        assert exc.value.status_code == 400
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestGetHistory:
+    async def test_success(self, mock_user, mock_editor_service):
+        mock_editor_service.get_history.return_value = {
+            "current_index": 1,
+            "states": ["original.jpg", "edited.jpg"],
+        }
+
+        result = await get_history(image_id=1, current_user=mock_user, service=mock_editor_service)
+
+        mock_editor_service.get_history.assert_called_once_with(1, 1)
+        assert result["current_index"] == 1
+        assert len(result["states"]) == 2
+
+    async def test_not_found(self, mock_user, mock_editor_service):
+        mock_editor_service.get_history.side_effect = ValueError("not found")
+
+        with pytest.raises(HTTPException) as exc:
+            await get_history(image_id=1, current_user=mock_user, service=mock_editor_service)
+
+        assert exc.value.status_code == 404
+
+    async def test_unauthorized(self, mock_user, mock_editor_service):
+        mock_editor_service.get_history.side_effect = ValueError("unauthorized")
+
+        with pytest.raises(HTTPException) as exc:
+            await get_history(image_id=1, current_user=mock_user, service=mock_editor_service)
+
+        assert exc.value.status_code == 403
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestSegmentObjects:
+    async def test_success_default_body(self, mock_user, mock_segmentation_service):
+        mock_segmentation_service.segment_objects.return_value = {"segments": []}
+
+        result = await segment_objects(
+            image_id=1, current_user=mock_user, service=mock_segmentation_service
         )
 
-    assert exc.value.status_code == 400
+        mock_segmentation_service.segment_objects.assert_called_once_with(
+            image_id=1, user_id=1, min_area=500, max_segments=50
+        )
+        assert result == {"segments": []}
+
+    async def test_custom_body(self, mock_user, mock_segmentation_service):
+        body = SegmentRequest(min_area=100, max_segments=10)
+
+        await segment_objects(image_id=1, body=body, current_user=mock_user, service=mock_segmentation_service)
+
+        mock_segmentation_service.segment_objects.assert_called_once_with(
+            image_id=1, user_id=1, min_area=100, max_segments=10
+        )
+
+    async def test_not_found(self, mock_user, mock_segmentation_service):
+        mock_segmentation_service.segment_objects.side_effect = ValueError("image not found")
+
+        with pytest.raises(HTTPException) as exc:
+            await segment_objects(image_id=1, current_user=mock_user, service=mock_segmentation_service)
+
+        assert exc.value.status_code == 404
+
+    async def test_generic_error(self, mock_user, mock_segmentation_service):
+        mock_segmentation_service.segment_objects.side_effect = ValueError("SAM model failed")
+
+        with pytest.raises(HTTPException) as exc:
+            await segment_objects(image_id=1, current_user=mock_user, service=mock_segmentation_service)
+
+        assert exc.value.status_code == 400
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_remove_multiple_unauthorized(mock_user, mock_service):
-    mock_service.remove_multiple_objects.side_effect = ValueError("unauthorized")
+class TestSegmentWithPrompt:
+    async def test_success_with_points(self, mock_user, mock_segmentation_service):
+        mock_segmentation_service.segment_with_prompt.return_value = {"segments": []}
+        body = SegmentWithPromptRequest(point_coords=[(10, 20)], point_labels=[1])
 
-    body = RemoveMultipleRequest(bbox_ids=[1, 2], expand_mask_pixels=5, use_edge_blending=True)
+        result = await segment_with_prompt(
+            image_id=1, body=body, current_user=mock_user, service=mock_segmentation_service
+        )
 
-    with pytest.raises(HTTPException) as exc:
-        await remove_multiple_objects(image_id=1, body=body, current_user=mock_user, service=mock_service)
+        mock_segmentation_service.segment_with_prompt.assert_called_once_with(
+            image_id=1, user_id=1, point_coords=[(10, 20)], point_labels=[1], bbox=None
+        )
+        assert result == {"segments": []}
 
-    assert exc.value.status_code == 403
+    async def test_success_with_bbox(self, mock_user, mock_segmentation_service):
+        mock_segmentation_service.segment_with_prompt.return_value = {"segments": []}
+        bbox = BboxSchema(x1=0, y1=0, x2=50, y2=50)
+        body = SegmentWithPromptRequest(bbox=bbox)
+
+        await segment_with_prompt(
+            image_id=1, body=body, current_user=mock_user, service=mock_segmentation_service
+        )
+
+        _, kwargs = mock_segmentation_service.segment_with_prompt.call_args
+        assert kwargs["bbox"] == bbox.model_dump()
+
+    async def test_not_found(self, mock_user, mock_segmentation_service):
+        mock_segmentation_service.segment_with_prompt.side_effect = ValueError("mask not found")
+        body = SegmentWithPromptRequest()
+
+        with pytest.raises(HTTPException) as exc:
+            await segment_with_prompt(image_id=1, body=body, current_user=mock_user, service=mock_segmentation_service)
+
+        assert exc.value.status_code == 404
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestSamRemoveObject:
+    async def test_success_default_body(self, mock_user, mock_segmentation_service):
+        mock_segmentation_service.sam_remove_object.return_value = {"result_url": "s3://out.jpg"}
+
+        result = await sam_remove_object(
+            image_id=1, mask_id=3, current_user=mock_user, service=mock_segmentation_service
+        )
+
+        mock_segmentation_service.sam_remove_object.assert_called_once_with(
+            image_id=1,
+            mask_id=3,
+            user_id=1,
+            expand_mask_pixels=12,
+            use_edge_blending=True,
+            ldm_steps=25,
+            ldm_sampler='plms',
+            hd_strategy='CROP',
+        )
+        assert result["result_url"] == "s3://out.jpg"
+
+    async def test_not_found(self, mock_user, mock_segmentation_service):
+        mock_segmentation_service.sam_remove_object.side_effect = ValueError("mask not found")
+
+        with pytest.raises(HTTPException) as exc:
+            await sam_remove_object(image_id=1, mask_id=3, current_user=mock_user, service=mock_segmentation_service)
+
+        assert exc.value.status_code == 404
+
+    async def test_unauthorized(self, mock_user, mock_segmentation_service):
+        mock_segmentation_service.sam_remove_object.side_effect = ValueError("unauthorized")
+
+        with pytest.raises(HTTPException) as exc:
+            await sam_remove_object(image_id=1, mask_id=3, current_user=mock_user, service=mock_segmentation_service)
+
+        assert exc.value.status_code == 403
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_remove_multiple_generic_value_error_returns_400(mock_user, mock_service):
-    mock_service.remove_multiple_objects.side_effect = ValueError("no overlapping masks")
+class TestSamReplaceObject:
+    async def test_success_default_body(self, mock_user, mock_segmentation_service, mock_file):
+        mock_segmentation_service.sam_replace_object.return_value = {"result_url": "s3://out.jpg"}
+        body = SamReplaceRequest()
 
-    body = RemoveMultipleRequest(bbox_ids=[1, 2], expand_mask_pixels=5, use_edge_blending=True)
+        result = await sam_replace_object(
+            image_id=1,
+            mask_id=3,
+            replacement_file=mock_file,
+            body=body,
+            current_user=mock_user,
+            service=mock_segmentation_service,
+        )
 
-    with pytest.raises(HTTPException) as exc:
-        await remove_multiple_objects(image_id=1, body=body, current_user=mock_user, service=mock_service)
+        mock_segmentation_service.sam_replace_object.assert_called_once_with(
+            image_id=1,
+            mask_id=3,
+            replacement_image_bytes=b"image-bytes",
+            user_id=1,
+            expand_mask_pixels=8,
+            use_color_matching=True,
+            use_edge_blending=False,
+            color_match_method='color_transfer',
+            ldm_steps=25,
+            ldm_sampler='plms',
+            hd_strategy='CROP',
+        )
+        assert result["result_url"] == "s3://out.jpg"
 
-    assert exc.value.status_code == 400
+    async def test_generic_error(self, mock_user, mock_segmentation_service, mock_file):
+        mock_segmentation_service.sam_replace_object.side_effect = ValueError("blending failed")
+        body = SamReplaceRequest()
 
+        with pytest.raises(HTTPException) as exc:
+            await sam_replace_object(
+                image_id=1,
+                mask_id=3,
+                replacement_file=mock_file,
+                body=body,
+                current_user=mock_user,
+                service=mock_segmentation_service,
+            )
 
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_detect_generic_value_error_returns_400(mock_user, mock_service):
-    mock_service.detect_objects.side_effect = ValueError("bad confidence threshold")
-
-    with pytest.raises(HTTPException) as exc:
-        await detect_objects(image_id=1, current_user=mock_user, service=mock_service)
-
-    assert exc.value.status_code == 400
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_remove_generic_value_error_returns_400(mock_user, mock_service):
-    mock_service.remove_object.side_effect = ValueError("mask generation failed")
-
-    with pytest.raises(HTTPException) as exc:
-        await remove_object(image_id=1, bbox_id=2, current_user=mock_user, service=mock_service)
-
-    assert exc.value.status_code == 400
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_reset_generic_value_error_returns_400(mock_user, mock_service):
-    mock_service._get_image_authorized.side_effect = ValueError("corrupted state")
-
-    with pytest.raises(HTTPException) as exc:
-        await reset_current_state(image_id=1, current_user=mock_user, service=mock_service)
-
-    assert exc.value.status_code == 400
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_save_result_success(mock_user, mock_service):
-    mock_service.save_result.return_value = {"id": 42, "filename": "result.jpg"}
-
-    result = await save_result(image_id=1, current_user=mock_user, service=mock_service)
-
-    mock_service.save_result.assert_called_once_with(image_id=1, user_id=1)
-    assert result["id"] == 42
+        assert exc.value.status_code == 400
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_save_result_not_found(mock_user, mock_service):
-    mock_service.save_result.side_effect = ValueError("image not found")
+class TestExtractObject:
+    async def test_success_default_body(self, mock_user, mock_asset_service):
+        mock_asset_service.extract_object.return_value = {"extracted_url": "s3://obj.png"}
 
-    with pytest.raises(HTTPException) as exc:
-        await save_result(image_id=1, current_user=mock_user, service=mock_service)
+        result = await extract_object(
+            image_id=1, mask_id=3, current_user=mock_user, service=mock_asset_service
+        )
 
-    assert exc.value.status_code == 404
+        mock_asset_service.extract_object.assert_called_once_with(
+            image_id=1, mask_id=3, user_id=1, padding_pixels=8
+        )
+        assert result["extracted_url"] == "s3://obj.png"
 
+    async def test_custom_padding(self, mock_user, mock_asset_service):
+        body = ExtractRequest(padding_pixels=20)
 
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_save_result_unauthorized(mock_user, mock_service):
-    mock_service.save_result.side_effect = ValueError("unauthorized")
+        await extract_object(image_id=1, mask_id=3, body=body, current_user=mock_user, service=mock_asset_service)
 
-    with pytest.raises(HTTPException) as exc:
-        await save_result(image_id=1, current_user=mock_user, service=mock_service)
+        mock_asset_service.extract_object.assert_called_once_with(
+            image_id=1, mask_id=3, user_id=1, padding_pixels=20
+        )
 
-    assert exc.value.status_code == 403
+    async def test_not_found(self, mock_user, mock_asset_service):
+        mock_asset_service.extract_object.side_effect = ValueError("mask not found")
 
+        with pytest.raises(HTTPException) as exc:
+            await extract_object(image_id=1, mask_id=3, current_user=mock_user, service=mock_asset_service)
 
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_save_result_generic_value_error_returns_400(mock_user, mock_service):
-    mock_service.save_result.side_effect = ValueError("no processed state to save")
-
-    with pytest.raises(HTTPException) as exc:
-        await save_result(image_id=1, current_user=mock_user, service=mock_service)
-
-    assert exc.value.status_code == 400
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_undo_success(mock_user, mock_service):
-    mock_service.undo.return_value = {"detail": "Undone"}
-
-    result = await undo(image_id=1, current_user=mock_user, service=mock_service)
-
-    mock_service.undo.assert_called_once_with(1, 1)
-    assert result["detail"] == "Undone"
+        assert exc.value.status_code == 404
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_undo_not_found(mock_user, mock_service):
-    mock_service.undo.side_effect = ValueError("not found")
+class TestPasteExtractedObject:
+    async def test_success(self, mock_user, mock_asset_service):
+        mock_asset_service.paste_extracted_object.return_value = {"result_url": "s3://pasted.jpg"}
+        target_bbox = BboxSchema(x1=0, y1=0, x2=50, y2=50)
+        body = PasteRequest(
+            extracted_url="s3://obj.png",
+            target_bbox=target_bbox,
+            scale=1.5,
+            use_color_matching=False,
+            use_edge_blending=True,
+            color_match_method="histogram",
+        )
 
-    with pytest.raises(HTTPException) as exc:
-        await undo(image_id=1, current_user=mock_user, service=mock_service)
+        result = await paste_extracted_object(
+            image_id=1, body=body, current_user=mock_user, service=mock_asset_service
+        )
 
-    assert exc.value.status_code == 404
+        mock_asset_service.paste_extracted_object.assert_called_once_with(
+            image_id=1,
+            user_id=1,
+            extracted_url="s3://obj.png",
+            target_bbox=target_bbox.model_dump(),
+            scale=1.5,
+            use_color_matching=False,
+            use_edge_blending=True,
+            color_match_method="histogram",
+        )
+        assert result["result_url"] == "s3://pasted.jpg"
 
+    async def test_not_found(self, mock_user, mock_asset_service):
+        mock_asset_service.paste_extracted_object.side_effect = ValueError("extracted object not found")
+        body = PasteRequest(
+            extracted_url="s3://obj.png",
+            target_bbox=BboxSchema(x1=0, y1=0, x2=10, y2=10),
+        )
 
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_undo_unauthorized(mock_user, mock_service):
-    mock_service.undo.side_effect = ValueError("unauthorized")
+        with pytest.raises(HTTPException) as exc:
+            await paste_extracted_object(image_id=1, body=body, current_user=mock_user, service=mock_asset_service)
 
-    with pytest.raises(HTTPException) as exc:
-        await undo(image_id=1, current_user=mock_user, service=mock_service)
+        assert exc.value.status_code == 404
 
-    assert exc.value.status_code == 403
+    async def test_generic_error(self, mock_user, mock_asset_service):
+        mock_asset_service.paste_extracted_object.side_effect = ValueError("invalid scale")
+        body = PasteRequest(
+            extracted_url="s3://obj.png",
+            target_bbox=BboxSchema(x1=0, y1=0, x2=10, y2=10),
+        )
 
+        with pytest.raises(HTTPException) as exc:
+            await paste_extracted_object(image_id=1, body=body, current_user=mock_user, service=mock_asset_service)
 
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_undo_nothing_to_undo_returns_400(mock_user, mock_service):
-    mock_service.undo.side_effect = ValueError("nothing to undo")
-
-    with pytest.raises(HTTPException) as exc:
-        await undo(image_id=1, current_user=mock_user, service=mock_service)
-
-    assert exc.value.status_code == 400
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_redo_success(mock_user, mock_service):
-    mock_service.redo.return_value = {"detail": "Redone"}
-
-    result = await redo(image_id=1, current_user=mock_user, service=mock_service)
-
-    mock_service.redo.assert_called_once_with(1, 1)
-    assert result["detail"] == "Redone"
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_redo_not_found(mock_user, mock_service):
-    mock_service.redo.side_effect = ValueError("not found")
-
-    with pytest.raises(HTTPException) as exc:
-        await redo(image_id=1, current_user=mock_user, service=mock_service)
-
-    assert exc.value.status_code == 404
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_redo_unauthorized(mock_user, mock_service):
-    mock_service.redo.side_effect = ValueError("unauthorized")
-
-    with pytest.raises(HTTPException) as exc:
-        await redo(image_id=1, current_user=mock_user, service=mock_service)
-
-    assert exc.value.status_code == 403
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_redo_nothing_to_redo_returns_400(mock_user, mock_service):
-    mock_service.redo.side_effect = ValueError("nothing to redo")
-
-    with pytest.raises(HTTPException) as exc:
-        await redo(image_id=1, current_user=mock_user, service=mock_service)
-
-    assert exc.value.status_code == 400
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_get_history_success(mock_user, mock_service):
-    mock_service.get_history.return_value = {
-        "current_index": 1,
-        "states": ["original.jpg", "edited.jpg"]
-    }
-
-    result = await get_history(image_id=1, current_user=mock_user, service=mock_service)
-
-    mock_service.get_history.assert_called_once_with(1, 1)
-    assert result["current_index"] == 1
-    assert len(result["states"]) == 2
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_get_history_not_found(mock_user, mock_service):
-    mock_service.get_history.side_effect = ValueError("not found")
-
-    with pytest.raises(HTTPException) as exc:
-        await get_history(image_id=1, current_user=mock_user, service=mock_service)
-
-    assert exc.value.status_code == 404
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_get_history_unauthorized(mock_user, mock_service):
-    mock_service.get_history.side_effect = ValueError("unauthorized")
-
-    with pytest.raises(HTTPException) as exc:
-        await get_history(image_id=1, current_user=mock_user, service=mock_service)
-
-    assert exc.value.status_code == 403
+        assert exc.value.status_code == 400
