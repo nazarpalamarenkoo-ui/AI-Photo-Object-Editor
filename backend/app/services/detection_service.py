@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.repository.detection_repo import DetectionRepository
 from app.repository.image_repo import ImageRepository
-from app.storage.redis_storage import RedisImageCache
+from app.storage.redis.redis_storage import RedisStorage
 from app.db.models.detection import Detection
 
 class DetectionService:
@@ -11,7 +11,7 @@ class DetectionService:
     def __init__(
         self,
         db: AsyncSession,
-        redis_cache: RedisImageCache,
+        redis_cache: RedisStorage,
         detection_repo: DetectionRepository,
         image_repo: ImageRepository
     ):

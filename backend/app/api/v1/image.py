@@ -10,7 +10,7 @@ from app.db.schemas.image import ImageResponse
 from app.repository.image_repo import ImageRepository
 from app.services.image_service import ImageService
 from app.storage.s3_storage import S3Storage
-from app.storage.redis_storage import RedisImageCache
+from app.storage.redis.redis_storage import RedisStorage
 
 router = APIRouter(prefix="/images", tags=["Images"])
 
@@ -18,7 +18,7 @@ def get_image_service(db: AsyncSession = Depends(get_db)) -> ImageService:
     return ImageService(
         db=db,
         s3=S3Storage(),
-        redis_cache=RedisImageCache(),
+        redis_cache=RedisStorage(),
         image_repo=ImageRepository(db)
     )
 

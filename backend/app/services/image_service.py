@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.repository.image_repo import ImageRepository
 from app.storage.s3_storage import S3Storage
-from app.storage.redis_storage import RedisImageCache
+from app.storage.redis.redis_storage import RedisStorage
 from app.db.models.image import Image
 
 class ImageService:
@@ -14,7 +14,7 @@ class ImageService:
         self,
         db: AsyncSession,
         s3: S3Storage,
-        redis_cache: RedisImageCache,
+        redis_cache: RedisStorage,
         image_repo: ImageRepository
     ):
         

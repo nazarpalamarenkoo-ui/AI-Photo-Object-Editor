@@ -9,7 +9,7 @@ from app.db.schemas.detection import DetectionResponse
 from app.repository.detection_repo import DetectionRepository
 from app.repository.image_repo import ImageRepository
 from app.services.detection_service import DetectionService
-from app.storage.redis_storage import RedisImageCache
+from app.storage.redis.redis_storage import RedisStorage
 
 router = APIRouter(prefix="/detections", tags=["Detections"])
 
@@ -17,7 +17,7 @@ router = APIRouter(prefix="/detections", tags=["Detections"])
 def get_detection_service(db: AsyncSession = Depends(get_db)) -> DetectionService:
     return DetectionService(
         db=db,
-        redis_cache=RedisImageCache(),
+        redis_cache=RedisStorage(),
         detection_repo=DetectionRepository(db),
         image_repo=ImageRepository(db)
     )
