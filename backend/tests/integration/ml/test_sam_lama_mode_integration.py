@@ -34,6 +34,13 @@ def _rgba_png(size: Tuple[int, int], color=(200, 30, 30, 255)) -> bytes:
     return buf.getvalue()
 
 
+def _rgba_cutout(size: Tuple[int, int], color=(0, 200, 0, 255)) -> bytes:
+    """A pre-cut RGBA asset (e.g. from an asset library) with no transparency to strip."""
+    buf = BytesIO()
+    Image.new("RGBA", size, color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
 @pytest.fixture
 def module():
     return pytest.importorskip(MODULE_PATH)
@@ -43,7 +50,7 @@ def module():
 def real_edge_blender(module):
     try:
         return module.get_edge_blender()
-    except Exception as exc:  # pragma: no cover - environment dependent
+    except Exception as exc:
         pytest.skip(f"could not construct real EdgeBlender: {exc}")
 
 
@@ -59,7 +66,7 @@ def real_color_matcher(module):
 def real_compositor(module):
     try:
         return module.get_compositor()
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:
         pytest.skip(f"could not construct real compositor: {exc}")
 
 
@@ -287,3 +294,91 @@ async def test_segment_objects_reports_real_image_dimensions(mode, stub_segmento
     result = await mode.segment_objects(image_bytes, min_area=0)
 
     assert result["image_size"] == (333, 217)
+
+
+# ---------------------------------------------------------------------------
+# replace_object with replacement_is_cutout=True (pre-cut RGBA asset, no rembg)
+# ---------------------------------------------------------------------------
+
+async def test_replace_object_with_cutout_skips_background_remover(mode):
+    image_bytes = _rgb_png((120, 120), color=(20, 20, 20))
+    mask_bytes = _mask_png((120, 120), box=(40, 40, 80, 80))
+    cutout_bytes = _rgba_cutout((50, 50))
+    bbox = {"x1": 40, "y1": 40, "x2": 80, "y2": 80}
+
+    await mode.replace_object(
+        image_bytes, mask_bytes, bbox, cutout_bytes,
+        use_color_matching=False, use_edge_blending=False,
+        replacement_is_cutout=True,
+    )
+
+    mode.background_remover.remove_and_resize.assert_not_called()
+
+
+async def test_replace_object_with_cutout_resizes_to_bbox_dimensions(mode):
+    image_bytes = _rgb_png((120, 120), color=(20, 20, 20))
+    mask_bytes = _mask_png((120, 120), box=(10, 10, 50, 70))
+    cutout_bytes = _rgba_cutout((10, 10))
+    bbox = {"x1": 10, "y1": 10, "x2": 50, "y2": 70}  # 40 x 60
+
+    captured = {}
+    original = mode._resize_rgba_to_bbox
+
+    def spy(img_bytes, size):
+        captured["size"] = size
+        return original(img_bytes, size)
+
+    mode._resize_rgba_to_bbox = spy
+
+    await mode.replace_object(
+        image_bytes, mask_bytes, bbox, cutout_bytes,
+        use_color_matching=False, replacement_is_cutout=True,
+    )
+
+    assert captured["size"] == (40, 60)
+
+
+async def test_replace_object_with_cutout_places_color_at_bbox_location(mode):
+    image_bytes = _rgb_png((120, 120), color=(20, 20, 20))
+    mask_bytes = _mask_png((120, 120), box=(40, 40, 80, 80))
+    cutout_bytes = _rgba_cutout((50, 50), color=(0, 220, 0, 255))
+    bbox = {"x1": 40, "y1": 40, "x2": 80, "y2": 80}
+
+    result = await mode.replace_object(
+        image_bytes, mask_bytes, bbox, cutout_bytes,
+        use_color_matching=False, use_edge_blending=False,
+        replacement_is_cutout=True,
+    )
+
+    decoded = np.array(Image.open(BytesIO(result["result_bytes"])).convert("RGB"))
+    region = decoded[40:80, 40:80]
+    assert region[..., 1].mean() > region[..., 0].mean()
+    assert region[..., 1].mean() > region[..., 2].mean()
+
+
+async def test_replace_object_with_cutout_end_to_end_canvas_size(mode):
+    image_bytes = _rgb_png((100, 100), color=(30, 30, 30))
+    mask_bytes = _mask_png((100, 100), box=(20, 20, 60, 60))
+    cutout_bytes = _rgba_cutout((40, 40), color=(255, 0, 0, 255))
+    bbox = {"x1": 20, "y1": 20, "x2": 60, "y2": 60}
+
+    result = await mode.replace_object(
+        image_bytes, mask_bytes, bbox, cutout_bytes,
+        use_color_matching=True, use_edge_blending=False,
+        replacement_is_cutout=True,
+    )
+
+    decoded = Image.open(BytesIO(result["result_bytes"]))
+    assert decoded.size == (100, 100)
+
+
+async def test_replace_object_default_still_uses_background_remover(mode):
+    """Sanity check: replacement_is_cutout defaults to False, preserving old behavior."""
+    image_bytes = _rgb_png((120, 120))
+    mask_bytes = _mask_png((120, 120), box=(40, 40, 80, 80))
+    replacement_bytes = _rgb_png((50, 50), color=(0, 200, 0))
+    bbox = {"x1": 40, "y1": 40, "x2": 80, "y2": 80}
+
+    await mode.replace_object(image_bytes, mask_bytes, bbox, replacement_bytes)
+
+    mode.background_remover.remove_and_resize.assert_called_once()

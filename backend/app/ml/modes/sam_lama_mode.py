@@ -10,6 +10,7 @@ from app.ml.processors.edge_blender import EdgeBlender, get_edge_blender
 from app.ml.processors.color_matcher import ColorMatcher, get_color_matcher
 from app.ml.processors.background_remover import BackgroundRemover, get_background_remover
 from app.ml.processors.image_compositor import get_compositor
+from app.ml.processors.polygon_mask import PolygonMasker, get_polygon_masker
 
 
 class SAMLamaMode:
@@ -32,6 +33,7 @@ class SAMLamaMode:
         edge_blender: Optional[EdgeBlender] = None,
         color_matcher: Optional[ColorMatcher] = None,
         background_remover: Optional[BackgroundRemover] = None,
+        polygon_masker: Optional[PolygonMasker] = None,
         device: str = "cpu",
     ):
         self.device = device
@@ -41,6 +43,7 @@ class SAMLamaMode:
         self.color_matcher = color_matcher or get_color_matcher()
         self.background_remover = background_remover or get_background_remover(rembg_available=True)
         self.compositor = get_compositor()
+        self.polygon_masker = polygon_masker or get_polygon_masker()
         print(f"SAMMode initialized (device: {device})")
 
 
@@ -87,6 +90,7 @@ class SAMLamaMode:
         point_coords: Optional[List[Tuple[int, int]]] = None,
         point_labels: Optional[List[int]] = None,
         bbox: Optional[Dict[str, int]] = None,
+        multimask_output: Optional[bool] = None
     ) -> Dict:
         """
         Prompt-based segmentation using points or a bounding box.
@@ -108,6 +112,7 @@ class SAMLamaMode:
             point_coords=point_coords,
             point_labels=point_labels,
             bbox=bbox,
+            multimask_output=multimask_output
         )
 
         for idx, seg in enumerate(result["segments"]):
@@ -120,12 +125,60 @@ class SAMLamaMode:
             "image_size": img.size,
         }
 
+    async def segment_by_polygon(
+        self,
+        image_bytes: bytes,
+        points: List[Tuple[int, int]],
+        smooth: bool = True,
+        smoothing_factor: float = 0.0,
+        feather_px: int = 0,
+    ) -> Dict:
+        """
+        Exact segmentation by polygon points (lasso), without SAM2.
 
+        Returns:
+            Dict: segments (1 element: bbox, area, mask_bytes, mask_id=0,
+                bbox_id=0, source='polygon'), metrics, image_size
+        """
+        img = Image.open(BytesIO(image_bytes))
+        W, H = img.size
+
+        mask_bytes = await self.polygon_masker.generate_mask(
+            image_size=(W, H),
+            points=points,
+            smooth=smooth,
+            smoothing_factor=smoothing_factor,
+            feather_px=feather_px,
+        )
+
+        mask_arr = np.array(Image.open(BytesIO(mask_bytes)))
+        ys, xs = np.where(mask_arr > 0)
+        if len(xs) == 0:
+            raise ValueError("Polygon produced an empty mask — check point coordinates")
+
+        bbox = {"x1": int(xs.min()), "y1": int(ys.min()), "x2": int(xs.max()), "y2": int(ys.max())}
+        area = int((mask_arr > 0).sum())
+
+        segment = {
+            "mask_id": 0,
+            "bbox_id": 0,
+            "bbox": bbox,
+            "area": area,
+            "source": "polygon",
+            "mask_bytes": mask_bytes,
+        }
+
+        return {
+            "segments": [segment],
+            "metrics": {"num_segments": 1, "total_area_px": area},
+            "image_size": (W, H),
+        }
+    
     async def remove_object(
         self,
         image_bytes: bytes,
         mask_bytes: bytes,
-        use_edge_blending: bool = True,
+        use_edge_blending: bool = False,
         expand_mask_pixels: int = 12,
         ldm_steps: int = 25,
         ldm_sampler: str = "plms",
@@ -188,19 +241,24 @@ class SAMLamaMode:
         mask_bytes: bytes,
         bbox: Dict[str, int],
         replacement_image_bytes: bytes,
-        use_color_matching: bool = True,
+        use_color_matching: bool = False,
         use_edge_blending: bool = False,
         color_match_method: str = "color_transfer",
         expand_mask_pixels: int = 8,
         ldm_steps: int = 25,
         ldm_sampler: str = "plms",
         hd_strategy: str = "CROP",
+        replacement_is_cutout: bool = False,
     ) -> Dict:
         """
         Object replacement using LaMa + compositing.
 
         Pipeline:
-            1. Remove the background from the replacement image (rembg)
+            1. Prepare the replacement as an RGBA cutout sized to the bbox —
+               either by running background removal (rembg) on a plain
+               photo, or, when the replacement is already a pre-cut RGBA
+               asset from the asset library, by simply resizing it
+               (see replacement_is_cutout).
             2. Dilate the SAM mask
             3. Use LaMa REMOVE to generate a clean background
             4. Composite the replacement image using its alpha channel
@@ -211,7 +269,10 @@ class SAMLamaMode:
             image_bytes:               Input image
             mask_bytes:                Binary mask from SAM
             bbox:                      Segment bounding box {'x1', 'y1', 'x2', 'y2'}
-            replacement_image_bytes:   Replacement image
+            replacement_image_bytes:   Replacement image bytes. A plain photo
+                                       when replacement_is_cutout
+                                       is False, or an already-transparent
+                                       RGBA PNG when replacement_is_cutout is True.
             use_color_matching:        Apply color correction (default: True)
             use_edge_blending:         Apply edge blending (default: False)
             color_match_method:        Color matching method (default: 'color_transfer')
@@ -219,6 +280,11 @@ class SAMLamaMode:
             ldm_steps:                 Number of LaMa inference steps (default: 25)
             ldm_sampler:               LaMa sampler (default: 'plms')
             hd_strategy:               High-resolution processing strategy (default: 'CROP')
+            replacement_is_cutout:     If True, skip rembg background removal
+                                       and treat replacement_image_bytes as an
+                                       already-transparent RGBA cutout that
+                                       only needs resizing to the bbox 
+                                       (default: False)
 
         Returns:
             Dict:
@@ -228,9 +294,14 @@ class SAMLamaMode:
         bbox_w = bbox["x2"] - bbox["x1"]
         bbox_h = bbox["y2"] - bbox["y1"]
 
-        replacement_rgba = await self.background_remover.remove_and_resize(
-            replacement_image_bytes, (bbox_w, bbox_h)
-        )
+        if replacement_is_cutout:
+            replacement_rgba = await asyncio.to_thread(
+                self._resize_rgba_to_bbox, replacement_image_bytes, (bbox_w, bbox_h)
+            )
+        else:
+            replacement_rgba = await self.background_remover.remove_and_resize(
+                replacement_image_bytes, (bbox_w, bbox_h)
+            )
 
         if expand_mask_pixels > 0:
             mask_bytes = await self._dilate_mask(mask_bytes, expand_mask_pixels)
@@ -357,8 +428,8 @@ class SAMLamaMode:
         extracted_bytes: bytes,
         target_bbox: Dict[str, int],
         scale: float = 1.0,
-        use_color_matching: bool = True,
-        use_edge_blending: bool = True,
+        use_color_matching: bool = False,
+        use_edge_blending: bool = False,
         color_match_method: str = "color_transfer",
     ) -> Dict:
         """
@@ -468,6 +539,25 @@ class SAMLamaMode:
             "paste_bbox": paste_bbox,
             "object_size": (new_w, new_h),
         }
+
+    def _resize_rgba_to_bbox(self, image_bytes: bytes, size: Tuple[int, int]) -> bytes:
+        """
+        Resize an already-transparent RGBA cutout (e.g. a saved asset) to
+        exactly fit the target bbox, without touching its alpha channel —
+        used instead of background removal when replacement_is_cutout=True.
+
+        Args:
+            image_bytes: RGBA PNG bytes of the cutout.
+            size:        Target (width, height) matching the bbox.
+
+        Returns:
+            RGBA PNG bytes resized to `size`.
+        """
+        img = Image.open(BytesIO(image_bytes)).convert("RGBA")
+        img = img.resize(size, Image.Resampling.LANCZOS)
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
 
     async def _dilate_mask(self, mask_bytes: bytes, pixels: int) -> bytes:
         """Expands the mask by N pixels using morphological dilation."""

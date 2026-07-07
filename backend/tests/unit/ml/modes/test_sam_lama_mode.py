@@ -30,6 +30,14 @@ def _mask_png(size: Tuple[int, int] = (60, 60), box=(20, 20, 40, 40)) -> bytes:
     return buf.getvalue()
 
 
+def _empty_mask_png(size: Tuple[int, int] = (60, 60)) -> bytes:
+    arr = np.zeros(size[::-1], dtype=np.uint8)
+    img = Image.fromarray(arr, mode="L")
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def _rgba_png(size: Tuple[int, int] = (20, 20), color=(200, 30, 30, 255)) -> bytes:
     img = Image.new("RGBA", size, color)
     buf = BytesIO()
@@ -55,6 +63,11 @@ def replacement_image_bytes():
 @pytest.fixture
 def extracted_bytes():
     return _rgba_png((20, 20))
+
+
+@pytest.fixture
+def polygon_points():
+    return [(10, 10), (50, 10), (50, 50), (10, 50)]
 
 
 @pytest.fixture
@@ -117,6 +130,13 @@ def mock_compositor(image_bytes):
 
 
 @pytest.fixture
+def mock_polygon_masker():
+    pm = MagicMock()
+    pm.generate_mask = AsyncMock(return_value=_mask_png((60, 60), box=(20, 20, 40, 40)))
+    return pm
+
+
+@pytest.fixture
 def mode(
     monkeypatch,
     mock_segmentor,
@@ -125,6 +145,7 @@ def mode(
     mock_color_matcher,
     mock_background_remover,
     mock_compositor,
+    mock_polygon_masker,
 ):
     module = pytest.importorskip(MODULE_PATH)
     monkeypatch.setattr(module, "get_compositor", lambda: mock_compositor)
@@ -135,14 +156,18 @@ def mode(
         edge_blender=mock_edge_blender,
         color_matcher=mock_color_matcher,
         background_remover=mock_background_remover,
+        polygon_masker=mock_polygon_masker,
         device="cpu",
     )
 
 
-def test_init_uses_injected_dependencies(mode, mock_segmentor, mock_inpainter, mock_compositor):
+def test_init_uses_injected_dependencies(
+    mode, mock_segmentor, mock_inpainter, mock_compositor, mock_polygon_masker
+):
     assert mode.segmentor is mock_segmentor
     assert mode.inpainter is mock_inpainter
     assert mode.compositor is mock_compositor
+    assert mode.polygon_masker is mock_polygon_masker
     assert mode.device == "cpu"
 
 
@@ -155,6 +180,7 @@ def test_init_builds_defaults_when_none_provided(monkeypatch):
     fake_color_matcher = MagicMock(name="default_color_matcher")
     fake_bg_remover = MagicMock(name="default_bg_remover")
     fake_compositor = MagicMock(name="default_compositor")
+    fake_polygon_masker = MagicMock(name="default_polygon_masker")
 
     monkeypatch.setattr(module, "get_segmentor", lambda device="cpu": fake_segmentor)
     monkeypatch.setattr(module, "get_inpainter", lambda device="cpu": fake_inpainter)
@@ -162,6 +188,7 @@ def test_init_builds_defaults_when_none_provided(monkeypatch):
     monkeypatch.setattr(module, "get_color_matcher", lambda: fake_color_matcher)
     monkeypatch.setattr(module, "get_background_remover", lambda rembg_available=True: fake_bg_remover)
     monkeypatch.setattr(module, "get_compositor", lambda: fake_compositor)
+    monkeypatch.setattr(module, "get_polygon_masker", lambda: fake_polygon_masker)
 
     instance = module.SAMLamaMode()
 
@@ -171,6 +198,7 @@ def test_init_builds_defaults_when_none_provided(monkeypatch):
     assert instance.color_matcher is fake_color_matcher
     assert instance.background_remover is fake_bg_remover
     assert instance.compositor is fake_compositor
+    assert instance.polygon_masker is fake_polygon_masker
 
 
 @pytest.mark.asyncio
@@ -226,7 +254,7 @@ async def test_segment_with_prompt_forwards_args_to_segmentor(mode, image_bytes,
     )
 
     mock_segmentor.segment_with_prompt.assert_called_once_with(
-        image_bytes, point_coords=[(1, 1)], point_labels=[1], bbox=bbox
+        image_bytes, point_coords=[(1, 1)], point_labels=[1], bbox=bbox, multimask_output=None
     )
 
 
@@ -242,6 +270,96 @@ async def test_segment_with_prompt_returns_image_size(mode, image_bytes):
     result = await mode.segment_with_prompt(image_bytes, bbox={"x1": 0, "y1": 0, "x2": 5, "y2": 5})
 
     assert result["image_size"] == (60, 60)
+
+
+# ---------------------------------------------------------------------------
+# segment_by_polygon
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_segment_by_polygon_calls_polygon_masker_with_params(mode, image_bytes, polygon_points, mock_polygon_masker):
+    await mode.segment_by_polygon(
+        image_bytes, points=polygon_points, smooth=False, smoothing_factor=1.5, feather_px=3,
+    )
+
+    mock_polygon_masker.generate_mask.assert_called_once_with(
+        image_size=(60, 60), points=polygon_points, smooth=False, smoothing_factor=1.5, feather_px=3,
+    )
+
+
+@pytest.mark.asyncio
+async def test_segment_by_polygon_uses_default_params(mode, image_bytes, polygon_points, mock_polygon_masker):
+    await mode.segment_by_polygon(image_bytes, points=polygon_points)
+
+    mock_polygon_masker.generate_mask.assert_called_once_with(
+        image_size=(60, 60), points=polygon_points, smooth=True, smoothing_factor=0.0, feather_px=0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_segment_by_polygon_returns_single_segment_with_expected_fields(mode, image_bytes, polygon_points):
+    result = await mode.segment_by_polygon(image_bytes, points=polygon_points)
+
+    assert len(result["segments"]) == 1
+    segment = result["segments"][0]
+    assert segment["mask_id"] == 0
+    assert segment["bbox_id"] == 0
+    assert segment["source"] == "polygon"
+    assert isinstance(segment["mask_bytes"], bytes)
+
+
+@pytest.mark.asyncio
+async def test_segment_by_polygon_bbox_and_area_match_mask_white_region(
+    mode, image_bytes, polygon_points, mock_polygon_masker
+):
+    mock_polygon_masker.generate_mask = AsyncMock(return_value=_mask_png((60, 60), box=(20, 20, 40, 40)))
+
+    result = await mode.segment_by_polygon(image_bytes, points=polygon_points)
+
+    segment = result["segments"][0]
+    # box=(20, 20, 40, 40) fills rows/cols 20..39 inclusive -> max index 39
+    assert segment["bbox"] == {"x1": 20, "y1": 20, "x2": 39, "y2": 39}
+    assert segment["area"] == 20 * 20
+
+
+@pytest.mark.asyncio
+async def test_segment_by_polygon_returns_image_size(mode, image_bytes, polygon_points):
+    result = await mode.segment_by_polygon(image_bytes, points=polygon_points)
+
+    assert result["image_size"] == (60, 60)
+
+
+@pytest.mark.asyncio
+async def test_segment_by_polygon_returns_metrics(mode, image_bytes, polygon_points, mock_polygon_masker):
+    mock_polygon_masker.generate_mask = AsyncMock(return_value=_mask_png((60, 60), box=(20, 20, 40, 40)))
+
+    result = await mode.segment_by_polygon(image_bytes, points=polygon_points)
+
+    assert result["metrics"]["num_segments"] == 1
+    assert result["metrics"]["total_area_px"] == 20 * 20
+
+
+@pytest.mark.asyncio
+async def test_segment_by_polygon_raises_on_empty_mask(mode, image_bytes, polygon_points, mock_polygon_masker):
+    mock_polygon_masker.generate_mask = AsyncMock(return_value=_empty_mask_png((60, 60)))
+
+    with pytest.raises(ValueError, match="Polygon produced an empty mask"):
+        await mode.segment_by_polygon(image_bytes, points=polygon_points)
+
+
+@pytest.mark.asyncio
+async def test_segment_by_polygon_uses_real_image_dimensions(mode, mock_polygon_masker):
+    image_bytes = _rgb_png((333, 217))
+    mock_polygon_masker.generate_mask = AsyncMock(return_value=_mask_png((333, 217), box=(50, 50, 100, 100)))
+
+    result = await mode.segment_by_polygon(image_bytes, points=[(50, 50), (100, 50), (100, 100), (50, 100)])
+
+    assert result["image_size"] == (333, 217)
+    mock_polygon_masker.generate_mask.assert_called_once_with(
+        image_size=(333, 217),
+        points=[(50, 50), (100, 50), (100, 100), (50, 100)],
+        smooth=True, smoothing_factor=0.0, feather_px=0,
+    )
 
 
 @pytest.mark.asyncio
@@ -586,6 +704,82 @@ async def test_alpha_to_mask_places_alpha_at_paste_bbox(mode, extracted_bytes):
     assert arr[5:25, 5:25].min() > 0
     # Outside the bbox should remain zero
     assert arr[0:5, 0:5].max() == 0
+
+
+# ---------------------------------------------------------------------------
+# _resize_rgba_to_bbox
+# ---------------------------------------------------------------------------
+
+def test_resize_rgba_to_bbox_returns_target_size(mode):
+    source = _rgba_png((20, 20))
+
+    result = mode._resize_rgba_to_bbox(source, size=(40, 15))
+
+    decoded = Image.open(BytesIO(result))
+    assert decoded.size == (40, 15)
+
+
+def test_resize_rgba_to_bbox_returns_valid_png_bytes(mode):
+    source = _rgba_png((20, 20))
+
+    result = mode._resize_rgba_to_bbox(source, size=(30, 30))
+
+    assert isinstance(result, bytes)
+    decoded = Image.open(BytesIO(result))
+    assert decoded.format == "PNG"
+
+
+def test_resize_rgba_to_bbox_preserves_rgba_mode(mode):
+    source = _rgba_png((20, 20))
+
+    result = mode._resize_rgba_to_bbox(source, size=(30, 30))
+
+    decoded = Image.open(BytesIO(result))
+    assert decoded.mode == "RGBA"
+
+
+def test_resize_rgba_to_bbox_converts_non_rgba_input(mode):
+    source = _rgb_png((20, 20))  # RGB, no alpha channel
+
+    result = mode._resize_rgba_to_bbox(source, size=(20, 20))
+
+    decoded = Image.open(BytesIO(result))
+    assert decoded.mode == "RGBA"
+
+
+def test_resize_rgba_to_bbox_preserves_opaque_alpha(mode):
+    img = Image.new("RGBA", (20, 20), (200, 30, 30, 255))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    source = buf.getvalue()
+
+    result = mode._resize_rgba_to_bbox(source, size=(10, 10))
+
+    decoded = Image.open(BytesIO(result)).convert("RGBA")
+    arr = np.array(decoded)
+    assert arr[..., 3].min() == 255
+
+
+def test_resize_rgba_to_bbox_preserves_transparent_alpha(mode):
+    img = Image.new("RGBA", (20, 20), (0, 0, 0, 0))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    source = buf.getvalue()
+
+    result = mode._resize_rgba_to_bbox(source, size=(10, 10))
+
+    decoded = Image.open(BytesIO(result)).convert("RGBA")
+    arr = np.array(decoded)
+    assert arr[..., 3].max() == 0
+
+
+def test_resize_rgba_to_bbox_handles_non_square_target(mode):
+    source = _rgba_png((50, 20))
+
+    result = mode._resize_rgba_to_bbox(source, size=(15, 40))
+
+    decoded = Image.open(BytesIO(result))
+    assert decoded.size == (15, 40)
 
 
 @pytest.mark.asyncio
