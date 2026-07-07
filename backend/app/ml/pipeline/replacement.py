@@ -20,8 +20,8 @@ class ReplacementMixin:
         selected_bbox: Dict[str, int],
         replacement_image_bytes: bytes,
         expand_mask_pixels: int = 25,
-        use_color_matching: bool = True,
-        use_edge_blending: bool = True,
+        use_color_matching: bool = False,
+        use_edge_blending: bool = False,
         color_match_method: Literal["mean_std", "histogram", "color_transfer"] = "mean_std",
         scene_bboxes: Optional[List[Dict[str, int]]] = None,
         track_metrics: bool = True,
@@ -96,7 +96,7 @@ class ReplacementMixin:
         mask_bytes: bytes,
         bbox: Dict[str, int],
         replacement_image_bytes: bytes,
-        use_color_matching: bool = True,
+        use_color_matching: bool = False,
         use_edge_blending: bool = False,
         color_match_method: Literal["mean_std", "histogram", "color_transfer"] = "color_transfer",
         expand_mask_pixels: int = 8,
@@ -104,19 +104,26 @@ class ReplacementMixin:
         ldm_sampler: str = "plms",
         hd_strategy: str = "CROP",
         track_metrics: bool = True,
+        replacement_is_cutout: bool = False,
     ) -> Dict:
         """
         Replace object using a SAM mask + LaMa + compositing.
 
         Pipeline:
-            rembg on replacement → dilate mask → LaMa REMOVE →
+            prepare replacement as RGBA cutout (rembg for a plain photo, or
+            a plain resize when it's already a cutout — see
+            replacement_is_cutout) → dilate mask → LaMa REMOVE →
             composite → ColorMatch (optional) → EdgeBlend (optional)
 
         Args:
             image_bytes:               Input image bytes
             mask_bytes:                Binary mask from SAM (PNG, L mode)
             bbox:                      Segment bbox {'x1','y1','x2','y2'}
-            replacement_image_bytes:   Replacement image bytes (any format)
+            replacement_image_bytes:   Replacement image bytes. A plain
+                                       photo (any format) when
+                                       replacement_is_cutout is False, or an
+                                       already-transparent RGBA PNG (e.g.
+                                       from the asset library) when True.
             use_color_matching:        Apply color correction (default: True)
             use_edge_blending:         Smooth boundaries (default: False)
             color_match_method:        'mean_std' | 'histogram' | 'color_transfer'
@@ -125,6 +132,11 @@ class ReplacementMixin:
             ldm_sampler:               LaMa sampler (default: 'plms')
             hd_strategy:               HD strategy (default: 'CROP')
             track_metrics:             Track metrics to MLflow (default: True)
+            replacement_is_cutout:     True when replacement_image_bytes is
+                                       an already-transparent RGBA asset from
+                                       the asset library rather than an
+                                       uploaded photo — skips rembg background
+                                       removal (default: False)
 
         Returns:
             Dict:
@@ -152,6 +164,7 @@ class ReplacementMixin:
                 ldm_steps=ldm_steps,
                 ldm_sampler=ldm_sampler,
                 hd_strategy=hd_strategy,
+                replacement_is_cutout=replacement_is_cutout,
             )
 
             result["timestamp"] = datetime.now().isoformat()
@@ -163,6 +176,7 @@ class ReplacementMixin:
                     "color_matching": use_color_matching,
                     "edge_blending": use_edge_blending,
                     "color_match_method": color_match_method,
+                    "replacement_is_cutout": replacement_is_cutout,
                 })
 
             return result

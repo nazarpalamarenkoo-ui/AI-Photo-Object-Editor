@@ -83,8 +83,8 @@ class ExtractionMixin:
         extracted_bytes: bytes,
         target_bbox: Dict[str, int],
         scale: float = 1.0,
-        use_color_matching: bool = True,
-        use_edge_blending: bool = True,
+        use_color_matching: bool = False,
+        use_edge_blending: bool = False,
         color_match_method: Literal["mean_std", "histogram", "color_transfer"] = "color_transfer",
         track_metrics: bool = True,
     ) -> Dict:
