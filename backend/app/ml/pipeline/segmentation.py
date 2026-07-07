@@ -70,6 +70,7 @@ class SegmentationMixin:
         point_labels: Optional[List[int]] = None,
         bbox: Optional[Dict[str, int]] = None,
         track_metrics: bool = True,
+        multimask_output: Optional[bool] = None
     ) -> Dict:
         """
         Prompt-based segmentation using SAM2 (points and/or bounding box).
@@ -112,6 +113,7 @@ class SegmentationMixin:
                 point_coords=point_coords,
                 point_labels=point_labels,
                 bbox=bbox,
+                multimask_output=multimask_output
             )
 
             result["timestamp"] = datetime.now().isoformat()
@@ -129,4 +131,57 @@ class SegmentationMixin:
 
         except Exception as e:
             print(f"SAM prompt segmentation failed: {e}")
+            raise
+        
+    async def sam_segment_by_polygon(
+        self,
+        image_bytes: bytes,
+        points: List[Tuple[int, int]],
+        smooth: bool = True,
+        smoothing_factor: float = 0.0,
+        feather_px: int = 0,
+        track_metrics: bool = True,
+    ) -> Dict:
+        """
+        Exact segmentation by polygon points (lasso), without SAM2 —
+        the mask exactly repeats the user's polygon.
+
+        Args:
+            points:            ordered (x, y) points along the contour, min. 3
+            smooth:            smooth the contour with a spline (default: True)
+            smoothing_factor:  strength of smoothing (default: 0.0)
+            feather_px:        softness of the mask edges (default: 0)
+
+        Returns:
+            Dict: segments (1 element), metrics, image_size, timestamp
+        """
+        start_time = time.time()
+
+        try:
+            self.validator.validate_image_bytes(image_bytes)
+
+            if points is None or len(points) < 3:
+                raise ValueError("Provide at least 3 points to form a polygon")
+
+            result = await self.sam_lama_mode.segment_by_polygon(
+                image_bytes=image_bytes,
+                points=points,
+                smooth=smooth,
+                smoothing_factor=smoothing_factor,
+                feather_px=feather_px,
+            )
+
+            result["timestamp"] = datetime.now().isoformat()
+
+            if track_metrics:
+                self.tracker.log_metrics({
+                    "operation": "sam_segment_polygon",
+                    "num_points": len(points),
+                    "processing_time": time.time() - start_time,
+                })
+
+            return result
+
+        except Exception as e:
+            print(f"Polygon segmentation failed: {e}")
             raise

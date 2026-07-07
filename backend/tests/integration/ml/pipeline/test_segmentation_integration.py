@@ -21,6 +21,7 @@ def sam_lama_mode() -> MagicMock:
                  "stability_score": 0.9, "predicted_iou": 0.8}]
     mode.segment_objects = AsyncMock(return_value={"segments": segments, "image_size": (640, 480)})
     mode.segment_with_prompt = AsyncMock(return_value={"segments": segments, "image_size": (640, 480)})
+    mode.segment_by_polygon = AsyncMock(return_value={"segments": segments, "image_size": (640, 480)})
     return mode
 
 
@@ -52,6 +53,11 @@ def image_bytes() -> bytes:
 @pytest.fixture
 def bbox() -> dict:
     return {"x1": 1, "y1": 1, "x2": 10, "y2": 10}
+
+
+@pytest.fixture
+def points() -> list:
+    return [(1, 1), (10, 1), (10, 10), (1, 10)]
 
 
 class TestSamSegmentObjects:
@@ -132,3 +138,75 @@ class TestSamSegmentWithPrompt:
             await segmenter.sam_segment_with_prompt(image_bytes=image_bytes, bbox=bbox)
 
         tracker.log_metrics.assert_not_called()
+
+
+class TestSamSegmentByPolygon:
+    async def test_validates_image_bytes(self, segmenter, image_bytes, points, validator):
+        await segmenter.sam_segment_by_polygon(image_bytes=image_bytes, points=points)
+        validator.validate_image_bytes.assert_called_once_with(image_bytes)
+
+    async def test_raises_when_too_few_points(self, segmenter, image_bytes, sam_lama_mode):
+        with pytest.raises(ValueError, match="Provide at least 3 points"):
+            await segmenter.sam_segment_by_polygon(image_bytes=image_bytes, points=[(1, 1), (2, 2)])
+
+        sam_lama_mode.segment_by_polygon.assert_not_called()
+
+    async def test_raises_when_points_is_none(self, segmenter, image_bytes, sam_lama_mode):
+        with pytest.raises(ValueError, match="Provide at least 3 points"):
+            await segmenter.sam_segment_by_polygon(image_bytes=image_bytes, points=None)
+
+        sam_lama_mode.segment_by_polygon.assert_not_called()
+
+    async def test_raises_when_points_is_empty(self, segmenter, image_bytes, sam_lama_mode):
+        with pytest.raises(ValueError, match="Provide at least 3 points"):
+            await segmenter.sam_segment_by_polygon(image_bytes=image_bytes, points=[])
+
+        sam_lama_mode.segment_by_polygon.assert_not_called()
+
+    async def test_passes_smooth_smoothing_factor_and_feather_px(self, segmenter, image_bytes, points, sam_lama_mode):
+        await segmenter.sam_segment_by_polygon(
+            image_bytes=image_bytes, points=points, smooth=False, smoothing_factor=2.5, feather_px=5,
+        )
+        call_kwargs = sam_lama_mode.segment_by_polygon.call_args.kwargs
+        assert call_kwargs["points"] == points
+        assert call_kwargs["smooth"] is False
+        assert call_kwargs["smoothing_factor"] == 2.5
+        assert call_kwargs["feather_px"] == 5
+
+    async def test_uses_default_smooth_params(self, segmenter, image_bytes, points, sam_lama_mode):
+        await segmenter.sam_segment_by_polygon(image_bytes=image_bytes, points=points)
+        call_kwargs = sam_lama_mode.segment_by_polygon.call_args.kwargs
+        assert call_kwargs["smooth"] is True
+        assert call_kwargs["smoothing_factor"] == 0.0
+        assert call_kwargs["feather_px"] == 0
+
+    async def test_logs_num_points_metric(self, segmenter, image_bytes, points, tracker):
+        await segmenter.sam_segment_by_polygon(image_bytes=image_bytes, points=points)
+        payload = tracker.log_metrics.call_args.args[0]
+        assert payload["operation"] == "sam_segment_polygon"
+        assert payload["num_points"] == len(points)
+
+    async def test_track_metrics_false_skips_tracker(self, segmenter, image_bytes, points, tracker):
+        await segmenter.sam_segment_by_polygon(image_bytes=image_bytes, points=points, track_metrics=False)
+        tracker.log_metrics.assert_not_called()
+
+    async def test_raises_on_invalid_image_bytes(self, segmenter, image_bytes, points, validator, sam_lama_mode):
+        validator.validate_image_bytes.side_effect = ValueError("Invalid image bytes")
+
+        with pytest.raises(ValueError, match="Invalid image bytes"):
+            await segmenter.sam_segment_by_polygon(image_bytes=image_bytes, points=points)
+
+        sam_lama_mode.segment_by_polygon.assert_not_called()
+
+    async def test_propagates_mode_exception(self, segmenter, image_bytes, points, sam_lama_mode, tracker):
+        sam_lama_mode.segment_by_polygon = AsyncMock(side_effect=RuntimeError("polygon seg crashed"))
+
+        with pytest.raises(RuntimeError, match="polygon seg crashed"):
+            await segmenter.sam_segment_by_polygon(image_bytes=image_bytes, points=points)
+
+        tracker.log_metrics.assert_not_called()
+
+    async def test_result_includes_timestamp(self, segmenter, image_bytes, points):
+        result = await segmenter.sam_segment_by_polygon(image_bytes=image_bytes, points=points)
+        assert "timestamp" in result
+        assert len(result["segments"]) == 1
