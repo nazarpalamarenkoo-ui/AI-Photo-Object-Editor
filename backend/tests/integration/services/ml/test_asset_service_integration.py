@@ -11,17 +11,23 @@ def mock_redis_history():
 
 
 @pytest.fixture
+def mock_redis_assets():
+    return AsyncMock()
+
+
+@pytest.fixture
 def mock_pipeline():
     return AsyncMock()
 
 
 @pytest.fixture
-def asset_service(db_session, mock_s3_storage, mock_redis_cache, mock_redis_history, image_repo, detection_repo, mock_pipeline):
+def asset_service(db_session, mock_s3_storage, mock_redis_cache, mock_redis_history, mock_redis_assets, image_repo, detection_repo, mock_pipeline):
     return AssetService(
         db=db_session,
         s3_storage=mock_s3_storage,
         redis_storage=mock_redis_cache,
         redis_history=mock_redis_history,
+        redis_assets=mock_redis_assets,
         image_repo=image_repo,
         detection_repo=detection_repo,
         pipeline=mock_pipeline,
@@ -53,7 +59,11 @@ class TestExtractObject:
         mock_s3_storage.upload_bytes = AsyncMock(return_value="s3://bucket/extracted.png")
         mock_s3_storage.get_presigned_url = AsyncMock(return_value="https://extract-url")
 
-        result = await asset_service.extract_object(sample_image.id, 1, sample_user.id)
+        # persist_to_s3 за замовчуванням False у сервісі -> явно вмикаємо,
+        # інакше extracted_url лишиться None
+        result = await asset_service.extract_object(
+            sample_image.id, 1, sample_user.id, persist_to_s3=True
+        )
 
         assert result["extracted_url"] == "s3://bucket/extracted.png"
         mock_s3_storage.upload_bytes.assert_awaited_once()
@@ -104,8 +114,13 @@ class TestPasteExtractedObject:
         mock_s3_storage.upload_bytes = AsyncMock(return_value="s3://bucket/paste.jpg")
         mock_s3_storage.get_presigned_url = AsyncMock(return_value="https://paste-url")
 
+        # реальна сигнатура: (image_id, user_id, target_bbox, asset_id=None, extracted_url=None, ...)
+        # extracted_url обов'язково як keyword, інакше піде в asset_id і зайде у гілку asset-бібліотеки
         result = await asset_service.paste_extracted_object(
-            sample_image.id, sample_user.id, "s3://bucket/extracted.png", {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
+            sample_image.id,
+            sample_user.id,
+            {"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+            extracted_url="s3://bucket/extracted.png",
         )
 
         assert result["result_url"] == "s3://bucket/paste.jpg"
@@ -123,7 +138,10 @@ class TestPasteExtractedObject:
         mock_s3_storage.get_presigned_url = AsyncMock(return_value="https://paste-url")
 
         await asset_service.paste_extracted_object(
-            sample_image.id, sample_user.id, "s3://bucket/extracted.png", {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
+            sample_image.id,
+            sample_user.id,
+            {"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+            extracted_url="s3://bucket/extracted.png",
         )
 
         mock_redis_history.push_undo_state.assert_awaited_once()
@@ -140,7 +158,10 @@ class TestPasteExtractedObject:
         mock_s3_storage.get_presigned_url = AsyncMock(return_value="https://paste-url")
 
         await asset_service.paste_extracted_object(
-            sample_image.id, sample_user.id, "s3://bucket/extracted.png", {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
+            sample_image.id,
+            sample_user.id,
+            {"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+            extracted_url="s3://bucket/extracted.png",
         )
 
         mock_redis_cache.cache_image.assert_awaited_once_with(
@@ -156,7 +177,10 @@ class TestPasteExtractedObject:
 
         with pytest.raises(ValueError, match="Failed to download extracted object"):
             await asset_service.paste_extracted_object(
-                sample_image.id, sample_user.id, "s3://bucket/missing.png", {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
+                sample_image.id,
+                sample_user.id,
+                {"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+                extracted_url="s3://bucket/missing.png",
             )
 
     @pytest.mark.asyncio
@@ -171,7 +195,10 @@ class TestPasteExtractedObject:
 
         with pytest.raises(RuntimeError, match="upload failed"):
             await asset_service.paste_extracted_object(
-                sample_image.id, sample_user.id, "s3://bucket/extracted.png", {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
+                sample_image.id,
+                sample_user.id,
+                {"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+                extracted_url="s3://bucket/extracted.png",
             )
 
     @pytest.mark.asyncio
@@ -184,5 +211,8 @@ class TestPasteExtractedObject:
 
         with pytest.raises(RuntimeError, match="paste failed"):
             await asset_service.paste_extracted_object(
-                sample_image.id, sample_user.id, "s3://bucket/extracted.png", {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
+                sample_image.id,
+                sample_user.id,
+                {"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+                extracted_url="s3://bucket/extracted.png",
             )
