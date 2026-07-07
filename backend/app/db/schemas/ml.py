@@ -1,5 +1,5 @@
 from typing import List, Optional, Literal, Tuple
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from datetime import datetime
 
 class BboxSchema(BaseModel):
@@ -22,21 +22,21 @@ class DetectRequest(BaseModel):
 
 class RemoveRequest(BaseModel):
     expand_mask_pixels: int = Field(5, ge=0, le=50)
-    use_edge_blending: bool = True
+    use_edge_blending: bool = False
     ldm: LdmConfig = Field(default_factory=LdmConfig)
 
 
 class RemoveMultipleRequest(BaseModel):
     bbox_ids: List[int] = Field(..., min_length=1)
     expand_mask_pixels: int = Field(5, ge=0, le=50)
-    use_edge_blending: bool = True
+    use_edge_blending: bool = False
     ldm: LdmConfig = Field(default_factory=LdmConfig)
 
 
 class ReplaceRequest(BaseModel):
     expand_mask_pixels: int = Field(0, ge=0, le=50)
-    use_color_matching: bool = True
-    use_edge_blending: bool = True
+    use_color_matching: bool = False
+    use_edge_blending: bool = False
     color_match_method: Literal['mean_std', 'histogram', 'color_transfer'] = 'mean_std'
     ldm: LdmConfig = Field(default_factory=LdmConfig)
 
@@ -50,32 +50,51 @@ class SegmentWithPromptRequest(BaseModel):
     point_coords: Optional[List[Tuple[int, int]]] = None
     point_labels: Optional[List[int]] = None   # 1=fg, 0=bg
     bbox: Optional[BboxSchema] = None
-
+    multimask_output: Optional[bool] = None
 
 class SamRemoveRequest(BaseModel):
     expand_mask_pixels: int = Field(12, ge=0, le=50)
-    use_edge_blending: bool = True
+    use_edge_blending: bool = False
     ldm: LdmConfig = Field(default_factory=LdmConfig)
 
 
 class SamReplaceRequest(BaseModel):
-    expand_mask_pixels: int = Field(8, ge=0, le=50)
-    use_color_matching: bool = True
+    expand_mask_pixels: int = 8
+    use_color_matching: bool = False
     use_edge_blending: bool = False
-    color_match_method: Literal['mean_std', 'histogram', 'color_transfer'] = 'color_transfer'
-    ldm: LdmConfig = Field(default_factory=LdmConfig)
+    color_match_method: str = "color_transfer"
+    ldm_steps: int = 25
+    ldm_sampler: str = "plms"
+    hd_strategy: str = "CROP"
+
+    @property
+    def ldm(self) -> LdmConfig:
+        return LdmConfig(
+            ldm_steps=self.ldm_steps,
+            ldm_sampler=self.ldm_sampler,
+            hd_strategy=self.hd_strategy,
+        )
 
 class ExtractRequest(BaseModel):
-    padding_pixels: int = Field(8, ge=0, le=64)
+    padding_pixels: int = 8
+    label: Optional[str] = None
+    persist_to_s3: bool = False
 
 
 class PasteRequest(BaseModel):
-    extracted_url: str
-    target_bbox: BboxSchema
-    scale: float = Field(1.0, ge=0.1, le=3.0)
-    use_color_matching: bool = True
-    use_edge_blending: bool = True
-    color_match_method: Literal['mean_std', 'histogram', 'color_transfer'] = 'color_transfer'
+    target_bbox: "BboxSchema"          
+    asset_id: Optional[str] = None
+    extracted_url: Optional[str] = None
+    scale: float = 1.0
+    use_color_matching: bool = False
+    use_edge_blending: bool = False
+    color_match_method: str = "color_transfer"
+
+    @model_validator(mode="after")
+    def _check_source(self):
+        if not self.asset_id and not self.extracted_url:
+            raise ValueError("Provide either asset_id or extracted_url")
+        return self
 
 
 class MLResultResponse(BaseModel):
@@ -90,7 +109,7 @@ class SegmentInfo(BaseModel):
     bbox_id: int
     bbox: BboxSchema
     area: int
-    stability_score: float
+    stability_score: Optional[float] = None
 
 
 class SegmentResponse(BaseModel):
@@ -99,14 +118,20 @@ class SegmentResponse(BaseModel):
     image_size: Tuple[int, int]
     timestamp: datetime
 
-
+class SegmentByPolygonRequest(BaseModel):
+    points: List[Tuple[int, int]] = Field(..., min_length=3)
+    smooth: bool = True
+    smoothing_factor: float = 0.0
+    feather_px: int = 0
+    
 class ExtractResponse(BaseModel):
-    extracted_url: str
-    presigned_url: str
-    object_size: Tuple[int, int]
+    asset_id: str
+    extracted_url: Optional[str] = None
+    presigned_url: Optional[str] = None
+    object_size: tuple
     area_pixels: int
-    cropped_bbox: BboxSchema
-    timestamp: datetime
+    cropped_bbox: dict
+    timestamp: str
 
 
 class PasteResponse(BaseModel):
@@ -115,3 +140,16 @@ class PasteResponse(BaseModel):
     paste_bbox: BboxSchema
     object_size: Tuple[int, int]
     timestamp: datetime
+    
+class AssetResponse(BaseModel):
+    asset_id: str
+    source_image_id: int
+    object_size: tuple
+    area_pixels: int
+    label: Optional[str] = None
+    s3_url: Optional[str] = None
+    created_at: str
+
+
+class RenameAssetRequest(BaseModel):
+    label: str
