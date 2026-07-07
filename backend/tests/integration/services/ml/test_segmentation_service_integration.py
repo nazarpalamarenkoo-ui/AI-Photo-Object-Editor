@@ -9,6 +9,9 @@ pytestmark = pytest.mark.integration
 def mock_redis_history():
     return AsyncMock()
 
+@pytest.fixture
+def mock_redis_assets():
+    return AsyncMock() 
 
 @pytest.fixture
 def mock_pipeline():
@@ -16,12 +19,13 @@ def mock_pipeline():
 
 
 @pytest.fixture
-def segmentation_service(db_session, mock_s3_storage, mock_redis_cache, mock_redis_history, image_repo, detection_repo, mock_pipeline):
+def segmentation_service(db_session, mock_s3_storage, mock_redis_cache, mock_redis_history, mock_redis_assets, image_repo, detection_repo, mock_pipeline):
     return SegmentationService(
         db=db_session,
         s3_storage=mock_s3_storage,
         redis_storage=mock_redis_cache,
         redis_history=mock_redis_history,
+        redis_assets=mock_redis_assets,
         image_repo=image_repo,
         detection_repo=detection_repo,
         pipeline=mock_pipeline,
@@ -45,13 +49,20 @@ class TestSegmentObjects:
     ):
         mock_redis_cache.get_cache_image = AsyncMock(return_value=b"image-bytes")
         mock_redis_cache.cache_segments = AsyncMock()
-        mock_pipeline.sam_segment_objects = AsyncMock(return_value=_segment_result())
+        # segment_objects overwrites mask_id/bbox_id in-place via enumerate(), so we
+        # capture the same object the pipeline returns and assert against it after
+        # the call rather than a freshly-built dict (which would still have the
+        # pre-mutation mask_id/bbox_id values).
+        segment_result = _segment_result()
+        mock_pipeline.sam_segment_objects = AsyncMock(return_value=segment_result)
 
         result = await segmentation_service.segment_objects(sample_image.id, sample_user.id)
 
         assert "mask_bytes" not in result["segments"][0]
+        assert result["segments"][0]["mask_id"] == 0
+        assert result["segments"][0]["bbox_id"] == 0
         mock_redis_cache.cache_segments.assert_awaited_once_with(
-            image_id=sample_image.id, segments=_segment_result()["segments"], ttl=7200
+            image_id=sample_image.id, segments=segment_result["segments"], ttl=7200
         )
 
     @pytest.mark.asyncio
@@ -76,6 +87,11 @@ class TestSegmentWithPrompt:
         self, segmentation_service, sample_image, sample_user, mock_redis_cache, mock_pipeline
     ):
         mock_redis_cache.get_cache_image = AsyncMock(return_value=b"image-bytes")
+        # No segments cached yet for this image, so _next_mask_offset() and the
+        # "existing" lookup both need an explicit falsy return value — an
+        # unconfigured AsyncMock's default return is a truthy, non-empty-looking
+        # MagicMock and breaks max()/offset logic.
+        mock_redis_cache.get_cached_segments = AsyncMock(return_value=None)
         mock_redis_cache.cache_segments = AsyncMock()
         mock_pipeline.sam_segment_with_prompt = AsyncMock(return_value=_segment_result())
 
@@ -91,6 +107,7 @@ class TestSegmentWithPrompt:
         self, segmentation_service, sample_image, sample_user, mock_redis_cache, mock_pipeline
     ):
         mock_redis_cache.get_cache_image = AsyncMock(return_value=b"image-bytes")
+        mock_redis_cache.get_cached_segments = AsyncMock(return_value=None)
         mock_redis_cache.cache_segments = AsyncMock()
         mock_pipeline.sam_segment_with_prompt = AsyncMock(return_value=_segment_result())
 
@@ -107,6 +124,7 @@ class TestSegmentWithPrompt:
         self, segmentation_service, sample_image, sample_user, mock_redis_cache, mock_pipeline
     ):
         mock_redis_cache.get_cache_image = AsyncMock(return_value=b"image-bytes")
+        mock_redis_cache.get_cached_segments = AsyncMock(return_value=None)
         mock_redis_cache.cache_segments = AsyncMock()
         mock_pipeline.sam_segment_with_prompt = AsyncMock(return_value=_segment_result())
 

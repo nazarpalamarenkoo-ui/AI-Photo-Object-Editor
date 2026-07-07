@@ -44,6 +44,15 @@ def mock_redis_history():
     history.clear_history = AsyncMock(return_value=None)
     return history
 
+@pytest.fixture
+def mock_redis_assets():
+    ra = AsyncMock()
+    ra.list_assets = AsyncMock(return_value=[])
+    ra.get_thumbnail = AsyncMock(return_value=None)
+    ra.get_asset = AsyncMock(return_value=None)
+    ra.rename_asset = AsyncMock(return_value=None)
+    ra.delete_asset = AsyncMock(return_value=False)
+    return ra
 
 @pytest.fixture
 def mock_image_repo():
@@ -72,7 +81,7 @@ def sample_image():
 
 @pytest.fixture
 def service(
-    mock_db, mock_s3, mock_redis_storage, mock_redis_history,
+    mock_db, mock_s3, mock_redis_storage, mock_redis_history, mock_redis_assets,
     mock_image_repo, mock_detection_repo, mock_pipeline,
 ):
     return SegmentationService(
@@ -80,6 +89,7 @@ def service(
         s3_storage=mock_s3,
         redis_storage=mock_redis_storage,
         redis_history=mock_redis_history,
+        redis_assets=mock_redis_assets,
         image_repo=mock_image_repo,
         detection_repo=mock_detection_repo,
         pipeline=mock_pipeline,
