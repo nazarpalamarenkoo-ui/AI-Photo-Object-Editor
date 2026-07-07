@@ -6,6 +6,7 @@ from app.ml.pipeline.pipeline import MLPipeline, get_pipeline
 from app.storage.s3_storage import S3Storage
 from app.storage.redis.redis_storage import RedisStorage
 from app.storage.redis.redis_history import RedisHistory
+from app.storage.redis.redis_assets import RedisAssetsStorage
 from app.repository.image_repo import ImageRepository
 from app.repository.detection_repo import DetectionRepository
 from app.db.models.image import Image
@@ -23,6 +24,7 @@ class BaseMLService:
         s3_storage: S3Storage,
         redis_storage: RedisStorage,
         redis_history: RedisHistory,
+        redis_assets: RedisStorage,
         image_repo: ImageRepository,
         detection_repo: DetectionRepository,
         pipeline: MLPipeline | None = None,
@@ -32,6 +34,7 @@ class BaseMLService:
         self.s3 = s3_storage
         self.redis_storage = redis_storage
         self.redis_history = redis_history
+        self.redis_assets = redis_assets
         self.image_repo = image_repo
         self.detection_repo = detection_repo
         self.pipeline = pipeline or get_pipeline(device=device)

@@ -11,12 +11,18 @@ def mock_redis_history():
 
 
 @pytest.fixture
-def ml_service(db_session, mock_s3_storage, mock_redis_cache, mock_redis_history, image_repo, detection_repo):
+def mock_redis_assets():
+    return AsyncMock()
+
+
+@pytest.fixture
+def ml_service(db_session, mock_s3_storage, mock_redis_cache, mock_redis_history, mock_redis_assets, image_repo, detection_repo):
     return BaseMLService(
         db=db_session,
         s3_storage=mock_s3_storage,
         redis_storage=mock_redis_cache,
         redis_history=mock_redis_history,
+        redis_assets=mock_redis_assets,
         image_repo=image_repo,
         detection_repo=detection_repo,
         pipeline=AsyncMock(),

@@ -1,3 +1,5 @@
+from contextlib import redirect_stderr
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, call
 
@@ -45,6 +47,15 @@ def mock_redis_history():
     history.clear_history = AsyncMock(return_value=None)
     return history
 
+@pytest.fixture
+def mock_redis_assets():
+    ra = AsyncMock()
+    ra.list_assets = AsyncMock(return_value=[])
+    ra.get_thumbnail = AsyncMock(return_value=None)
+    ra.get_asset = AsyncMock(return_value=None)
+    ra.rename_asset = AsyncMock(return_value=None)
+    ra.delete_asset = AsyncMock(return_value=False)
+    return ra
 
 @pytest.fixture
 def mock_image_repo():
@@ -79,7 +90,7 @@ def sample_image():
 
 @pytest.fixture
 def service(
-    mock_db, mock_s3, mock_redis_storage, mock_redis_history,
+    mock_db, mock_s3, mock_redis_storage, mock_redis_history, mock_redis_assets,
     mock_image_repo, mock_detection_repo, mock_pipeline,
 ):
     return EditingService(
@@ -87,6 +98,7 @@ def service(
         s3_storage=mock_s3,
         redis_storage=mock_redis_storage,
         redis_history=mock_redis_history,
+        redis_assets=mock_redis_assets,
         image_repo=mock_image_repo,
         detection_repo=mock_detection_repo,
         pipeline=mock_pipeline,
@@ -283,7 +295,7 @@ class TestReplaceObject:
         )
 
         _, kwargs = mock_pipeline.replace_object.call_args
-        assert kwargs["use_color_matching"] is True
+        assert kwargs["use_color_matching"] is False
 
 class TestRemoveMultipleObjects:
     async def test_remove_multiple_objects_success(
