@@ -128,7 +128,8 @@ class SAM2Segmentor:
         point_coords: Optional[List[Tuple[int, int]]] = None,
         point_labels: Optional[List[int]] = None,
         bbox: Optional[Dict[str, int]] = None,
-        track_metrics: bool = True
+        track_metrics: bool = True,
+        multimask_output: Optional[bool] = None,
     ) -> Dict:
         
         """
@@ -146,9 +147,12 @@ class SAM2Segmentor:
         """
         start_time = time.time()
 
+        if multimask_output is None:
+            multimask_output = not (bbox is not None or (point_coords and len(point_coords) > 1))
+            
         segments = await asyncio.to_thread(
             self._segment_prompt_sync,
-            image_bytes, point_coords, point_labels, bbox
+            image_bytes, point_coords, point_labels, bbox, multimask_output
         )
 
         inference_time = (time.time() - start_time) * 1000
@@ -164,7 +168,8 @@ class SAM2Segmentor:
         image_bytes: bytes,
         point_coords: Optional[List[Tuple[int, int]]],
         point_labels: Optional[List[int]],
-        bbox: Optional[Dict[str, int]]
+        bbox: Optional[Dict[str, int]],
+        multimask_output: bool = False,
     ) -> List[Dict]:
         img = Image.open(BytesIO(image_bytes)).convert("RGB")
         img_array = np.array(img)
@@ -183,7 +188,7 @@ class SAM2Segmentor:
             point_coords=np_points,
             point_labels=np_labels,
             box=np_bbox,
-            multimask_output=True,  # return 3 masks for each prompt
+            multimask_output=multimask_output,
         )
 
         segments = []
