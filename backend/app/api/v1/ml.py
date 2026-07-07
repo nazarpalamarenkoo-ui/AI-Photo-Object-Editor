@@ -1,4 +1,4 @@
-from typing import List, Literal
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +11,7 @@ from app.db.schemas.ml import (
     RemoveRequest,
     RemoveMultipleRequest,
     ReplaceRequest,
+    SegmentByPolygonRequest,
     SegmentRequest,
     SegmentWithPromptRequest,
     SamRemoveRequest,
@@ -21,6 +22,8 @@ from app.db.schemas.ml import (
     SegmentResponse,
     ExtractResponse,
     PasteResponse,
+    AssetResponse,
+    RenameAssetRequest,
 )
 from app.db.schemas.image import ImageResponse
 from app.repository.image_repo import ImageRepository
@@ -32,6 +35,7 @@ from app.services.ml.assets_service import AssetService
 from app.storage.s3_storage import S3Storage
 from app.storage.redis.redis_storage import RedisStorage
 from app.storage.redis.redis_history import RedisHistory
+from app.storage.redis.redis_assets import RedisAssetsStorage
 
 router = APIRouter(prefix="/ml", tags=["ML"])
 
@@ -42,6 +46,7 @@ def _base_deps(db: AsyncSession) -> dict:
         s3_storage=S3Storage(),
         redis_storage=RedisStorage(),
         redis_history=RedisHistory(),
+        redis_assets=RedisAssetsStorage(),
         image_repo=ImageRepository(db),
         detection_repo=DetectionRepository(db),
     )
@@ -274,11 +279,31 @@ async def segment_with_prompt(
             point_coords=body.point_coords,
             point_labels=body.point_labels,
             bbox=bbox_dict,
+            multimask_output=body.multimask_output
         )
     except ValueError as e:
         raise HTTPException(status_code=_http_status(e), detail=str(e))
 
-
+@router.post("/images/{image_id}/segment/polygon", response_model=SegmentResponse)
+async def segment_by_polygon(
+    image_id: int,
+    body: SegmentByPolygonRequest,
+    current_user: User = Depends(get_current_user),
+    service: SegmentationService = Depends(get_segmentation),
+):
+    """Exact segmentation by polygon points (lasso), without SAM2."""
+    try:
+        return await service.segment_by_polygon(
+            image_id=image_id,
+            user_id=current_user.id,
+            points=body.points,
+            smooth=body.smooth,
+            smoothing_factor=body.smoothing_factor,
+            feather_px=body.feather_px,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=_http_status(e), detail=str(e))
+    
 @router.post("/images/{image_id}/segment/{mask_id}/remove", response_model=MLResultResponse)
 async def sam_remove_object(
     image_id: int,
@@ -307,14 +332,27 @@ async def sam_remove_object(
 async def sam_replace_object(
     image_id: int,
     mask_id: int,
-    replacement_file: UploadFile = File(...),
+    replacement_file: Optional[UploadFile] = File(None),
+    asset_id: Optional[str] = Query(None),
     body: SamReplaceRequest = Depends(),
     current_user: User = Depends(get_current_user),
     service: SegmentationService = Depends(get_segmentation),
+    asset_service: AssetService = Depends(get_asset),
 ):
-    """Replace SAM-segmented object with an uploaded image."""
+    """Replace SAM-segmented object with an uploaded image OR a saved asset."""
+    if not replacement_file and not asset_id:
+        raise HTTPException(status_code=400, detail="Provide replacement_file or asset_id")
+
     try:
-        replacement_bytes = await replacement_file.read()
+        if asset_id:
+            replacement_bytes = await asset_service.get_asset_image(current_user.id, asset_id)
+            if not replacement_bytes:
+                raise HTTPException(status_code=404, detail="Asset not found")
+            replacement_is_cutout = True
+        else:
+            replacement_bytes = await replacement_file.read()
+            replacement_is_cutout = False
+
         return await service.sam_replace_object(
             image_id=image_id,
             mask_id=mask_id,
@@ -327,10 +365,10 @@ async def sam_replace_object(
             ldm_steps=body.ldm.ldm_steps,
             ldm_sampler=body.ldm.ldm_sampler,
             hd_strategy=body.ldm.hd_strategy,
+            replacement_is_cutout=replacement_is_cutout,
         )
     except ValueError as e:
         raise HTTPException(status_code=_http_status(e), detail=str(e))
-
 
 @router.post("/images/{image_id}/segment/{mask_id}/extract", response_model=ExtractResponse)
 async def extract_object(
@@ -340,14 +378,78 @@ async def extract_object(
     current_user: User = Depends(get_current_user),
     service: AssetService = Depends(get_asset),
 ):
-    """Extract SAM-segmented object as RGBA PNG and store in S3."""
+    """Extract SAM-segmented object as RGBA PNG, save into asset library (Redis)."""
     try:
         return await service.extract_object(
             image_id=image_id,
             mask_id=mask_id,
             user_id=current_user.id,
             padding_pixels=body.padding_pixels,
+            label=body.label,
+            persist_to_s3=body.persist_to_s3,
         )
+    except ValueError as e:
+        raise HTTPException(status_code=_http_status(e), detail=str(e))
+
+@router.get("/assets", response_model=List[AssetResponse])
+async def list_assets(
+    limit: int = Query(50, le=200),
+    offset: int = Query(0, ge=0),
+    current_user: User = Depends(get_current_user),
+    service: AssetService = Depends(get_asset),
+):
+    """List extracted objects in the current user's asset library."""
+    return await service.list_assets(current_user.id, limit=limit, offset=offset)
+
+
+@router.get("/assets/{asset_id}/thumbnail")
+async def get_asset_thumbnail(
+    asset_id: str,
+    current_user: User = Depends(get_current_user),
+    service: AssetService = Depends(get_asset),
+):
+    from fastapi import Response
+    data = await service.get_asset_thumbnail(current_user.id, asset_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    return Response(content=data, media_type="image/png")
+
+
+@router.get("/assets/{asset_id}/image")
+async def get_asset_image(
+    asset_id: str,
+    current_user: User = Depends(get_current_user),
+    service: AssetService = Depends(get_asset),
+):
+    from fastapi import Response
+    data = await service.get_asset_image(current_user.id, asset_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    return Response(content=data, media_type="image/png")
+
+
+@router.patch("/assets/{asset_id}", response_model=AssetResponse)
+async def rename_asset(
+    asset_id: str,
+    body: RenameAssetRequest,
+    current_user: User = Depends(get_current_user),
+    service: AssetService = Depends(get_asset),
+):
+    try:
+        return await service.rename_asset(current_user.id, asset_id, body.label)
+    except ValueError as e:
+        raise HTTPException(status_code=_http_status(e), detail=str(e))
+
+
+@router.delete("/assets/{asset_id}")
+async def delete_asset(
+    asset_id: str,
+    current_user: User = Depends(get_current_user),
+    service: AssetService = Depends(get_asset),
+):
+    try:
+        await service.delete_asset(current_user.id, asset_id)
+        return {"detail": "Asset deleted"}
     except ValueError as e:
         raise HTTPException(status_code=_http_status(e), detail=str(e))
 
@@ -359,11 +461,12 @@ async def paste_extracted_object(
     current_user: User = Depends(get_current_user),
     service: AssetService = Depends(get_asset),
 ):
-    """Paste a previously extracted RGBA object onto the current image."""
+    """Paste an extracted object (from asset library or S3 URL) onto the current image."""
     try:
         return await service.paste_extracted_object(
             image_id=image_id,
             user_id=current_user.id,
+            asset_id=body.asset_id,
             extracted_url=body.extracted_url,
             target_bbox=body.target_bbox.model_dump(),
             scale=body.scale,
