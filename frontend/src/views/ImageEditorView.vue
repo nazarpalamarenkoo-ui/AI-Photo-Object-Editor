@@ -39,6 +39,13 @@
         :running="mode === 'yolo' ? detecting : segmenting"
         :mode="mode"
         :confThreshold="confThreshold"
+        :promptMode="mode === 'sam' ? promptMode : null"
+        :promptPolygonPoints="polygonPoints"
+        :promptPoints="promptPoints"
+        :promptBbox="promptBbox"
+        @add-point="p => addPromptPoint(p.x, p.y)"
+        @set-bbox="b => setPromptBbox(b)"
+        @add-polygon-point="p => addPolygonPoint(p.x, p.y)"
         @image-load="onImageLoad"
         @toggle-selection="onToggleSelection"
         @run="onRun"
@@ -53,19 +60,42 @@
         v-model:useEdgeBlending="activeUseEdgeBlending"
         :mlLoading="mlLoading"
         :replacementFile="activeReplacementFile"
-        :extractedUrl="extractedUrl"
+        :selectedAssetId="selectedAssetId"
         :resultUrl="currentImageUrl"
         :mlError="combinedError"
         :saveLoading="saveLoading"
         :savedSuccess="savedSuccess"
         :history="history"
+        :assets="assets"
+        :assetThumbUrls="thumbUrls"
+        :assetsLoading="assetsLoading"
+        :assetsError="assetsError"
+        :assetsHasMore="assetsHasMore"
+        :deletingAssetId="deletingId"
+        :promptMode="promptMode"
+        :promptPolygonPoints="polygonPoints"
+        :canRunPolygon="canRunPolygon"
+        :promptLabel="promptLabel"
+        :promptPoints="promptPoints"
+        :promptBbox="promptBbox"
+        @update:promptMode="setPromptMode"
+        @update:promptLabel="v => promptLabel = v"
+        @clear-prompt="clearPrompt"
+        @run-prompt-segment="() => handleSegmentWithPrompt()"
         @toggle-selection="onToggleSelection"
+        @sam-replace-asset="onSamReplaceAsset"
         @remove="handleRemove(selectedBboxIds, modelPreset)"
         @replace="handleReplace(selectedBboxIds, modelPreset)"
         @sam-remove="handleSamRemove(modelPreset)"
         @sam-replace="handleSamReplace(modelPreset)"
+        @run-polygon-segment="() => handleSegmentByPolygon()"
+        @clear-polygon="clearPolygon"
         @extract="onExtract"
         @paste="onPaste"
+        @select-asset="selectFromLibrary"
+        @rename-asset="renameAsset"
+        @delete-asset="deleteAsset"
+        @load-more-assets="fetchAssets(false)"
         @replacement-select="onReplacementSelectActive"
         @clear-error="clearAllErrors"
         @save="handleSave(imageId)"
@@ -106,6 +136,12 @@ function toggleTheme() {
   localStorage.setItem('theme', isDark.value ? 'dark' : 'light')
 }
 
+async function onSamReplaceAsset() {
+  if (!selectedAssetId.value) return
+  await handleSamReplaceWithAsset(selectedAssetId.value, modelPreset.value)
+  clearExtracted()
+}
+
 const activeTool = ref('select')
 const zoom = ref(1)
 const modelPreset = ref<LdmConfig>(PRESETS.quality)
@@ -134,13 +170,20 @@ const {
 const {
   segments, regions: samRegions, selectedMaskId, segmenting,
   mlError: samError, useEdgeBlending: samUseEdgeBlending, replacementFile: samReplacementFile,
-  handleSegment, toggleMaskSelection, handleSamRemove, handleSamReplace,
+  handleSegment, handleSegmentWithPrompt, handleSegmentByPolygon, toggleMaskSelection,
+  handleSamRemove, handleSamReplace, handleSamReplaceWithAsset,
   onReplacementSelect: onSamReplacementSelect, clearSegments,
+  promptMode, promptLabel, promptPoints, promptBbox,
+  addPromptPoint, setPromptBbox, clearPrompt, setPromptMode,
+  polygonPoints, addPolygonPoint, clearPolygon, canRunPolygon,
+  polygonShapes,
 } = useSegmentation(imageId, currentImageUrl, history)
 
 const {
-  mlError: assetError, extractedUrl,
-  handleExtract, handlePaste, clearExtracted,
+  mlError: assetOpError, selectedAssetId,
+  handleExtract, handlePaste, clearExtracted, selectFromLibrary,
+  assets, assetsLoading, assetsError, assetsHasMore, thumbUrls,
+  deletingId, fetchAssets, renameAsset, deleteAsset,
 } = useAssets(imageId, currentImageUrl, history)
 
 
@@ -150,7 +193,12 @@ const regions = computed<RegionItem[]>(() =>
         id: d.bbox_id, bbox: { x1: d.x1, y1: d.y1, x2: d.x2, y2: d.y2 },
         label: d.detected_class, confidence: d.confidence,
       }))
-    : samRegions.value
+    : segments.value.map(s => ({
+        id: s.mask_id,
+        bbox: s.bbox,
+        label: `Object #${s.mask_id}`,
+        points: polygonShapes.value[s.mask_id],
+      }))
 )
 
 const selectedIds = computed<number[]>(() =>
@@ -195,6 +243,7 @@ function onReset() {
   handleReset(imageUrl.value)
   clearSegments()
   clearExtracted()
+  setPromptMode(null)
 }
 
 async function onExtract() {
@@ -203,27 +252,29 @@ async function onExtract() {
 }
 
 async function onPaste() {
-  if (selectedMaskId.value === null) return
-  const seg = segments.value.find(s => s.mask_id === selectedMaskId.value)
-  if (!seg) return
-  await handlePaste({ targetBbox: seg.bbox })
+  const seg = selectedMaskId.value !== null
+    ? segments.value.find(s => s.mask_id === selectedMaskId.value)
+    : null
+  const targetBbox = seg ? seg.bbox : { x1: 0, y1: 0, x2: naturalSize.value.w, y2: naturalSize.value.h }
+  await handlePaste({ targetBbox })
 }
 
 watch(mode, () => {
   selectedBboxIds.value = []
   selectedMaskId.value = null
   clearExtracted()
+  setPromptMode(null)
 })
 
 const combinedError = computed(() =>
-  mlError.value || detectError.value || samError.value || assetError.value
+  mlError.value || detectError.value || samError.value || assetOpError.value
 )
 
 function clearAllErrors() {
   mlError.value = ''
   detectError.value = ''
   samError.value = ''
-  assetError.value = ''
+  assetOpError.value = ''
 }
 
 watch(imageUrl, (url) => {
@@ -232,6 +283,7 @@ watch(imageUrl, (url) => {
 
 onMounted(() => {
   fetchHistory()
+  fetchAssets(true)
   function onKeydown(e: KeyboardEvent) {
     if (e.ctrlKey && e.key === 'z') { e.preventDefault(); handleUndo() }
     if (e.ctrlKey && e.key === 'y') { e.preventDefault(); handleRedo() }
