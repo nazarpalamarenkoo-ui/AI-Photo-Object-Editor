@@ -10,7 +10,9 @@ import type {
   SegmentResponse,
   ExtractResponse,
   PasteResponse,
-  ReplaceOptions
+  ReplaceOptions,
+  Asset,
+  SegmentByPolygonParams,
 } from '@/types/Index'
 
 export const PRESETS: Record<string, LdmConfig> = {
@@ -34,7 +36,7 @@ export const mlApi = {
     imageId: number,
     bboxId: number,
     expandMaskPixels = 5,
-    useEdgeBlending = true,
+    useEdgeBlending = false,
     ldm: LdmConfig = PRESETS.quality): Promise<MLResultResponse> {
     const { data } = await apiClient.post<MLResultResponse>(
       `/ml/images/${imageId}/remove/${bboxId}`,
@@ -51,7 +53,7 @@ export const mlApi = {
     imageId: number,
     bboxIds: number[],
     expandMaskPixels = 5,
-    useEdgeBlending = true,
+    useEdgeBlending = false,
     ldm: LdmConfig = PRESETS.quality): Promise<MLResultResponse> {
     const { data } = await apiClient.post<MLResultResponse>(
       `/ml/images/${imageId}/remove-multiple`,
@@ -82,8 +84,8 @@ export const mlApi = {
         headers: { 'Content-Type': 'multipart/form-data' },
         params: {
           expand_mask_pixels: options.expandMaskPixels ?? 0,
-          use_color_matching: options.useColorMatching ?? true,
-          use_edge_blending: options.useEdgeBlending ?? true,
+          use_color_matching: options.useColorMatching ?? false,
+          use_edge_blending: options.useEdgeBlending ?? false,
           color_match_method: options.colorMatchMethod ?? 'mean_std',
           ldm_steps: ldm.ldm_steps,
           ldm_sampler: ldm.ldm_sampler,
@@ -111,23 +113,44 @@ export const mlApi = {
     params: {
       pointCoords?: [number, number][]
       pointLabels?: number[]
-      bbox?: Bbox}): Promise<SegmentResponse> {
+      bbox?: Bbox
+      multimask_output?: boolean
+    }
+  ): Promise<SegmentResponse> {
+    const payload = {
+      point_coords: params.pointCoords ?? null,
+      point_labels: params.pointLabels ?? null,
+      bbox: params.bbox
+        ? { x1: params.bbox.x1, y1: params.bbox.y1, x2: params.bbox.x2, y2: params.bbox.y2 }
+        : null,
+        multimask_output: params.multimask_output ?? false,
+    }
     const { data } = await apiClient.post<SegmentResponse>(
       `/ml/images/${imageId}/segment/prompt`,
+      payload
+    )
+    return data
+  },
+  async segmentByPolygon(
+    imageId: number,
+    params: SegmentByPolygonParams
+  ): Promise<SegmentResponse> {
+    const { data } = await apiClient.post<SegmentResponse>(
+      `/ml/images/${imageId}/segment/polygon`,
       {
-        point_coords: params.pointCoords,
-        point_labels: params.pointLabels,
-        bbox: params.bbox,
+        points: params.points,
+        smooth: params.smooth ?? true,
+        smoothing_factor: params.smoothingFactor ?? 0,
+        feather_px: params.featherPx ?? 0,
       }
     )
     return data
   },
-
   async samRemoveObject(
     imageId: number,
     maskId: number,
     expandMaskPixels = 12,
-    useEdgeBlending = true,
+    useEdgeBlending = false,
     ldm: LdmConfig = PRESETS.quality): Promise<MLResultResponse> {
     const { data } = await apiClient.post<MLResultResponse>(
       `/ml/images/${imageId}/segment/${maskId}/remove`,
@@ -157,7 +180,33 @@ export const mlApi = {
         headers: { 'Content-Type': 'multipart/form-data' },
         params: {
           expand_mask_pixels: options.expandMaskPixels ?? 8,
-          use_color_matching: options.useColorMatching ?? true,
+          use_color_matching: options.useColorMatching ?? false,
+          use_edge_blending: options.useEdgeBlending ?? false,
+          color_match_method: options.colorMatchMethod ?? 'color_transfer',
+          ldm_steps: ldm.ldm_steps,
+          ldm_sampler: ldm.ldm_sampler,
+          hd_strategy: ldm.hd_strategy,
+        }
+      }
+    )
+    return data
+  },
+
+  async samReplaceObjectWithAsset(
+    imageId: number,
+    maskId: number,
+    assetId: string,
+    options: ReplaceOptions = {}): Promise<MLResultResponse> {
+    const ldm = options.ldm ?? PRESETS.quality
+
+    const { data } = await apiClient.post<MLResultResponse>(
+      `/ml/images/${imageId}/segment/${maskId}/replace`,
+      undefined,
+      {
+        params: {
+          asset_id: assetId,
+          expand_mask_pixels: options.expandMaskPixels ?? 8,
+          use_color_matching: options.useColorMatching ?? false,
           use_edge_blending: options.useEdgeBlending ?? false,
           color_match_method: options.colorMatchMethod ?? 'color_transfer',
           ldm_steps: ldm.ldm_steps,
@@ -172,11 +221,15 @@ export const mlApi = {
   async extractObject(
     imageId: number,
     maskId: number,
-    paddingPixels = 8
+    params: { paddingPixels?: number; label?: string; persistToS3?: boolean } = {}
   ): Promise<ExtractResponse> {
     const { data } = await apiClient.post<ExtractResponse>(
       `/ml/images/${imageId}/segment/${maskId}/extract`,
-      { padding_pixels: paddingPixels }
+      {
+        padding_pixels: params.paddingPixels ?? 8,
+        label: params.label,
+        persist_to_s3: params.persistToS3 ?? false,
+      }
     )
     return data
   },
@@ -184,7 +237,8 @@ export const mlApi = {
   async pasteExtractedObject(
     imageId: number,
     params: {
-      extractedUrl: string
+      assetId?: string
+      extractedUrl?: string
       targetBbox: Bbox
       scale?: number
       useColorMatching?: boolean
@@ -195,15 +249,47 @@ export const mlApi = {
     const { data } = await apiClient.post<PasteResponse>(
       `/ml/images/${imageId}/paste`,
       {
+        asset_id: params.assetId,
         extracted_url: params.extractedUrl,
         target_bbox: params.targetBbox,
         scale: params.scale ?? 1.0,
-        use_color_matching: params.useColorMatching ?? true,
-        use_edge_blending: params.useEdgeBlending ?? true,
+        use_color_matching: params.useColorMatching ?? false,
+        use_edge_blending: params.useEdgeBlending ?? false,
         color_match_method: params.colorMatchMethod ?? 'color_transfer',
       }
     )
     return data
+  },
+
+
+  async listAssets(limit = 50, offset = 0): Promise<Asset[]> {
+    const { data } = await apiClient.get<Asset[]>('/ml/assets', {
+      params: { limit, offset },
+    })
+    return data
+  },
+
+  async getAssetThumbnailBlob(assetId: string): Promise<Blob> {
+    const { data } = await apiClient.get(`/ml/assets/${assetId}/thumbnail`, {
+      responseType: 'blob',
+    })
+    return data
+  },
+
+  async getAssetImageBlob(assetId: string): Promise<Blob> {
+    const { data } = await apiClient.get(`/ml/assets/${assetId}/image`, {
+      responseType: 'blob',
+    })
+    return data
+  },
+
+  async renameAsset(assetId: string, label: string): Promise<Asset> {
+    const { data } = await apiClient.patch<Asset>(`/ml/assets/${assetId}`, { label })
+    return data
+  },
+
+  async deleteAsset(assetId: string): Promise<void> {
+    await apiClient.delete(`/ml/assets/${assetId}`)
   },
 
   async saveResult(imageId: number): Promise<Image> {

@@ -45,12 +45,14 @@ export interface PresignedUrlResponse {
   url: string
   expires_in: number
 }
+
 export interface Bbox {
   x1: number
   y1: number
   x2: number
   y2: number
 }
+
 export interface Detection {
   id: number
   image_id: number
@@ -62,20 +64,17 @@ export interface Detection {
   detected_class: string
   confidence: number
 }
+
 export type EditingMode = 'yolo' | 'sam'
 
-export interface Bbox {
-  x1: number
-  y1: number
-  x2: number
-  y2: number
-}
 export interface RegionItem {
-  id: number            
+  id: number
   bbox: Bbox
-  label: string          
+  label: string
   confidence?: number
+  points?: { x: number; y: number }[]
 }
+
 export interface DetectionStats {
   total_detections: number
   classes: string[]
@@ -90,7 +89,6 @@ export interface LdmConfig {
   hd_strategy: 'CROP' | 'RESIZE' | 'ORIGINAL'
 }
 
-
 export interface DetectRequest {
   conf_threshold?: number
   classes?: string[]
@@ -103,6 +101,7 @@ export interface DetectResponse {
   timestamp: string
   [key: string]: any
 }
+
 export type ColorMatchMethod = 'mean_std' | 'histogram' | 'color_transfer'
 
 export interface ReplaceOptions {
@@ -125,9 +124,21 @@ export interface SegmentInfo {
   bbox_id: number
   bbox: Bbox
   area: number
-  stability_score: number
+  stability_score: number | null
+}
+export type PromptMode = 'points' | 'box' | 'polygon' | null
+
+export interface PolygonPoint {
+  x: number
+  y: number
 }
 
+export interface SegmentByPolygonParams {
+  points: [number, number][]
+  smooth?: boolean
+  smoothingFactor?: number
+  featherPx?: number
+}
 export interface SegmentResponse {
   segments: SegmentInfo[]
   metrics: Record<string, unknown>
@@ -135,9 +146,16 @@ export interface SegmentResponse {
   timestamp: string
 }
 
+export interface PromptPoint {
+  x: number
+  y: number
+  label: 0 | 1
+}
+
 export interface ExtractResponse {
-  extracted_url: string
-  presigned_url: string
+  asset_id: string
+  extracted_url: string | null
+  presigned_url: string | null
   object_size: [number, number]
   area_pixels: number
   cropped_bbox: Bbox
@@ -152,6 +170,15 @@ export interface PasteResponse {
   timestamp: string
 }
 
+export interface Asset {
+  asset_id: string
+  source_image_id: number
+  object_size: [number, number]
+  area_pixels: number
+  label: string | null
+  s3_url: string | null
+  created_at: string
+}
 
 export interface ApiError {
   detail: string
