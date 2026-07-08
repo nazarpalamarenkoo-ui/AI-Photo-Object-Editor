@@ -48,7 +48,9 @@
   fill: rgba(255, 107, 107, 0.15);
   stroke: #ff6b6b;
 }
-
+.bbox-overlay.prompt-cursor {
+  pointer-events: all;
+}
 .bbox-label {
   fill: #b3f000;
   font-size: 11px;
@@ -115,4 +117,36 @@
   font-family: var(--font-mono);
   color: var(--text-secondary);
   min-width: 2.5ch;
+}
+.prompt-cursor { cursor: crosshair; }
+.prompt-point { stroke: #fff; stroke-width: 2; }
+.prompt-point.fg { fill: #22c55e; }
+.prompt-point.bg { fill: #ef4444; }
+.prompt-bbox {
+  fill: rgba(179, 240, 0, 0.15);
+  stroke: #b3f000;
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+}
+.prompt-hint {
+  font-size: 12px;
+  opacity: 0.7;
+  margin-left: auto;
+}
+
+.prompt-polygon-point {
+  fill: #22c55e;
+  stroke: #fff;
+  stroke-width: 2;
+}
+.prompt-polygon-path {
+  fill: none;
+  stroke: #b3f000;
+  stroke-width: 2;
+}
+.prompt-polygon-close {
+  stroke: #b3f000;
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+  opacity: 0.6;
 }
