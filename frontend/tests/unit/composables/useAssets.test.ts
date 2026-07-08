@@ -222,9 +222,14 @@ describe('useSegmentation: handleSegmentWithPrompt', () => {
 
     await handleSegmentWithPrompt(params)
 
-    expect(mockedMlApi.segmentWithPrompt).toHaveBeenCalledWith(9, params)
+    expect(mockedMlApi.segmentWithPrompt).toHaveBeenCalledWith(9, {
+      pointCoords: [[10, 20]],
+      pointLabels: [1],
+      bbox: undefined,
+      multimask_output: false
+    })
   })
-
+  
   it('merges new segments with existing ones', async () => {
     mockedMlApi.segmentObjects.mockResolvedValue({
       segments: [makeSegment(1)],
