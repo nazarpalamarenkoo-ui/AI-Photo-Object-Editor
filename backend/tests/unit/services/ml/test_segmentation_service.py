@@ -44,6 +44,7 @@ def mock_redis_history():
     history.clear_history = AsyncMock(return_value=None)
     return history
 
+
 @pytest.fixture
 def mock_redis_assets():
     ra = AsyncMock()
@@ -53,6 +54,7 @@ def mock_redis_assets():
     ra.rename_asset = AsyncMock(return_value=None)
     ra.delete_asset = AsyncMock(return_value=False)
     return ra
+
 
 @pytest.fixture
 def mock_image_repo():
@@ -96,352 +98,390 @@ def service(
     )
 
 
-def make_segment(mask_id=1, area=1000):
-    return {
+def make_segment(mask_id=1, bbox=None, area=1000, source=None):
+    seg = {
         "mask_id": mask_id,
         "bbox_id": mask_id,
-        "bbox": {"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+        "bbox": bbox or {"x1": 0, "y1": 0, "x2": 10, "y2": 10},
         "area": area,
         "stability_score": 0.95,
         "mask_bytes": b"mask-bytes",
     }
+    if source is not None:
+        seg["source"] = source
+    return seg
 
-class TestSegmentObjects:
-    async def test_segment_objects_success(
+
+def make_detection(x1=0, y1=0, x2=10, y2=10, conf=0.9, label="cat"):
+    return {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "confidence": conf, "label": label}
+
+
+class TestSegmentByPolygon:
+    async def test_success_single_segment_gets_offset_as_id(
         self, service, mock_image_repo, sample_image, mock_pipeline, mock_redis_storage,
     ):
         mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-        segments = [make_segment(1), make_segment(2)]
-        mock_pipeline.sam_segment_objects = AsyncMock(return_value={
-            "segments": segments,
-            "metrics": {"latency_ms": 200},
-            "image_size": (640, 480),
+        mock_redis_storage.get_cached_segments = AsyncMock(return_value=None)
+        segment = make_segment(mask_id=999)
+        mock_pipeline.sam_segment_by_polygon = AsyncMock(return_value={
+            "segments": [segment], "metrics": {"latency_ms": 5}, "image_size": (200, 200),
         })
 
-        result = await service.segment_objects(image_id=1, user_id=42, min_area=500, max_segments=50)
-
-        mock_pipeline.sam_segment_objects.assert_awaited_once()
-        _, kwargs = mock_pipeline.sam_segment_objects.call_args
-        assert kwargs["min_area"] == 500
-        assert kwargs["max_segments"] == 50
-
-        mock_redis_storage.cache_segments.assert_awaited_once_with(
-            image_id=1, segments=segments, ttl=7200
+        result = await service.segment_by_polygon(
+            image_id=1, user_id=42, points=[(0, 0), (10, 0), (5, 10)],
         )
 
-        assert all("mask_bytes" not in seg for seg in result["segments"])
-        assert len(result["segments"]) == 2
-        assert result["image_size"] == (640, 480)
-        assert "metrics" in result
+        assert result["segments"][0]["mask_id"] == 0
+        assert result["segments"][0]["bbox_id"] == 0
+        assert "mask_bytes" not in result["segments"][0]
+        assert result["image_size"] == (200, 200)
         assert "timestamp" in result and result["timestamp"]
 
-    async def test_segment_objects_image_not_found(self, service, mock_image_repo):
-        mock_image_repo.get_by_id = AsyncMock(return_value=None)
-
-        with pytest.raises(ValueError, match="not found"):
-            await service.segment_objects(image_id=999, user_id=42)
-
-    async def test_segment_objects_unauthorized(self, service, mock_image_repo, sample_image):
-        sample_image.user_id = 1
-        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-
-        with pytest.raises(ValueError, match="Unauthorized"):
-            await service.segment_objects(image_id=1, user_id=42)
-
-    async def test_segment_objects_empty_segments(
-        self, service, mock_image_repo, sample_image, mock_pipeline,
-    ):
-        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-        mock_pipeline.sam_segment_objects = AsyncMock(return_value={
-            "segments": [], "metrics": {}, "image_size": (1, 1),
-        })
-
-        result = await service.segment_objects(image_id=1, user_id=42)
-
-        assert result["segments"] == []
-
-    async def test_segment_objects_boundary_min_area_zero(
-        self, service, mock_image_repo, sample_image, mock_pipeline,
-    ):
-        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-        mock_pipeline.sam_segment_objects = AsyncMock(return_value={
-            "segments": [], "metrics": {}, "image_size": (1, 1),
-        })
-
-        await service.segment_objects(image_id=1, user_id=42, min_area=0)
-
-        _, kwargs = mock_pipeline.sam_segment_objects.call_args
-        assert kwargs["min_area"] == 0
-
-    async def test_segment_objects_pipeline_exception_propagates(
-        self, service, mock_image_repo, sample_image, mock_pipeline,
-    ):
-        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-        mock_pipeline.sam_segment_objects = AsyncMock(side_effect=RuntimeError("sam crashed"))
-
-        with pytest.raises(RuntimeError, match="sam crashed"):
-            await service.segment_objects(image_id=1, user_id=42)
-
-    async def test_segment_objects_redis_exception_propagates(
+    async def test_all_returned_segments_share_same_offset_id(
         self, service, mock_image_repo, sample_image, mock_pipeline, mock_redis_storage,
     ):
         mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-        mock_pipeline.sam_segment_objects = AsyncMock(return_value={
-            "segments": [make_segment()], "metrics": {}, "image_size": (1, 1),
-        })
-        mock_redis_storage.cache_segments = AsyncMock(side_effect=ConnectionError("redis down"))
-
-        with pytest.raises(ConnectionError, match="redis down"):
-            await service.segment_objects(image_id=1, user_id=42)
-
-class TestSegmentWithPrompt:
-    async def test_segment_with_prompt_success_points(
-        self, service, mock_image_repo, sample_image, mock_pipeline, mock_redis_storage,
-    ):
-        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-        segments = [make_segment(1)]
-        mock_pipeline.sam_segment_with_prompt = AsyncMock(return_value={
+        mock_redis_storage.get_cached_segments = AsyncMock(return_value=[make_segment(mask_id=3)])
+        segments = [make_segment(mask_id=10), make_segment(mask_id=11)]
+        mock_pipeline.sam_segment_by_polygon = AsyncMock(return_value={
             "segments": segments, "metrics": {}, "image_size": (1, 1),
         })
 
-        result = await service.segment_with_prompt(
-            image_id=1, user_id=42, point_coords=[(10, 10)], point_labels=[1],
+        result = await service.segment_by_polygon(
+            image_id=1, user_id=42, points=[(0, 0), (10, 0), (5, 10)],
         )
 
-        _, kwargs = mock_pipeline.sam_segment_with_prompt.call_args
-        assert kwargs["point_coords"] == [(10, 10)]
-        assert kwargs["point_labels"] == [1]
-        mock_redis_storage.cache_segments.assert_awaited_once()
-        assert "mask_bytes" not in result["segments"][0]
+        ids = {seg["mask_id"] for seg in result["segments"]}
+        assert ids == {4}
 
-    async def test_segment_with_prompt_success_bbox(
+    async def test_appends_to_existing_cached_segments(
+        self, service, mock_image_repo, sample_image, mock_pipeline, mock_redis_storage,
+    ):
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+        existing = [make_segment(mask_id=0)]
+        mock_redis_storage.get_cached_segments = AsyncMock(return_value=existing)
+        new_segment = make_segment(mask_id=999)
+        mock_pipeline.sam_segment_by_polygon = AsyncMock(return_value={
+            "segments": [new_segment], "metrics": {}, "image_size": (1, 1),
+        })
+
+        await service.segment_by_polygon(
+            image_id=1, user_id=42, points=[(0, 0), (10, 0), (5, 10)],
+        )
+
+        _, kwargs = mock_redis_storage.cache_segments.call_args
+        assert kwargs["image_id"] == 1
+        assert kwargs["ttl"] == 7200
+        assert len(kwargs["segments"]) == 2
+        assert kwargs["segments"][0] is existing[0]
+
+    async def test_offset_zero_when_nothing_cached(
+        self, service, mock_image_repo, sample_image, mock_pipeline, mock_redis_storage,
+    ):
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+        mock_redis_storage.get_cached_segments = AsyncMock(return_value=None)
+        mock_pipeline.sam_segment_by_polygon = AsyncMock(return_value={
+            "segments": [make_segment(mask_id=999)], "metrics": {}, "image_size": (1, 1),
+        })
+
+        result = await service.segment_by_polygon(
+            image_id=1, user_id=42, points=[(0, 0), (10, 0), (5, 10)],
+        )
+
+        assert result["segments"][0]["mask_id"] == 0
+
+    async def test_passes_polygon_params_to_pipeline(
+        self, service, mock_image_repo, sample_image, mock_pipeline, mock_redis_storage,
+    ):
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+        mock_redis_storage.get_cached_segments = AsyncMock(return_value=None)
+        mock_pipeline.sam_segment_by_polygon = AsyncMock(return_value={
+            "segments": [], "metrics": {}, "image_size": (1, 1),
+        })
+        points = [(0, 0), (10, 0), (5, 10)]
+
+        await service.segment_by_polygon(
+            image_id=1, user_id=42, points=points,
+            smooth=False, smoothing_factor=0.7, feather_px=4,
+        )
+
+        _, kwargs = mock_pipeline.sam_segment_by_polygon.call_args
+        assert kwargs["points"] == points
+        assert kwargs["smooth"] is False
+        assert kwargs["smoothing_factor"] == 0.7
+        assert kwargs["feather_px"] == 4
+
+    async def test_image_not_found(self, service, mock_image_repo):
+        mock_image_repo.get_by_id = AsyncMock(return_value=None)
+
+        with pytest.raises(ValueError, match="not found"):
+            await service.segment_by_polygon(
+                image_id=1, user_id=42, points=[(0, 0), (10, 0), (5, 10)],
+            )
+
+    async def test_unauthorized(self, service, mock_image_repo, sample_image):
+        sample_image.user_id = 999
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+
+        with pytest.raises(ValueError, match="Unauthorized"):
+            await service.segment_by_polygon(
+                image_id=1, user_id=42, points=[(0, 0), (10, 0), (5, 10)],
+            )
+
+    async def test_pipeline_exception_propagates(
         self, service, mock_image_repo, sample_image, mock_pipeline,
     ):
         mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-        mock_pipeline.sam_segment_with_prompt = AsyncMock(return_value={
+        mock_pipeline.sam_segment_by_polygon = AsyncMock(side_effect=RuntimeError("polygon failed"))
+
+        with pytest.raises(RuntimeError, match="polygon failed"):
+            await service.segment_by_polygon(
+                image_id=1, user_id=42, points=[(0, 0), (10, 0), (5, 10)],
+            )
+
+    async def test_empty_segments_result(
+        self, service, mock_image_repo, sample_image, mock_pipeline, mock_redis_storage,
+    ):
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+        mock_redis_storage.get_cached_segments = AsyncMock(return_value=None)
+        mock_pipeline.sam_segment_by_polygon = AsyncMock(return_value={
             "segments": [], "metrics": {}, "image_size": (1, 1),
         })
+
+        result = await service.segment_by_polygon(
+            image_id=1, user_id=42, points=[(0, 0), (10, 0), (5, 10)],
+        )
+
+        assert result["segments"] == []
+
+
+class TestSegmentHybrid:
+    async def test_yolo_and_nonoverlapping_fallback_both_included(
+        self, service, mock_image_repo, sample_image, mock_pipeline, mock_redis_storage,
+    ):
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+        mock_pipeline.detect_objects = AsyncMock(return_value={
+            "detections": [make_detection(0, 0, 10, 10)],
+        })
+        yolo_seg = make_segment(mask_id=100, bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10})
+        mock_pipeline.sam_segment_with_prompts_batch = AsyncMock(return_value={
+            "segments": [yolo_seg],
+        })
+        fallback_seg = make_segment(mask_id=200, bbox={"x1": 50, "y1": 50, "x2": 60, "y2": 60})
+        mock_pipeline.sam_segment_objects = AsyncMock(return_value={
+            "segments": [fallback_seg], "image_size": (300, 300),
+        })
+
+        result = await service.segment_hybrid(image_id=1, user_id=42)
+
+        sources = {seg["source"] for seg in result["segments"]}
+        assert sources == {"yolo", "sam_auto"}
+        assert len(result["segments"]) == 2
+        ids = sorted(seg["mask_id"] for seg in result["segments"])
+        assert ids == [0, 1]
+        assert result["image_size"] == (300, 300)
+        assert "metrics" not in result
+
+    async def test_overlapping_fallback_segment_is_dropped(
+        self, service, mock_image_repo, sample_image, mock_pipeline, mock_redis_storage,
+    ):
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+        mock_pipeline.detect_objects = AsyncMock(return_value={
+            "detections": [make_detection(0, 0, 10, 10)],
+        })
+        yolo_seg = make_segment(mask_id=1, bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10})
+        mock_pipeline.sam_segment_with_prompts_batch = AsyncMock(return_value={
+            "segments": [yolo_seg],
+        })
+        duplicate_seg = make_segment(mask_id=2, bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10})
+        mock_pipeline.sam_segment_objects = AsyncMock(return_value={
+            "segments": [duplicate_seg], "image_size": (100, 100),
+        })
+
+        result = await service.segment_hybrid(image_id=1, user_id=42, overlap_iou_thresh=0.5)
+
+        assert len(result["segments"]) == 1
+        assert result["segments"][0]["source"] == "yolo"
+
+    async def test_no_yolo_detections_skips_batch_sam_call(
+        self, service, mock_image_repo, sample_image, mock_pipeline,
+    ):
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+        mock_pipeline.detect_objects = AsyncMock(return_value={"detections": []})
+        mock_pipeline.sam_segment_with_prompts_batch = AsyncMock()
+        fallback_seg = make_segment(mask_id=1, bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10})
+        mock_pipeline.sam_segment_objects = AsyncMock(return_value={
+            "segments": [fallback_seg], "image_size": (50, 50),
+        })
+
+        result = await service.segment_hybrid(image_id=1, user_id=42)
+
+        mock_pipeline.sam_segment_with_prompts_batch.assert_not_called()
+        assert len(result["segments"]) == 1
+        assert result["segments"][0]["source"] == "sam_auto"
+
+    async def test_caches_final_segments(
+        self, service, mock_image_repo, sample_image, mock_pipeline, mock_redis_storage,
+    ):
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+        mock_pipeline.detect_objects = AsyncMock(return_value={"detections": []})
+        mock_pipeline.sam_segment_objects = AsyncMock(return_value={
+            "segments": [make_segment(mask_id=1)], "image_size": (10, 10),
+        })
+
+        await service.segment_hybrid(image_id=1, user_id=42)
+
+        mock_redis_storage.cache_segments.assert_awaited_once()
+        _, kwargs = mock_redis_storage.cache_segments.call_args
+        assert kwargs["image_id"] == 1
+        assert kwargs["ttl"] == 7200
+
+    async def test_strips_mask_bytes_from_response(
+        self, service, mock_image_repo, sample_image, mock_pipeline,
+    ):
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+        mock_pipeline.detect_objects = AsyncMock(return_value={"detections": []})
+        mock_pipeline.sam_segment_objects = AsyncMock(return_value={
+            "segments": [make_segment(mask_id=1)], "image_size": (10, 10),
+        })
+
+        result = await service.segment_hybrid(image_id=1, user_id=42)
+
+        assert all("mask_bytes" not in seg for seg in result["segments"])
+
+    async def test_passes_yolo_params_to_detect_objects(
+        self, service, mock_image_repo, sample_image, mock_pipeline,
+    ):
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+        mock_pipeline.detect_objects = AsyncMock(return_value={"detections": []})
+        mock_pipeline.sam_segment_objects = AsyncMock(return_value={
+            "segments": [], "image_size": (1, 1),
+        })
+
+        await service.segment_hybrid(
+            image_id=1, user_id=42, yolo_conf_threshold=0.6, yolo_classes=["dog"],
+            fallback_min_area=1200, fallback_max_segments=10,
+        )
+
+        _, detect_kwargs = mock_pipeline.detect_objects.call_args
+        assert detect_kwargs["conf_threshold"] == 0.6
+        assert detect_kwargs["classes"] == ["dog"]
+        _, fallback_kwargs = mock_pipeline.sam_segment_objects.call_args
+        assert fallback_kwargs["min_area"] == 1200
+        assert fallback_kwargs["max_segments"] == 10
+
+    async def test_image_not_found(self, service, mock_image_repo):
+        mock_image_repo.get_by_id = AsyncMock(return_value=None)
+
+        with pytest.raises(ValueError, match="not found"):
+            await service.segment_hybrid(image_id=1, user_id=42)
+
+    async def test_unauthorized(self, service, mock_image_repo, sample_image):
+        sample_image.user_id = 999
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+
+        with pytest.raises(ValueError, match="Unauthorized"):
+            await service.segment_hybrid(image_id=1, user_id=42)
+
+    async def test_detect_objects_exception_propagates(
+        self, service, mock_image_repo, sample_image, mock_pipeline,
+    ):
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+        mock_pipeline.detect_objects = AsyncMock(side_effect=RuntimeError("yolo crashed"))
+
+        with pytest.raises(RuntimeError, match="yolo crashed"):
+            await service.segment_hybrid(image_id=1, user_id=42)
+
+    async def test_fallback_exception_propagates(
+        self, service, mock_image_repo, sample_image, mock_pipeline,
+    ):
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+        mock_pipeline.detect_objects = AsyncMock(return_value={"detections": []})
+        mock_pipeline.sam_segment_objects = AsyncMock(side_effect=RuntimeError("fallback crashed"))
+
+        with pytest.raises(RuntimeError, match="fallback crashed"):
+            await service.segment_hybrid(image_id=1, user_id=42)
+
+
+class TestNextMaskOffset:
+    async def test_returns_zero_when_no_segments_cached(self, service, mock_redis_storage):
+        mock_redis_storage.get_cached_segments = AsyncMock(return_value=None)
+
+        offset = await service._next_mask_offset(image_id=1)
+
+        assert offset == 0
+
+    async def test_returns_zero_when_empty_list_cached(self, service, mock_redis_storage):
+        mock_redis_storage.get_cached_segments = AsyncMock(return_value=[])
+
+        offset = await service._next_mask_offset(image_id=1)
+
+        assert offset == 0
+
+    async def test_returns_max_plus_one(self, service, mock_redis_storage):
+        mock_redis_storage.get_cached_segments = AsyncMock(return_value=[
+            make_segment(mask_id=0), make_segment(mask_id=5), make_segment(mask_id=2),
+        ])
+
+        offset = await service._next_mask_offset(image_id=1)
+
+        assert offset == 6
+
+
+class TestIouAndOverlapsAny:
+    def test_iou_identical_boxes_is_one(self, service):
+        box = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
+
+        assert SegmentationService._iou(box, box) == pytest.approx(1.0)
+
+    def test_iou_no_overlap_is_zero(self, service):
+        a = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
+        b = {"x1": 100, "y1": 100, "x2": 110, "y2": 110}
+
+        assert SegmentationService._iou(a, b) == 0.0
+
+    def test_iou_partial_overlap(self, service):
+        a = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
+        b = {"x1": 5, "y1": 5, "x2": 15, "y2": 15}
+        expected = 25 / 175
+
+        assert SegmentationService._iou(a, b) == pytest.approx(expected)
+
+    def test_iou_degenerate_box_zero_union_returns_zero(self, service):
+        a = {"x1": 5, "y1": 5, "x2": 5, "y2": 5}
+        b = {"x1": 5, "y1": 5, "x2": 5, "y2": 5}
+
+        assert SegmentationService._iou(a, b) == 0.0
+
+    def test_overlaps_any_true_when_above_threshold(self, service):
+        bbox = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
+        existing = [{"x1": 0, "y1": 0, "x2": 10, "y2": 10}]
+
+        assert SegmentationService._overlaps_any(bbox, existing, 0.5) is True
+
+    def test_overlaps_any_false_when_below_threshold(self, service):
+        bbox = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
+        existing = [{"x1": 100, "y1": 100, "x2": 110, "y2": 110}]
+
+        assert SegmentationService._overlaps_any(bbox, existing, 0.5) is False
+
+    def test_overlaps_any_boundary_is_exclusive(self, service):
+        bbox = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
+        other = {"x1": 0, "y1": 0, "x2": 20, "y2": 5}
+        iou = SegmentationService._iou(bbox, other)
+
+        assert SegmentationService._overlaps_any(bbox, [other], iou) is False
+
+    def test_overlaps_any_empty_existing_list_is_false(self, service):
         bbox = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
 
-        await service.segment_with_prompt(image_id=1, user_id=42, bbox=bbox)
+        assert SegmentationService._overlaps_any(bbox, [], 0.5) is False
 
-        _, kwargs = mock_pipeline.sam_segment_with_prompt.call_args
-        assert kwargs["bbox"] == bbox
+    def test_overlaps_any_checks_all_boxes(self, service):
+        bbox = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
+        existing = [
+            {"x1": 100, "y1": 100, "x2": 110, "y2": 110},
+            {"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+        ]
 
-    async def test_segment_with_prompt_no_prompt_params_passes_none(
-        self, service, mock_image_repo, sample_image, mock_pipeline,
-    ):
-        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-        mock_pipeline.sam_segment_with_prompt = AsyncMock(return_value={
-            "segments": [], "metrics": {}, "image_size": (1, 1),
-        })
-
-        await service.segment_with_prompt(image_id=1, user_id=42)
-
-        _, kwargs = mock_pipeline.sam_segment_with_prompt.call_args
-        assert kwargs["point_coords"] is None
-        assert kwargs["point_labels"] is None
-        assert kwargs["bbox"] is None
-
-    async def test_segment_with_prompt_image_not_found(self, service, mock_image_repo):
-        mock_image_repo.get_by_id = AsyncMock(return_value=None)
-
-        with pytest.raises(ValueError, match="not found"):
-            await service.segment_with_prompt(image_id=1, user_id=42)
-
-    async def test_segment_with_prompt_unauthorized(self, service, mock_image_repo, sample_image):
-        sample_image.user_id = 999
-        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-
-        with pytest.raises(ValueError, match="Unauthorized"):
-            await service.segment_with_prompt(image_id=1, user_id=42)
-
-    async def test_segment_with_prompt_pipeline_exception_propagates(
-        self, service, mock_image_repo, sample_image, mock_pipeline,
-    ):
-        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-        mock_pipeline.sam_segment_with_prompt = AsyncMock(side_effect=RuntimeError("boom"))
-
-        with pytest.raises(RuntimeError, match="boom"):
-            await service.segment_with_prompt(image_id=1, user_id=42)
-
-
-class TestSamRemoveObject:
-    async def test_sam_remove_object_success(
-        self, service, mock_image_repo, sample_image, mock_redis_storage,
-        mock_redis_history, mock_pipeline, mock_s3,
-    ):
-        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-        mock_redis_storage.get_cached_segments = AsyncMock(return_value=[make_segment(5)])
-        mock_pipeline.sam_remove_object = AsyncMock(return_value={
-            "result_bytes": b"result", "metrics": {"latency_ms": 50}, "timestamp": "t",
-        })
-
-        result = await service.sam_remove_object(image_id=1, mask_id=5, user_id=42)
-
-        assert mock_redis_history.push_undo_state.await_count == 1
-        undo_call_order = mock_redis_history.method_calls
-        pipeline_call_order = mock_pipeline.method_calls
-        mock_redis_history.push_undo_state.assert_awaited_once()
-        mock_pipeline.sam_remove_object.assert_awaited_once()
-
-        mock_redis_storage.cache_image.assert_awaited_once()
-        mock_s3.upload_bytes.assert_awaited_once()
-        mock_s3.get_presigned_url.assert_awaited_once()
-
-        assert result["result_url"] == "s3://bucket/path.jpg"
-        assert result["presigned_url"] == "https://presigned.example/path.jpg"
-        assert "metrics" in result
-        assert "timestamp" in result and result["timestamp"]
-
-    async def test_sam_remove_object_image_not_found(self, service, mock_image_repo):
-        mock_image_repo.get_by_id = AsyncMock(return_value=None)
-
-        with pytest.raises(ValueError, match="not found"):
-            await service.sam_remove_object(image_id=1, mask_id=1, user_id=42)
-
-    async def test_sam_remove_object_unauthorized(self, service, mock_image_repo, sample_image):
-        sample_image.user_id = 999
-        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-
-        with pytest.raises(ValueError, match="Unauthorized"):
-            await service.sam_remove_object(image_id=1, mask_id=1, user_id=42)
-
-    async def test_sam_remove_object_no_segments_cached(
-        self, service, mock_image_repo, sample_image, mock_redis_storage,
-    ):
-        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-        mock_redis_storage.get_cached_segments = AsyncMock(return_value=None)
-
-        with pytest.raises(ValueError, match="No segments found"):
-            await service.sam_remove_object(image_id=1, mask_id=1, user_id=42)
-
-    async def test_sam_remove_object_mask_id_not_found(
-        self, service, mock_image_repo, sample_image, mock_redis_storage,
-    ):
-        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-        mock_redis_storage.get_cached_segments = AsyncMock(return_value=[make_segment(1)])
-
-        with pytest.raises(ValueError, match="Segment with mask_id=999 not found"):
-            await service.sam_remove_object(image_id=1, mask_id=999, user_id=42)
-
-    async def test_sam_remove_object_pipeline_exception_after_undo_pushed(
-        self, service, mock_image_repo, sample_image, mock_redis_storage,
-        mock_redis_history, mock_pipeline,
-    ):
-        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-        mock_redis_storage.get_cached_segments = AsyncMock(return_value=[make_segment(5)])
-        mock_pipeline.sam_remove_object = AsyncMock(side_effect=RuntimeError("lama crashed"))
-
-        with pytest.raises(RuntimeError, match="lama crashed"):
-            await service.sam_remove_object(image_id=1, mask_id=5, user_id=42)
-
-        mock_redis_history.push_undo_state.assert_awaited_once()
-
-    async def test_sam_remove_object_s3_exception_propagates(
-        self, service, mock_image_repo, sample_image, mock_redis_storage,
-        mock_pipeline, mock_s3,
-    ):
-        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-        mock_redis_storage.get_cached_segments = AsyncMock(return_value=[make_segment(5)])
-        mock_pipeline.sam_remove_object = AsyncMock(return_value={
-            "result_bytes": b"result", "metrics": {}, "timestamp": "t",
-        })
-        mock_s3.upload_bytes = AsyncMock(side_effect=IOError("s3 down"))
-
-        with pytest.raises(IOError, match="s3 down"):
-            await service.sam_remove_object(image_id=1, mask_id=5, user_id=42)
-
-    async def test_sam_remove_object_boundary_expand_mask_zero(
-        self, service, mock_image_repo, sample_image, mock_redis_storage, mock_pipeline,
-    ):
-        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-        mock_redis_storage.get_cached_segments = AsyncMock(return_value=[make_segment(5)])
-        mock_pipeline.sam_remove_object = AsyncMock(return_value={
-            "result_bytes": b"result", "metrics": {}, "timestamp": "t",
-        })
-
-        await service.sam_remove_object(image_id=1, mask_id=5, user_id=42, expand_mask_pixels=0)
-
-        _, kwargs = mock_pipeline.sam_remove_object.call_args
-        assert kwargs["expand_mask_pixels"] == 0
-
-class TestSamReplaceObject:
-    async def test_sam_replace_object_success(
-        self, service, mock_image_repo, sample_image, mock_redis_storage,
-        mock_redis_history, mock_pipeline, mock_s3,
-    ):
-        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-        mock_redis_storage.get_cached_segments = AsyncMock(return_value=[make_segment(7)])
-        mock_pipeline.sam_replace_object = AsyncMock(return_value={
-            "result_bytes": b"result", "metrics": {}, "timestamp": "t",
-        })
-
-        result = await service.sam_replace_object(
-            image_id=1, mask_id=7, replacement_image_bytes=b"replacement", user_id=42,
-        )
-
-        mock_redis_history.push_undo_state.assert_awaited_once()
-        mock_pipeline.sam_replace_object.assert_awaited_once()
-        _, kwargs = mock_pipeline.sam_replace_object.call_args
-        assert kwargs["replacement_image_bytes"] == b"replacement"
-
-        mock_redis_storage.cache_image.assert_awaited_once()
-        assert result["result_url"] == "s3://bucket/path.jpg"
-        assert "timestamp" in result and result["timestamp"]
-
-    async def test_sam_replace_object_image_not_found(self, service, mock_image_repo):
-        mock_image_repo.get_by_id = AsyncMock(return_value=None)
-
-        with pytest.raises(ValueError, match="not found"):
-            await service.sam_replace_object(
-                image_id=1, mask_id=1, replacement_image_bytes=b"x", user_id=42
-            )
-
-    async def test_sam_replace_object_unauthorized(self, service, mock_image_repo, sample_image):
-        sample_image.user_id = 999
-        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-
-        with pytest.raises(ValueError, match="Unauthorized"):
-            await service.sam_replace_object(
-                image_id=1, mask_id=1, replacement_image_bytes=b"x", user_id=42
-            )
-
-    async def test_sam_replace_object_segment_not_cached(
-        self, service, mock_image_repo, sample_image, mock_redis_storage,
-    ):
-        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-        mock_redis_storage.get_cached_segments = AsyncMock(return_value=None)
-
-        with pytest.raises(ValueError, match="No segments found"):
-            await service.sam_replace_object(
-                image_id=1, mask_id=1, replacement_image_bytes=b"x", user_id=42
-            )
-
-    async def test_sam_replace_object_pipeline_exception(
-        self, service, mock_image_repo, sample_image, mock_redis_storage, mock_pipeline,
-    ):
-        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-        mock_redis_storage.get_cached_segments = AsyncMock(return_value=[make_segment(7)])
-        mock_pipeline.sam_replace_object = AsyncMock(side_effect=RuntimeError("inpaint failed"))
-
-        with pytest.raises(RuntimeError, match="inpaint failed"):
-            await service.sam_replace_object(
-                image_id=1, mask_id=7, replacement_image_bytes=b"x", user_id=42
-            )
-
-    async def test_sam_replace_object_default_edge_blending_false(
-        self, service, mock_image_repo, sample_image, mock_redis_storage, mock_pipeline,
-    ):
-        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
-        mock_redis_storage.get_cached_segments = AsyncMock(return_value=[make_segment(7)])
-        mock_pipeline.sam_replace_object = AsyncMock(return_value={
-            "result_bytes": b"r", "metrics": {}, "timestamp": "t",
-        })
-
-        await service.sam_replace_object(
-            image_id=1, mask_id=7, replacement_image_bytes=b"x", user_id=42
-        )
-
-        _, kwargs = mock_pipeline.sam_replace_object.call_args
-        assert kwargs["use_edge_blending"] is False
+        assert SegmentationService._overlaps_any(bbox, existing, 0.5) is True
