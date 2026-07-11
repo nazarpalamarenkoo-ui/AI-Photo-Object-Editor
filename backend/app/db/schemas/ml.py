@@ -23,14 +23,34 @@ class DetectRequest(BaseModel):
 class RemoveRequest(BaseModel):
     expand_mask_pixels: int = Field(5, ge=0, le=50)
     use_edge_blending: bool = False
-    ldm: LdmConfig = Field(default_factory=LdmConfig)
+    ldm_steps: int = Field(25, ge=5, le=50)
+    ldm_sampler: Literal['plms', 'ddim'] = 'plms'
+    hd_strategy: Literal['CROP', 'RESIZE', 'ORIGINAL'] = 'CROP'
+
+    @property
+    def ldm(self) -> LdmConfig:
+        return LdmConfig(
+            ldm_steps=self.ldm_steps,
+            ldm_sampler=self.ldm_sampler,
+            hd_strategy=self.hd_strategy,
+        )
 
 
 class RemoveMultipleRequest(BaseModel):
     bbox_ids: List[int] = Field(..., min_length=1)
     expand_mask_pixels: int = Field(5, ge=0, le=50)
     use_edge_blending: bool = False
-    ldm: LdmConfig = Field(default_factory=LdmConfig)
+    ldm_steps: int = Field(25, ge=5, le=50)
+    ldm_sampler: Literal['plms', 'ddim'] = 'plms'
+    hd_strategy: Literal['CROP', 'RESIZE', 'ORIGINAL'] = 'CROP'
+
+    @property
+    def ldm(self) -> LdmConfig:
+        return LdmConfig(
+            ldm_steps=self.ldm_steps,
+            ldm_sampler=self.ldm_sampler,
+            hd_strategy=self.hd_strategy,
+        )
 
 
 class ReplaceRequest(BaseModel):
@@ -38,7 +58,17 @@ class ReplaceRequest(BaseModel):
     use_color_matching: bool = False
     use_edge_blending: bool = False
     color_match_method: Literal['mean_std', 'histogram', 'color_transfer'] = 'mean_std'
-    ldm: LdmConfig = Field(default_factory=LdmConfig)
+    ldm_steps: int = Field(25, ge=5, le=50)
+    ldm_sampler: Literal['plms', 'ddim'] = 'plms'
+    hd_strategy: Literal['CROP', 'RESIZE', 'ORIGINAL'] = 'CROP'
+
+    @property
+    def ldm(self) -> LdmConfig:
+        return LdmConfig(
+            ldm_steps=self.ldm_steps,
+            ldm_sampler=self.ldm_sampler,
+            hd_strategy=self.hd_strategy,
+        )
 
 
 class SegmentRequest(BaseModel):
@@ -55,7 +85,17 @@ class SegmentWithPromptRequest(BaseModel):
 class SamRemoveRequest(BaseModel):
     expand_mask_pixels: int = Field(12, ge=0, le=50)
     use_edge_blending: bool = False
-    ldm: LdmConfig = Field(default_factory=LdmConfig)
+    ldm_steps: int = Field(25, ge=5, le=50)
+    ldm_sampler: Literal['plms', 'ddim'] = 'plms'
+    hd_strategy: Literal['CROP', 'RESIZE', 'ORIGINAL'] = 'CROP'
+
+    @property
+    def ldm(self) -> LdmConfig:
+        return LdmConfig(
+            ldm_steps=self.ldm_steps,
+            ldm_sampler=self.ldm_sampler,
+            hd_strategy=self.hd_strategy,
+        )
 
 
 class SamReplaceRequest(BaseModel):
@@ -63,9 +103,9 @@ class SamReplaceRequest(BaseModel):
     use_color_matching: bool = False
     use_edge_blending: bool = False
     color_match_method: str = "color_transfer"
-    ldm_steps: int = 25
-    ldm_sampler: str = "plms"
-    hd_strategy: str = "CROP"
+    ldm_steps: int = Field(25, ge=5, le=50)
+    ldm_sampler: Literal['plms', 'ddim'] = 'plms'
+    hd_strategy: Literal['CROP', 'RESIZE', 'ORIGINAL'] = 'CROP'
 
     @property
     def ldm(self) -> LdmConfig:
@@ -123,6 +163,13 @@ class SegmentByPolygonRequest(BaseModel):
     smooth: bool = True
     smoothing_factor: float = 0.0
     feather_px: int = 0
+
+class SegmentHybridRequest(BaseModel):
+    yolo_conf_threshold: float = 0.35
+    yolo_classes: Optional[List[str]] = None
+    fallback_min_area: int = 800
+    fallback_max_segments: int = 50
+    overlap_iou_thresh: float = 0.5
     
 class ExtractResponse(BaseModel):
     asset_id: str
@@ -153,3 +200,4 @@ class AssetResponse(BaseModel):
 
 class RenameAssetRequest(BaseModel):
     label: str
+    

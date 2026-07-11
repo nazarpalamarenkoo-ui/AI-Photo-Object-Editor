@@ -36,7 +36,6 @@ class TestBboxSchema:
         assert BboxSchema(x1=0, y1=0, x2=0, y2=0).x1 == 0
 
     def test_bbox_negative_coords_allowed(self):
-        # no ge/le constraints defined on BboxSchema
         bbox = BboxSchema(x1=-10, y1=-20, x2=100, y2=200)
         assert bbox.x1 == -10
 
@@ -123,13 +122,15 @@ class TestRemoveRequest:
         assert req.use_edge_blending is False
         assert req.ldm.ldm_steps == 25
 
-    def test_with_custom_ldm(self):
-        req = RemoveRequest(ldm=LdmConfig(ldm_steps=10, ldm_sampler="ddim", hd_strategy="RESIZE"))
+    def test_with_custom_ldm_fields(self):
+        req = RemoveRequest(ldm_steps=10, ldm_sampler="ddim", hd_strategy="RESIZE")
         assert req.ldm.ldm_steps == 10
+        assert req.ldm.ldm_sampler == "ddim"
+        assert req.ldm.hd_strategy == "RESIZE"
 
-    def test_ldm_default_factory_is_independent_instance(self):
-        req1, req2 = RemoveRequest(), RemoveRequest()
-        assert req1.ldm is not req2.ldm
+    def test_ldm_property_returns_new_instance_each_time(self):
+        req = RemoveRequest()
+        assert req.ldm is not req.ldm
 
     def test_expand_mask_pixels_boundaries(self):
         assert RemoveRequest(expand_mask_pixels=0).expand_mask_pixels == 0
@@ -145,6 +146,14 @@ class TestRemoveRequest:
 
     def test_edge_blending_true(self):
         assert RemoveRequest(use_edge_blending=True).use_edge_blending is True
+
+    def test_ldm_steps_below_min_invalid(self):
+        with pytest.raises(ValidationError):
+            RemoveRequest(ldm_steps=4)
+
+    def test_invalid_sampler_invalid(self):
+        with pytest.raises(ValidationError):
+            RemoveRequest(ldm_sampler="euler")  # type: ignore
 
 
 @pytest.mark.unit
@@ -170,6 +179,11 @@ class TestRemoveMultipleRequest:
         with pytest.raises(ValidationError):
             RemoveMultipleRequest()  # type: ignore
 
+    def test_custom_ldm_fields_reflected_in_property(self):
+        req = RemoveMultipleRequest(bbox_ids=[1, 2], ldm_steps=15, ldm_sampler="ddim")
+        assert req.ldm.ldm_steps == 15
+        assert req.ldm.ldm_sampler == "ddim"
+
 
 @pytest.mark.unit
 class TestReplaceRequest:
@@ -193,6 +207,10 @@ class TestReplaceRequest:
 
     def test_color_matching_true(self):
         assert ReplaceRequest(use_color_matching=True).use_color_matching is True
+
+    def test_expand_mask_pixels_above_max_invalid(self):
+        with pytest.raises(ValidationError):
+            ReplaceRequest(expand_mask_pixels=51)
 
 
 @pytest.mark.unit
@@ -260,6 +278,11 @@ class TestSamRemoveRequest:
         with pytest.raises(ValidationError):
             SamRemoveRequest(expand_mask_pixels=-1)
 
+    def test_custom_ldm_reflected(self):
+        req = SamRemoveRequest(ldm_steps=30, hd_strategy="ORIGINAL")
+        assert req.ldm.ldm_steps == 30
+        assert req.ldm.hd_strategy == "ORIGINAL"
+
 
 @pytest.mark.unit
 class TestSamReplaceRequest:
@@ -274,14 +297,17 @@ class TestSamReplaceRequest:
         assert req.hd_strategy == "CROP"
 
     def test_color_match_method_is_plain_str_no_validation(self):
-        # unlike ReplaceRequest, this field is a plain str, not a Literal
         req = SamReplaceRequest(color_match_method="anything_goes")
         assert req.color_match_method == "anything_goes"
 
     def test_expand_mask_pixels_unconstrained(self):
-        # plain int, no ge/le on this model
         req = SamReplaceRequest(expand_mask_pixels=999)
         assert req.expand_mask_pixels == 999
+
+    def test_expand_mask_pixels_negative_allowed(self):
+        # plain int field with no ge/le constraint
+        req = SamReplaceRequest(expand_mask_pixels=-50)
+        assert req.expand_mask_pixels == -50
 
     def test_ldm_property_builds_ldm_config(self):
         req = SamReplaceRequest(ldm_steps=10, ldm_sampler="ddim", hd_strategy="RESIZE")
@@ -289,12 +315,10 @@ class TestSamReplaceRequest:
         assert isinstance(cfg, LdmConfig)
         assert (cfg.ldm_steps, cfg.ldm_sampler, cfg.hd_strategy) == (10, "ddim", "RESIZE")
 
-    def test_ldm_property_invalid_underlying_values_raise(self):
-        # the underlying plain fields accept anything, but building the
-        # LdmConfig from them should still validate
-        req = SamReplaceRequest(ldm_steps=999)
+    def test_ldm_steps_field_itself_is_constrained(self):
+        # ldm_steps field on SamReplaceRequest DOES have ge/le constraints
         with pytest.raises(ValidationError):
-            _ = req.ldm
+            SamReplaceRequest(ldm_steps=4)
 
 
 @pytest.mark.unit
@@ -306,9 +330,12 @@ class TestExtractRequest:
         assert req.persist_to_s3 is False
 
     def test_padding_pixels_unconstrained(self):
-        # no ge/le on this field, unlike RemoveRequest.expand_mask_pixels
         req = ExtractRequest(padding_pixels=65)
         assert req.padding_pixels == 65
+
+    def test_padding_pixels_negative_allowed(self):
+        req = ExtractRequest(padding_pixels=-5)
+        assert req.padding_pixels == -5
 
     def test_with_label_and_persist(self):
         req = ExtractRequest(label="cat", persist_to_s3=True)
@@ -334,7 +361,6 @@ class TestPasteRequest:
         assert req.asset_id == "abc-123"
 
     def test_scale_unconstrained(self):
-        # no ge/le on scale in this schema
         req = PasteRequest(
             extracted_url="s3://obj.png",
             target_bbox=BboxSchema(x1=0, y1=0, x2=10, y2=10),
