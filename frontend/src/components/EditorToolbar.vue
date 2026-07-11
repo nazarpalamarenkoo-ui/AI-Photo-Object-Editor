@@ -34,6 +34,17 @@
       </button>
     </div>
 
+    <div v-if="mode === 'sam'" class="tool-group">
+      <button
+        :class="['tool-btn', { active: useHybrid }]"
+        :disabled="busy"
+        title="Hybrid segmentation: YOLO detects common objects first, SAM2 batch-segments them in one encoder pass, sparse SAM2 auto-pass catches the rest — faster than full auto segmentation"
+        @click="$emit('update:useHybrid', !useHybrid)"
+      >
+        Hybrid
+      </button>
+    </div>
+
     <div class="tool-divider" />
 
     <div class="tool-group">
@@ -196,6 +207,7 @@ const props = defineProps<{
   modelConfig: LdmConfig
   mode: EditingMode
   busy: boolean
+  useHybrid: boolean
 }>()
 
 const emit = defineEmits<{
@@ -206,6 +218,7 @@ const emit = defineEmits<{
   reset: []
   'update:modelConfig': [value: LdmConfig]
   'update:mode': [value: EditingMode]
+  'update:useHybrid': [value: boolean]
 }>()
 
 const settingsOpen = ref(false)
