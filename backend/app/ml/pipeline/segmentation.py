@@ -133,6 +133,65 @@ class SegmentationMixin:
             print(f"SAM prompt segmentation failed: {e}")
             raise
         
+    async def sam_segment_with_prompts_batch(
+        self,
+        image_bytes: bytes,
+        bboxes: List[Dict[str, int]],
+        track_metrics: bool = True,
+    ) -> Dict:
+        """
+        Batched box-prompt segmentation using SAM2 — one image-encoder
+        pass shared across all bboxes, one cheap decoder call each.
+
+        Args:
+            image_bytes:    Input image bytes
+            bboxes:         List of {'x1','y1','x2','y2'} SAM2 box prompts
+            track_metrics:  Track metrics to MLflow (default: True)
+
+        Returns:
+            Dict:
+                - segments:    List[Dict] — one top mask per bbox, each with
+                               bbox, area, mask_bytes, mask_id, bbox_id,
+                               stability_score, predicted_iou, prompt_bbox
+                - metrics:     Dict
+                - image_size:  Tuple[int, int] — (W, H)
+                - timestamp:   str
+
+        Raises:
+            ValueError: If bboxes is empty.
+        """
+        start_time = time.time()
+
+        try:
+            self.validator.validate_image_bytes(image_bytes)
+
+            if not bboxes:
+                raise ValueError("Provide at least one bbox")
+
+            for bbox in bboxes:
+                self.validator.validate_bbox(bbox)
+
+            result = await self.sam_lama_mode.segment_with_prompts_batch(
+                image_bytes=image_bytes,
+                bboxes=bboxes,
+            )
+
+            result["timestamp"] = datetime.now().isoformat()
+
+            if track_metrics:
+                self.tracker.log_metrics({
+                    "operation": "sam_segment_prompts_batch",
+                    "num_bboxes": len(bboxes),
+                    "num_segments": len(result["segments"]),
+                    "processing_time": time.time() - start_time,
+                })
+
+            return result
+
+        except Exception as e:
+            print(f"SAM batched prompt segmentation failed: {e}")
+            raise
+        
     async def sam_segment_by_polygon(
         self,
         image_bytes: bytes,

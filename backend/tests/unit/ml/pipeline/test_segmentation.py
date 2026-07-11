@@ -5,235 +5,210 @@ pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
 
 @pytest.fixture
-def polygon_points() -> list:
-    """Not provided by conftest.py - defined locally for the polygon tests below."""
-    return [(1, 1), (10, 1), (10, 10), (1, 10)]
+def bboxes() -> list:
+    """Not provided by conftest.py — defined locally for the batch tests below."""
+    return [
+        {"x1": 1, "y1": 1, "x2": 10, "y2": 10},
+        {"x1": 20, "y1": 20, "x2": 30, "y2": 30},
+        {"x1": 40, "y1": 40, "x2": 50, "y2": 50},
+    ]
 
 
 @pytest.fixture
 def host(host):
-    host.sam_lama_mode.segment_by_polygon = AsyncMock(
+    host.sam_lama_mode.segment_with_prompts_batch = AsyncMock(
         return_value={
-            "segments": [{
-                "bbox": {"x1": 0, "y1": 0, "x2": 5, "y2": 5},
-                "area": 25,
-                "mask_bytes": b"m",
-                "mask_id": 0,
-                "bbox_id": 0,
-                "stability_score": 0.9,
-                "predicted_iou": 0.8,
-            }],
+            "segments": [
+                {
+                    "bbox": {"x1": 0, "y1": 0, "x2": 5, "y2": 5},
+                    "prompt_bbox": {"x1": 1, "y1": 1, "x2": 10, "y2": 10},
+                    "area": 25,
+                    "mask_bytes": b"m",
+                    "mask_id": 0,
+                    "bbox_id": 0,
+                    "stability_score": 0.9,
+                    "predicted_iou": 0.8,
+                },
+                {
+                    "bbox": {"x1": 20, "y1": 20, "x2": 25, "y2": 25},
+                    "prompt_bbox": {"x1": 20, "y1": 20, "x2": 30, "y2": 30},
+                    "area": 30,
+                    "mask_bytes": b"n",
+                    "mask_id": 1,
+                    "bbox_id": 1,
+                    "stability_score": 0.85,
+                    "predicted_iou": 0.75,
+                },
+            ],
             "image_size": (640, 480),
         }
     )
     return host
 
 
-async def test_sam_segment_objects_success(host, image_bytes):
-    result = await host.sam_segment_objects(image_bytes=image_bytes)
 
-    assert len(result["segments"]) == 1
+async def test_sam_segment_with_prompts_batch_success(host, image_bytes, bboxes):
+    result = await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=bboxes)
+
+    assert len(result["segments"]) == 2
     assert result["image_size"] == (640, 480)
     assert "timestamp" in result
 
 
-async def test_sam_segment_objects_validates_image_bytes(host, image_bytes):
-    await host.sam_segment_objects(image_bytes=image_bytes)
+async def test_sam_segment_with_prompts_batch_validates_image_bytes(host, image_bytes, bboxes):
+    await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=bboxes)
 
     host.validator.validate_image_bytes.assert_called_once_with(image_bytes)
 
 
-async def test_sam_segment_objects_calls_sam_lama_mode_with_params(host, image_bytes):
-    await host.sam_segment_objects(image_bytes=image_bytes, min_area=1000, max_segments=10)
+async def test_sam_segment_with_prompts_batch_validates_each_bbox_in_order(host, image_bytes, bboxes):
+    await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=bboxes)
 
-    host.sam_lama_mode.segment_objects.assert_called_once_with(
-        image_bytes=image_bytes, min_area=1000, max_segments=10,
+    calls = host.validator.validate_bbox.call_args_list
+    assert [c.args[0] for c in calls] == bboxes
+
+
+async def test_sam_segment_with_prompts_batch_calls_mode_with_params(host, image_bytes, bboxes):
+    await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=bboxes)
+
+    host.sam_lama_mode.segment_with_prompts_batch.assert_called_once_with(
+        image_bytes=image_bytes, bboxes=bboxes,
     )
 
 
-async def test_sam_segment_objects_tracker_called_when_enabled(host, image_bytes):
-    await host.sam_segment_objects(image_bytes=image_bytes, track_metrics=True)
+async def test_sam_segment_with_prompts_batch_single_bbox_still_works(host, image_bytes):
+    single = [{"x1": 1, "y1": 1, "x2": 10, "y2": 10}]
 
-    payload = host.tracker.log_metrics.call_args.args[0]
-    assert payload["operation"] == "sam_segment_auto"
-    assert payload["num_segments"] == 1
+    result = await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=single)
 
-
-async def test_sam_segment_objects_tracker_not_called_when_disabled(host, image_bytes):
-    await host.sam_segment_objects(image_bytes=image_bytes, track_metrics=False)
-
-    host.tracker.log_metrics.assert_not_called()
-
-
-async def test_sam_segment_objects_invalid_image_raises(host, image_bytes):
-    host.validator.validate_image_bytes.side_effect = ValueError("Invalid image bytes")
-
-    with pytest.raises(ValueError, match="Invalid image bytes"):
-        await host.sam_segment_objects(image_bytes=image_bytes)
-
-    host.sam_lama_mode.segment_objects.assert_not_called()
-
-
-async def test_sam_segment_objects_propagates_mode_exception(host, image_bytes):
-    host.sam_lama_mode.segment_objects = AsyncMock(side_effect=RuntimeError("segmentation failed"))
-
-    with pytest.raises(RuntimeError, match="segmentation failed"):
-        await host.sam_segment_objects(image_bytes=image_bytes)
-
-
-async def test_sam_segment_with_prompt_success_with_points(host, image_bytes):
-    result = await host.sam_segment_with_prompt(
-        image_bytes=image_bytes, point_coords=[(10, 10)], point_labels=[1],
+    host.sam_lama_mode.segment_with_prompts_batch.assert_called_once_with(
+        image_bytes=image_bytes, bboxes=single,
     )
-
-    assert len(result["segments"]) == 1
     assert "timestamp" in result
 
 
-async def test_sam_segment_with_prompt_success_with_bbox(host, image_bytes, bbox):
-    result = await host.sam_segment_with_prompt(image_bytes=image_bytes, bbox=bbox)
+# ---------------------------------------------------------------------------
+# Validation errors
+# ---------------------------------------------------------------------------
 
-    assert len(result["segments"]) == 1
-    host.validator.validate_bbox.assert_called_once_with(bbox)
+async def test_sam_segment_with_prompts_batch_empty_bboxes_raises(host, image_bytes):
+    with pytest.raises(ValueError, match="Provide at least one bbox"):
+        await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=[])
 
-
-async def test_sam_segment_with_prompt_missing_prompts_raises(host, image_bytes):
-    with pytest.raises(ValueError, match="Provide at least one of: point_coords or bbox"):
-        await host.sam_segment_with_prompt(image_bytes=image_bytes)
-
-    host.sam_lama_mode.segment_with_prompt.assert_not_called()
+    host.sam_lama_mode.segment_with_prompts_batch.assert_not_called()
 
 
-async def test_sam_segment_with_prompt_mismatched_points_and_labels_raises(host, image_bytes):
-    with pytest.raises(ValueError, match="point_coords and point_labels must have the same length"):
-        await host.sam_segment_with_prompt(
-            image_bytes=image_bytes, point_coords=[(1, 1), (2, 2)], point_labels=[1],
-        )
+async def test_sam_segment_with_prompts_batch_none_bboxes_raises(host, image_bytes):
+    with pytest.raises(ValueError, match="Provide at least one bbox"):
+        await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=None)
+
+    host.sam_lama_mode.segment_with_prompts_batch.assert_not_called()
 
 
-async def test_sam_segment_with_prompt_invalid_bbox_raises(host, image_bytes, bbox):
+async def test_sam_segment_with_prompts_batch_empty_bboxes_skips_bbox_validation(host, image_bytes):
+    with pytest.raises(ValueError, match="Provide at least one bbox"):
+        await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=[])
+
+    host.validator.validate_bbox.assert_not_called()
+
+
+async def test_sam_segment_with_prompts_batch_raises_on_invalid_bbox(host, image_bytes, bboxes):
     host.validator.validate_bbox.side_effect = ValueError("bbox x1 must be < x2")
 
     with pytest.raises(ValueError, match="bbox x1 must be < x2"):
-        await host.sam_segment_with_prompt(image_bytes=image_bytes, bbox=bbox)
+        await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=bboxes)
 
-    host.sam_lama_mode.segment_with_prompt.assert_not_called()
-
-
-async def test_sam_segment_with_prompt_calls_mode_with_params(host, image_bytes, bbox):
-    points = [(5, 5)]
-    labels = [1]
-
-    await host.sam_segment_with_prompt(
-        image_bytes=image_bytes, point_coords=points, point_labels=labels, bbox=bbox,
-    )
-
-    host.sam_lama_mode.segment_with_prompt.assert_called_once_with(
-        image_bytes=image_bytes, point_coords=points, point_labels=labels, bbox=bbox,
-        multimask_output=None,
-    )
+    host.sam_lama_mode.segment_with_prompts_batch.assert_not_called()
 
 
-async def test_sam_segment_with_prompt_tracker_called_when_enabled(host, image_bytes, bbox):
-    await host.sam_segment_with_prompt(image_bytes=image_bytes, bbox=bbox, track_metrics=True)
+async def test_sam_segment_with_prompts_batch_stops_validating_at_first_invalid_bbox(
+    host, image_bytes, bboxes
+):
+    """Only the bboxes up to and including the invalid one should be
+    checked — validation should short-circuit rather than validate the
+    remaining bboxes after a failure."""
+    host.validator.validate_bbox.side_effect = [None, ValueError("bad bbox"), None]
 
-    payload = host.tracker.log_metrics.call_args.args[0]
-    assert payload["operation"] == "sam_segment_prompt"
-    assert payload["has_bbox"] is True
-    assert payload["has_points"] is False
+    with pytest.raises(ValueError, match="bad bbox"):
+        await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=bboxes)
 
-
-async def test_sam_segment_with_prompt_tracker_not_called_when_disabled(host, image_bytes, bbox):
-    await host.sam_segment_with_prompt(image_bytes=image_bytes, bbox=bbox, track_metrics=False)
-
-    host.tracker.log_metrics.assert_not_called()
-
-
-async def test_sam_segment_with_prompt_propagates_mode_exception(host, image_bytes, bbox):
-    host.sam_lama_mode.segment_with_prompt = AsyncMock(side_effect=RuntimeError("prompt segmentation failed"))
-
-    with pytest.raises(RuntimeError, match="prompt segmentation failed"):
-        await host.sam_segment_with_prompt(image_bytes=image_bytes, bbox=bbox)
+    assert host.validator.validate_bbox.call_count == 2
 
 
-async def test_sam_segment_by_polygon_success(host, image_bytes, polygon_points):
-    result = await host.sam_segment_by_polygon(image_bytes=image_bytes, points=polygon_points)
-
-    assert len(result["segments"]) == 1
-    assert result["image_size"] == (640, 480)
-    assert "timestamp" in result
-
-
-async def test_sam_segment_by_polygon_validates_image_bytes(host, image_bytes, polygon_points):
-    await host.sam_segment_by_polygon(image_bytes=image_bytes, points=polygon_points)
-
-    host.validator.validate_image_bytes.assert_called_once_with(image_bytes)
-
-
-async def test_sam_segment_by_polygon_calls_mode_with_params(host, image_bytes, polygon_points):
-    await host.sam_segment_by_polygon(
-        image_bytes=image_bytes, points=polygon_points, smooth=False, smoothing_factor=1.5, feather_px=3,
-    )
-
-    host.sam_lama_mode.segment_by_polygon.assert_called_once_with(
-        image_bytes=image_bytes, points=polygon_points, smooth=False, smoothing_factor=1.5, feather_px=3,
-    )
-
-
-async def test_sam_segment_by_polygon_uses_default_params(host, image_bytes, polygon_points):
-    await host.sam_segment_by_polygon(image_bytes=image_bytes, points=polygon_points)
-
-    host.sam_lama_mode.segment_by_polygon.assert_called_once_with(
-        image_bytes=image_bytes, points=polygon_points, smooth=True, smoothing_factor=0.0, feather_px=0,
-    )
-
-
-async def test_sam_segment_by_polygon_too_few_points_raises(host, image_bytes):
-    with pytest.raises(ValueError, match="Provide at least 3 points"):
-        await host.sam_segment_by_polygon(image_bytes=image_bytes, points=[(1, 1), (2, 2)])
-
-    host.sam_lama_mode.segment_by_polygon.assert_not_called()
-
-
-async def test_sam_segment_by_polygon_none_points_raises(host, image_bytes):
-    with pytest.raises(ValueError, match="Provide at least 3 points"):
-        await host.sam_segment_by_polygon(image_bytes=image_bytes, points=None)
-
-    host.sam_lama_mode.segment_by_polygon.assert_not_called()
-
-
-async def test_sam_segment_by_polygon_empty_points_raises(host, image_bytes):
-    with pytest.raises(ValueError, match="Provide at least 3 points"):
-        await host.sam_segment_by_polygon(image_bytes=image_bytes, points=[])
-
-    host.sam_lama_mode.segment_by_polygon.assert_not_called()
-
-
-async def test_sam_segment_by_polygon_tracker_called_when_enabled(host, image_bytes, polygon_points):
-    await host.sam_segment_by_polygon(image_bytes=image_bytes, points=polygon_points, track_metrics=True)
-
-    payload = host.tracker.log_metrics.call_args.args[0]
-    assert payload["operation"] == "sam_segment_polygon"
-    assert payload["num_points"] == len(polygon_points)
-
-
-async def test_sam_segment_by_polygon_tracker_not_called_when_disabled(host, image_bytes, polygon_points):
-    await host.sam_segment_by_polygon(image_bytes=image_bytes, points=polygon_points, track_metrics=False)
-
-    host.tracker.log_metrics.assert_not_called()
-
-
-async def test_sam_segment_by_polygon_invalid_image_raises(host, image_bytes, polygon_points):
+async def test_sam_segment_with_prompts_batch_invalid_image_bytes_raises_before_bbox_validation(
+    host, image_bytes, bboxes
+):
     host.validator.validate_image_bytes.side_effect = ValueError("Invalid image bytes")
 
     with pytest.raises(ValueError, match="Invalid image bytes"):
-        await host.sam_segment_by_polygon(image_bytes=image_bytes, points=polygon_points)
+        await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=bboxes)
 
-    host.sam_lama_mode.segment_by_polygon.assert_not_called()
+    host.validator.validate_bbox.assert_not_called()
+    host.sam_lama_mode.segment_with_prompts_batch.assert_not_called()
 
 
-async def test_sam_segment_by_polygon_propagates_mode_exception(host, image_bytes, polygon_points):
-    host.sam_lama_mode.segment_by_polygon = AsyncMock(side_effect=RuntimeError("polygon segmentation failed"))
+# ---------------------------------------------------------------------------
+# Metrics / tracking
+# ---------------------------------------------------------------------------
 
-    with pytest.raises(RuntimeError, match="polygon segmentation failed"):
-        await host.sam_segment_by_polygon(image_bytes=image_bytes, points=polygon_points)
+async def test_sam_segment_with_prompts_batch_tracker_called_when_enabled(host, image_bytes, bboxes):
+    await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=bboxes, track_metrics=True)
+
+    payload = host.tracker.log_metrics.call_args.args[0]
+    assert payload["operation"] == "sam_segment_prompts_batch"
+    assert payload["num_bboxes"] == len(bboxes)
+    assert payload["num_segments"] == 2
+
+
+async def test_sam_segment_with_prompts_batch_tracker_not_called_when_disabled(host, image_bytes, bboxes):
+    await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=bboxes, track_metrics=False)
+
+    host.tracker.log_metrics.assert_not_called()
+
+
+async def test_sam_segment_with_prompts_batch_num_bboxes_reflects_input_not_output(
+    host, image_bytes, bboxes
+):
+    """num_bboxes should count the input prompts, independent of how many
+    segments actually came back (some prompts can yield empty masks)."""
+    await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=bboxes)
+
+    payload = host.tracker.log_metrics.call_args.args[0]
+    assert payload["num_bboxes"] == 3
+    assert payload["num_segments"] == 2
+    assert payload["num_bboxes"] != payload["num_segments"]
+
+
+async def test_sam_segment_with_prompts_batch_tracker_not_called_on_validation_error(
+    host, image_bytes
+):
+    with pytest.raises(ValueError):
+        await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=[])
+
+    host.tracker.log_metrics.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Error propagation
+# ---------------------------------------------------------------------------
+
+async def test_sam_segment_with_prompts_batch_propagates_mode_exception(host, image_bytes, bboxes):
+    host.sam_lama_mode.segment_with_prompts_batch = AsyncMock(
+        side_effect=RuntimeError("batch segmentation failed")
+    )
+
+    with pytest.raises(RuntimeError, match="batch segmentation failed"):
+        await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=bboxes)
+
+
+async def test_sam_segment_with_prompts_batch_tracker_not_called_when_mode_raises(
+    host, image_bytes, bboxes
+):
+    host.sam_lama_mode.segment_with_prompts_batch = AsyncMock(
+        side_effect=RuntimeError("batch segmentation failed")
+    )
+
+    with pytest.raises(RuntimeError):
+        await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=bboxes)
+
+    host.tracker.log_metrics.assert_not_called()
