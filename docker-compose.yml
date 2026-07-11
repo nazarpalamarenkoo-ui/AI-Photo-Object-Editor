@@ -1,21 +1,23 @@
 services:
   app:
-    build: .
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     ports:
       - "8000:8000"
     env_file:
       - .env
     environment:
-      - AWS_ACCESS_KEY_ID=${R2_ACCESS_KEY}
-      - AWS_SECRET_ACCESS_KEY=${R2_SECRET_KEY}
+      - AWS_ACCESS_KEY_ID=${ACCESS_KEY}
+      - AWS_SECRET_ACCESS_KEY=${SECRET_KEY}
       - R2_ENDPOINT=${R2_ENDPOINT}
       - S3_BUCKET=${S3_BUCKET}
       - MLFLOW_TRACKING_URI=http://mlflow:5000
       - U2NET_HOME=/app/weights/rembg
     volumes:
-      - .:/app
-      - ./weights:/app/weights
-      - ./weights/lama_cache:/root/.cache/torch/hub/checkpoints
+      - ./backend:/app
+      - ./backend/weights:/app/weights
+      - ./backend/weights/lama_cache:/root/.cache/torch/hub/checkpoints
     depends_on:
       postgres:
         condition: service_healthy
@@ -23,6 +25,44 @@ services:
         condition: service_healthy
       mlflow:
         condition: service_started
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: arq app.workers.worker.WorkerSettings
+    env_file:
+      - .env
+    environment:
+      - AWS_ACCESS_KEY_ID=${ACCESS_KEY}
+      - AWS_SECRET_ACCESS_KEY=${SECRET_KEY}
+      - R2_ENDPOINT=${R2_ENDPOINT}
+      - S3_BUCKET=${S3_BUCKET}
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - U2NET_HOME=/app/weights/rembg
+      - ML_DEVICE=cpu
+    volumes:
+      - ./backend:/app
+      - ./backend/weights:/app/weights
+      - ./backend/weights/lama_cache:/root/.cache/torch/hub/checkpoints
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - app
     restart: unless-stopped
 
   postgres:
@@ -71,5 +111,8 @@ services:
 
 volumes:
   postgres_data:
+    name: backend_postgres_data
   redis_data:
+    name: backend_redis_data
   mlflow_data:
+    name: backend_mlflow_data
