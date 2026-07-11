@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { ref } from 'vue'
-import type { SegmentInfo } from '@/types/Index'
+import type { MLResultResponse, SegmentInfo } from '@/types/Index'
 
 vi.mock('@/api/ml', () => ({
   PRESETS: {
@@ -8,6 +8,7 @@ vi.mock('@/api/ml', () => ({
   },
   mlApi: {
     segmentObjects: vi.fn(),
+    segmentHybrid: vi.fn(),          
     segmentWithPrompt: vi.fn(),
     segmentByPolygon: vi.fn(),
     samRemoveObject: vi.fn(),
@@ -37,7 +38,12 @@ const makeSegmentResult = (segments: SegmentInfo[]) => ({
   timestamp: '2026-01-01T00:00:00Z'
 })
 
-const makeMLResult = (presigned_url: string) => ({ presigned_url })
+const makeMLResult = (presigned_url: string): MLResultResponse => ({
+  result_url: 'https://cdn.example.com/result.jpg',
+  presigned_url,
+  metrics: {},
+  timestamp: '2026-01-01T00:00:00Z',
+})
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -926,6 +932,138 @@ describe('useSegmentation: handleSamReplace', () => {
   })
 })
 
+describe('useSegmentation: handleSegmentHybrid', () => {
+  it('calls segmentHybrid with the provided params', async () => {
+    mockedMlApi.segmentHybrid.mockResolvedValue(makeSegmentResult([]))
+
+    const { handleSegmentHybrid } = useSegmentation(9, ref(''), ref([]))
+    const params = {
+      yoloConfThreshold: 0.5,
+      yoloClasses: ['cat', 'dog'],
+      fallbackMinArea: 1000,
+      fallbackMaxSegments: 10,
+      overlapIouThresh: 0.6,
+    }
+
+    await handleSegmentHybrid(params)
+
+    expect(mockedMlApi.segmentHybrid).toHaveBeenCalledWith(9, params)
+  })
+
+  it('calls segmentHybrid with undefined params when none are provided', async () => {
+    mockedMlApi.segmentHybrid.mockResolvedValue(makeSegmentResult([]))
+
+    const { handleSegmentHybrid } = useSegmentation(9, ref(''), ref([]))
+    await handleSegmentHybrid()
+
+    expect(mockedMlApi.segmentHybrid).toHaveBeenCalledWith(9, undefined)
+  })
+
+  it('sets segments from result', async () => {
+    const seg = makeSegment(1)
+    mockedMlApi.segmentHybrid.mockResolvedValue(makeSegmentResult([seg]))
+
+    const { handleSegmentHybrid, segments } = useSegmentation(9, ref(''), ref([]))
+    await handleSegmentHybrid()
+
+    expect(segments.value).toEqual([seg])
+  })
+
+  it('replaces existing segments rather than appending', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([makeSegment(1)]))
+    mockedMlApi.segmentHybrid.mockResolvedValue(makeSegmentResult([makeSegment(2)]))
+
+    const { handleSegment, handleSegmentHybrid, segments } = useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    await handleSegmentHybrid()
+
+    expect(segments.value).toEqual([makeSegment(2)])
+  })
+
+  it('resets selectedMaskId to null', async () => {
+    mockedMlApi.segmentHybrid.mockResolvedValue(makeSegmentResult([makeSegment(1)]))
+
+    const { handleSegmentHybrid, toggleMaskSelection, selectedMaskId } = useSegmentation(9, ref(''), ref([]))
+    toggleMaskSelection(3)
+    expect(selectedMaskId.value).toBe(3)
+
+    await handleSegmentHybrid()
+
+    expect(selectedMaskId.value).toBeNull()
+  })
+
+  it('sets segmenting to true during the call and false after success', async () => {
+    let resolvePromise: (value: any) => void
+    mockedMlApi.segmentHybrid.mockReturnValue(
+      new Promise(resolve => { resolvePromise = resolve })
+    )
+
+    const { handleSegmentHybrid, segmenting } = useSegmentation(9, ref(''), ref([]))
+    const promise = handleSegmentHybrid()
+
+    expect(segmenting.value).toBe(true)
+
+    resolvePromise!(makeSegmentResult([]))
+    await promise
+
+    expect(segmenting.value).toBe(false)
+  })
+
+  it('sets mlError when segmentHybrid fails', async () => {
+    mockedMlApi.segmentHybrid.mockRejectedValue({
+      response: { data: { detail: 'Hybrid segmentation failed on server' } }
+    })
+
+    const { handleSegmentHybrid, mlError } = useSegmentation(9, ref(''), ref([]))
+    await handleSegmentHybrid()
+
+    expect(mlError.value).toBe('Hybrid segmentation failed on server')
+  })
+
+  it('falls back to default error message when server gives none', async () => {
+    mockedMlApi.segmentHybrid.mockRejectedValue(new Error('fail'))
+
+    const { handleSegmentHybrid, mlError } = useSegmentation(9, ref(''), ref([]))
+    await handleSegmentHybrid()
+
+    expect(mlError.value).toBe('Hybrid segmentation failed')
+  })
+
+  it('sets segmenting to false after failure', async () => {
+    mockedMlApi.segmentHybrid.mockRejectedValue(new Error('fail'))
+
+    const { handleSegmentHybrid, segmenting } = useSegmentation(9, ref(''), ref([]))
+    await handleSegmentHybrid()
+
+    expect(segmenting.value).toBe(false)
+  })
+
+  it('clears previous mlError on new call', async () => {
+    mockedMlApi.segmentHybrid.mockRejectedValueOnce({
+      response: { data: { detail: 'first error' } }
+    })
+
+    const { handleSegmentHybrid, mlError } = useSegmentation(9, ref(''), ref([]))
+    await handleSegmentHybrid()
+    expect(mlError.value).toBe('first error')
+
+    mockedMlApi.segmentHybrid.mockResolvedValueOnce(makeSegmentResult([]))
+    await handleSegmentHybrid()
+
+    expect(mlError.value).toBe('')
+  })
+
+  it('does not clear segments on failure', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([makeSegment(1)]))
+    mockedMlApi.segmentHybrid.mockRejectedValue(new Error('fail'))
+
+    const { handleSegment, handleSegmentHybrid, segments } = useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    await handleSegmentHybrid()
+
+    expect(segments.value).toEqual([makeSegment(1)])
+  })
+})
 describe('useSegmentation: handleSamReplaceWithAsset', () => {
   it('does nothing if no mask is selected', async () => {
     const { handleSamReplaceWithAsset } = useSegmentation(9, ref(''), ref([]))

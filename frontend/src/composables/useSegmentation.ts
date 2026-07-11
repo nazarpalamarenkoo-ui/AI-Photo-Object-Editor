@@ -1,6 +1,6 @@
 import { ref, computed } from 'vue'
 import { mlApi, PRESETS } from '@/api/ml'
-import type { SegmentInfo, LdmConfig, Bbox, RegionItem, PromptPoint, PolygonPoint, PromptMode } from '@/types/Index'
+import type { SegmentInfo, LdmConfig, Bbox, RegionItem, PromptPoint, PolygonPoint, PromptMode, SegmentHybridParams } from '@/types/Index'
 
 export function useSegmentation(
   imageId: number,
@@ -81,6 +81,20 @@ export function useSegmentation(
       segments.value = result.segments
     } catch (e: any) {
       mlError.value = e.response?.data?.detail ?? 'Segmentation failed'
+    } finally {
+      segmenting.value = false
+    }
+  }
+
+  async function handleSegmentHybrid(params?: SegmentHybridParams) {
+    segmenting.value = true
+    mlError.value = ''
+    selectedMaskId.value = null
+    try {
+      const result = await mlApi.segmentHybrid(imageId, params)
+      segments.value = result.segments
+    } catch (e: any) {
+      mlError.value = e.response?.data?.detail ?? 'Hybrid segmentation failed'
     } finally {
       segmenting.value = false
     }
@@ -217,7 +231,7 @@ export function useSegmentation(
   return {
     segments, regions, selectedMaskId, segmenting, mlError,
     useEdgeBlending, replacementFile,
-    handleSegment, handleSegmentWithPrompt, handleSegmentByPolygon,
+    handleSegment, handleSegmentHybrid, handleSegmentWithPrompt, handleSegmentByPolygon,
     toggleMaskSelection, handleSamRemove, handleSamReplace, handleSamReplaceWithAsset,
     onReplacementSelect, clearSegments,polygonShapes,
     promptMode, promptLabel, promptPoints, promptBbox, canRunPrompt,
