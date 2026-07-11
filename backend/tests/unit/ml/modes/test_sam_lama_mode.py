@@ -88,6 +88,14 @@ def mock_segmentor():
         ],
         "metrics": {"num_segments": 2},
     })
+    seg.segment_with_prompts_batch = AsyncMock(return_value={
+        "segments": [
+            {"mask_id": 0, "bbox": {"x1": 0, "y1": 0, "x2": 10, "y2": 10}, "stability_score": 0.9},
+            {"mask_id": 1, "bbox": {"x1": 15, "y1": 15, "x2": 25, "y2": 25}, "stability_score": 0.8},
+            {"mask_id": 2, "bbox": {"x1": 30, "y1": 30, "x2": 40, "y2": 40}, "stability_score": 0.7},
+        ],
+        "metrics": {"num_segments": 3, "encoder_passes": 1},
+    })
     return seg
 
 
@@ -272,9 +280,122 @@ async def test_segment_with_prompt_returns_image_size(mode, image_bytes):
     assert result["image_size"] == (60, 60)
 
 
-# ---------------------------------------------------------------------------
-# segment_by_polygon
-# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_segment_with_prompts_batch_forwards_args_to_segmentor(
+    mode, image_bytes, mock_segmentor
+):
+    bboxes = [
+        {"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+        {"x1": 15, "y1": 15, "x2": 25, "y2": 25},
+        {"x1": 30, "y1": 30, "x2": 40, "y2": 40},
+    ]
+
+    await mode.segment_with_prompts_batch(image_bytes, bboxes)
+
+    mock_segmentor.segment_with_prompts_batch.assert_called_once_with(
+        image_bytes=image_bytes, bboxes=bboxes
+    )
+
+
+@pytest.mark.asyncio
+async def test_segment_with_prompts_batch_assigns_sequential_bbox_id(mode, image_bytes):
+    bboxes = [
+        {"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+        {"x1": 15, "y1": 15, "x2": 25, "y2": 25},
+        {"x1": 30, "y1": 30, "x2": 40, "y2": 40},
+    ]
+
+    result = await mode.segment_with_prompts_batch(image_bytes, bboxes)
+
+    assert [s["bbox_id"] for s in result["segments"]] == [0, 1, 2]
+
+
+@pytest.mark.asyncio
+async def test_segment_with_prompts_batch_preserves_input_bbox_order(
+    mode, image_bytes, mock_segmentor
+):
+    """bbox_id must line up with the order segments came back in (== input order)."""
+    mock_segmentor.segment_with_prompts_batch = AsyncMock(return_value={
+        "segments": [
+            {"mask_id": 0, "bbox": {"x1": 30, "y1": 30, "x2": 40, "y2": 40}},
+            {"mask_id": 1, "bbox": {"x1": 0, "y1": 0, "x2": 10, "y2": 10}},
+        ],
+        "metrics": {},
+    })
+    bboxes = [
+        {"x1": 30, "y1": 30, "x2": 40, "y2": 40},
+        {"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+    ]
+
+    result = await mode.segment_with_prompts_batch(image_bytes, bboxes)
+
+    assert result["segments"][0]["bbox"] == bboxes[0]
+    assert result["segments"][0]["bbox_id"] == 0
+    assert result["segments"][1]["bbox"] == bboxes[1]
+    assert result["segments"][1]["bbox_id"] == 1
+
+
+@pytest.mark.asyncio
+async def test_segment_with_prompts_batch_returns_image_size(mode, image_bytes):
+    bboxes = [{"x1": 0, "y1": 0, "x2": 10, "y2": 10}]
+
+    result = await mode.segment_with_prompts_batch(image_bytes, bboxes)
+
+    assert result["image_size"] == (60, 60)
+
+
+@pytest.mark.asyncio
+async def test_segment_with_prompts_batch_uses_real_image_dimensions(mode, mock_segmentor):
+    image_bytes = _rgb_png((333, 217))
+    bboxes = [{"x1": 0, "y1": 0, "x2": 10, "y2": 10}]
+
+    result = await mode.segment_with_prompts_batch(image_bytes, bboxes)
+
+    assert result["image_size"] == (333, 217)
+
+
+@pytest.mark.asyncio
+async def test_segment_with_prompts_batch_returns_metrics_passthrough(
+    mode, image_bytes, mock_segmentor
+):
+    result = await mode.segment_with_prompts_batch(
+        image_bytes, [{"x1": 0, "y1": 0, "x2": 10, "y2": 10}]
+    )
+
+    assert result["metrics"] == {"num_segments": 3, "encoder_passes": 1}
+
+
+@pytest.mark.asyncio
+async def test_segment_with_prompts_batch_empty_bboxes_returns_empty_segments(
+    mode, image_bytes, mock_segmentor
+):
+    mock_segmentor.segment_with_prompts_batch = AsyncMock(return_value={
+        "segments": [],
+        "metrics": {"num_segments": 0},
+    })
+
+    result = await mode.segment_with_prompts_batch(image_bytes, [])
+
+    mock_segmentor.segment_with_prompts_batch.assert_called_once_with(
+        image_bytes=image_bytes, bboxes=[]
+    )
+    assert result["segments"] == []
+
+
+@pytest.mark.asyncio
+async def test_segment_with_prompts_batch_single_bbox(mode, image_bytes, mock_segmentor):
+    mock_segmentor.segment_with_prompts_batch = AsyncMock(return_value={
+        "segments": [{"mask_id": 0, "bbox": {"x1": 0, "y1": 0, "x2": 10, "y2": 10}}],
+        "metrics": {"num_segments": 1},
+    })
+
+    result = await mode.segment_with_prompts_batch(
+        image_bytes, [{"x1": 0, "y1": 0, "x2": 10, "y2": 10}]
+    )
+
+    assert len(result["segments"]) == 1
+    assert result["segments"][0]["bbox_id"] == 0
+
 
 @pytest.mark.asyncio
 async def test_segment_by_polygon_calls_polygon_masker_with_params(mode, image_bytes, polygon_points, mock_polygon_masker):

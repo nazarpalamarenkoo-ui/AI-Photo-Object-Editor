@@ -75,6 +75,7 @@ def stub_segmentor():
     seg = MagicMock()
     seg.segment_auto = AsyncMock(return_value={"segments": [], "metrics": {}})
     seg.segment_with_prompt = AsyncMock(return_value={"segments": [], "metrics": {}})
+    seg.segment_with_prompts_batch = AsyncMock(return_value={"segments": [], "metrics": {}})
     return seg
 
 
@@ -296,9 +297,48 @@ async def test_segment_objects_reports_real_image_dimensions(mode, stub_segmento
     assert result["image_size"] == (333, 217)
 
 
-# ---------------------------------------------------------------------------
-# replace_object with replacement_is_cutout=True (pre-cut RGBA asset, no rembg)
-# ---------------------------------------------------------------------------
+async def test_segment_with_prompts_batch_reports_real_image_dimensions(mode, stub_segmentor):
+    stub_segmentor.segment_with_prompts_batch = AsyncMock(return_value={
+        "segments": [
+            {"bbox": {"x1": 0, "y1": 0, "x2": 5, "y2": 5}},
+            {"bbox": {"x1": 10, "y1": 10, "x2": 15, "y2": 15}},
+        ],
+        "metrics": {},
+    })
+    image_bytes = _rgb_png((333, 217))
+    bboxes = [
+        {"x1": 0, "y1": 0, "x2": 5, "y2": 5},
+        {"x1": 10, "y1": 10, "x2": 15, "y2": 15},
+    ]
+
+    result = await mode.segment_with_prompts_batch(image_bytes, bboxes)
+
+    assert result["image_size"] == (333, 217)
+    assert [s["bbox_id"] for s in result["segments"]] == [0, 1]
+
+
+async def test_segment_with_prompts_batch_end_to_end_bbox_id_matches_input_order(
+    mode, stub_segmentor
+):
+    """Segments come back sorted in input bbox order; bbox_id must reflect that order."""
+    bboxes = [
+        {"x1": 5, "y1": 5, "x2": 15, "y2": 15},
+        {"x1": 50, "y1": 50, "x2": 70, "y2": 70},
+        {"x1": 100, "y1": 100, "x2": 120, "y2": 120},
+    ]
+    stub_segmentor.segment_with_prompts_batch = AsyncMock(return_value={
+        "segments": [{"bbox": b} for b in bboxes],
+        "metrics": {"encoder_passes": 1},
+    })
+    image_bytes = _rgb_png((200, 200))
+
+    result = await mode.segment_with_prompts_batch(image_bytes, bboxes)
+
+    for idx, (seg, expected_bbox) in enumerate(zip(result["segments"], bboxes)):
+        assert seg["bbox_id"] == idx
+        assert seg["bbox"] == expected_bbox
+    assert result["metrics"] == {"encoder_passes": 1}
+
 
 async def test_replace_object_with_cutout_skips_background_remover(mode):
     image_bytes = _rgb_png((120, 120), color=(20, 20, 20))

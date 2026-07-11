@@ -124,7 +124,42 @@ class SAMLamaMode:
             "metrics": result["metrics"],
             "image_size": img.size,
         }
+        
+    async def segment_with_prompts_batch(
+        self,
+        image_bytes: bytes,
+        bboxes: List[Dict[str, int]],
+    ) -> Dict:
+        """
+        Batched box-prompt segmentation — one SAM2 image-encoder pass,
+        N cheap decoder calls
 
+        Args:
+            image_bytes: Input image
+            bboxes:      List of {'x1','y1','x2','y2'} prompts
+
+        Returns:
+            Dict:
+                - segments:   List[Dict] — sorted in input bbox order
+                - metrics:    Dict
+                - image_size: tuple[int, int] — (W, H)
+        """
+        result = await self.segmentor.segment_with_prompts_batch(
+            image_bytes=image_bytes,
+            bboxes=bboxes,
+        )
+
+        for idx, seg in enumerate(result["segments"]):
+            seg["bbox_id"] = idx
+
+        img = Image.open(BytesIO(image_bytes))
+        return {
+            "segments": result["segments"],
+            "metrics": result["metrics"],
+            "image_size": img.size,
+        }
+        
+        
     async def segment_by_polygon(
         self,
         image_bytes: bytes,
@@ -608,12 +643,14 @@ async def _normalize_size(processed_bytes: bytes, reference_bytes: bytes) -> byt
 
     return await asyncio.to_thread(sync)
 
-
+import threading
 _sam_mode_instance = None
-
+_sam_model_lock = threading.Lock()
 
 def get_sam_mode(device: str = "cpu") -> SAMLamaMode:
     global _sam_mode_instance
     if _sam_mode_instance is None:
-        _sam_mode_instance = SAMLamaMode(device=device)
+        with _sam_model_lock:
+            if _sam_mode_instance is None:
+                _sam_mode_instance = SAMLamaMode(device=device)
     return _sam_mode_instance
