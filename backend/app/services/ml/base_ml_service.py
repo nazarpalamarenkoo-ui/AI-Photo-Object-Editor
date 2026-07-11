@@ -37,7 +37,14 @@ class BaseMLService:
         self.redis_assets = redis_assets
         self.image_repo = image_repo
         self.detection_repo = detection_repo
-        self.pipeline = pipeline or get_pipeline(device=device)
+        self._pipeline = pipeline
+        self._device = device
+    @property
+    def pipeline(self) -> MLPipeline:
+        """Lazy initialization of the ML pipeline."""
+        if self._pipeline is None:
+            self._pipeline = get_pipeline(device=self._device)
+        return self._pipeline
 
     async def _get_image_authorized(self, image_id: int, user_id: int) -> Image:
         """Fetch image from DB and verify ownership."""
