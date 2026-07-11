@@ -218,6 +218,91 @@ class SAM2Segmentor:
         segments.sort(key=lambda s: s["stability_score"], reverse=True)
         return segments
     
+    async def segment_with_prompts_batch(
+        self,
+        image_bytes: bytes,
+        bboxes: List[Dict[str, int]],
+        track_metrics: bool = True,
+    ) -> Dict:
+        """
+        Batched box-prompt segmentation.
+        Runs the SAM2 image encoder ONCE via set_image(), then a cheap
+        predictor.predict() call per bbox prompt. 
+
+        Args:
+            image_bytes:   Input image
+            bboxes:        List of {'x1','y1','x2','y2'} — one SAM2 box
+                           prompt per bbox
+
+        Returns:
+            Dict:
+                - segments: List[Dict] — one top mask per bbox (entries
+                            with an empty resulting mask are skipped), each
+                            with an extra 'prompt_bbox' key referencing the
+                            input bbox it came from
+                - metrics:  Dict
+        """
+        start_time = time.time()
+
+        segments = await asyncio.to_thread(
+            self._segment_prompts_batch_sync, image_bytes, bboxes
+        )
+
+        inference_time = (time.time() - start_time) * 1000
+        metrics = self._calculate_metrics(segments, inference_time)
+
+        if track_metrics:
+            await self._track_metrics(metrics)
+
+        return {"segments": segments, "metrics": metrics}
+
+    def _segment_prompts_batch_sync(
+        self,
+        image_bytes: bytes,
+        bboxes: List[Dict[str, int]],
+    ) -> List[Dict]:
+        img = Image.open(BytesIO(image_bytes)).convert("RGB")
+        img_array = np.array(img)
+
+        # Expensive — computed ONCE for the whole batch of bboxes.
+        self.predictor.set_image(img_array)
+
+        segments = []
+        for idx, bbox in enumerate(bboxes):
+            np_bbox = np.array([bbox["x1"], bbox["y1"], bbox["x2"], bbox["y2"]])
+
+            masks, scores, _ = self.predictor.predict(
+                point_coords=None,
+                point_labels=None,
+                box=np_bbox,
+                multimask_output=False,
+            )
+
+            mask_u8 = masks[0].astype(np.uint8) * 255
+            score = float(scores[0])
+            ys, xs = np.where(mask_u8 > 0)
+            if len(xs) == 0:
+                continue
+
+            seg_bbox = {
+                "x1": int(xs.min()), "y1": int(ys.min()),
+                "x2": int(xs.max()), "y2": int(ys.max()),
+            }
+            buf = BytesIO()
+            Image.fromarray(mask_u8, mode="L").save(buf, format="PNG")
+
+            segments.append({
+                "mask_id": idx,
+                "bbox": seg_bbox,
+                "prompt_bbox": bbox,
+                "area": int(mask_u8.sum() // 255),
+                "stability_score": score,
+                "predicted_iou": score,
+                "mask_bytes": buf.getvalue(),
+            })
+
+        return segments
+    
     def _calculate_metrics(self, segments: List[Dict], inference_time_ms: float) -> Dict:
         if not segments:
             return {
@@ -242,8 +327,9 @@ class SAM2Segmentor:
             })
         await asyncio.to_thread(log_sync)
 
-
+import threading
 _segmentor_instance = None
+_segmentor_lock = threading.Lock()
 
 def get_segmentor(
     model_path: str = "weights/sam2.1_hiera_s.pt",
@@ -252,5 +338,7 @@ def get_segmentor(
 ) -> SAM2Segmentor:
     global _segmentor_instance
     if _segmentor_instance is None:
-        _segmentor_instance = SAM2Segmentor(model_path, device, tracker)
+        with _segmentor_lock:
+            if _segmentor_instance is None:
+                _segmentor_instance = SAM2Segmentor(model_path, device, tracker)
     return _segmentor_instance

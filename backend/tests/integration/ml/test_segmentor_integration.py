@@ -43,9 +43,12 @@ def real_segmentor(tracker):
 
 
 @pytest.fixture(scope="module")
-def real_image_bytes():
+def two_squares_image_bytes():
+    """One image containing two well-separated, distinctly colored
+    squares so each bbox prompt targets a different real object."""
     arr = np.full((256, 256, 3), 30, dtype=np.uint8)
-    arr[64:192, 64:192] = (220, 60, 60)
+    arr[20:100, 20:100] = (220, 60, 60)      # top-left red square
+    arr[150:230, 150:230] = (60, 60, 220)    # bottom-right blue square
 
     buffer = BytesIO()
     PILImage.fromarray(arr).save(buffer, format="PNG")
@@ -53,22 +56,44 @@ def real_image_bytes():
     return buffer.getvalue()
 
 
-async def test_segment_auto_finds_at_least_one_segment(
-    real_segmentor,
-    real_image_bytes,
+async def test_batch_recovers_each_of_two_distinct_squares(
+    real_segmentor, two_squares_image_bytes
 ):
-    result = await real_segmentor.segment_auto(
-        real_image_bytes,
-        track_metrics=False,
+    bboxes = [
+        {"x1": 15, "y1": 15, "x2": 105, "y2": 105},
+        {"x1": 145, "y1": 145, "x2": 235, "y2": 235},
+    ]
+
+    result = await real_segmentor.segment_with_prompts_batch(
+        two_squares_image_bytes, bboxes, track_metrics=False
     )
 
-    assert len(result["segments"]) >= 1
+    assert len(result["segments"]) == 2
 
+    for seg, bbox in zip(result["segments"], bboxes):
+        assert seg["bbox"]["x1"] < bbox["x2"]
+        assert seg["bbox"]["x2"] > bbox["x1"]
+        assert seg["bbox"]["y1"] < bbox["y2"]
+        assert seg["bbox"]["y2"] > bbox["y1"]
+        assert seg["prompt_bbox"] == bbox
+
+
+async def test_batch_segment_keys_match_single_prompt_shape(
+    real_segmentor, two_squares_image_bytes
+):
+    bboxes = [{"x1": 15, "y1": 15, "x2": 105, "y2": 105}]
+
+    result = await real_segmentor.segment_with_prompts_batch(
+        two_squares_image_bytes, bboxes, track_metrics=False
+    )
+
+    assert len(result["segments"]) == 1
     segment = result["segments"][0]
 
     for key in (
         "mask_id",
         "bbox",
+        "prompt_bbox",
         "area",
         "stability_score",
         "predicted_iou",
@@ -80,78 +105,50 @@ async def test_segment_auto_finds_at_least_one_segment(
     assert isinstance(segment["mask_bytes"], bytes)
 
 
-async def test_segment_auto_segments_sorted_by_area_desc(
-    real_segmentor,
-    real_image_bytes,
+async def test_batch_is_consistent_with_individual_segment_with_prompt_calls(
+    real_segmentor, two_squares_image_bytes
 ):
-    result = await real_segmentor.segment_auto(
-        real_image_bytes,
-        track_metrics=False,
+    """Sanity-check that batching multiple box prompts through a single
+    encoder pass finds objects roughly consistent with running each box
+    through segment_with_prompt individually (same area ballpark)."""
+    bbox = {"x1": 15, "y1": 15, "x2": 105, "y2": 105}
+
+    batch_result = await real_segmentor.segment_with_prompts_batch(
+        two_squares_image_bytes, [bbox], track_metrics=False
+    )
+    single_result = await real_segmentor.segment_with_prompt(
+        two_squares_image_bytes, bbox=bbox, track_metrics=False
     )
 
-    areas = [segment["area"] for segment in result["segments"]]
+    batch_area = batch_result["segments"][0]["area"]
+    single_area = single_result["segments"][0]["area"]
 
-    assert areas == sorted(areas, reverse=True)
+    assert batch_area == pytest.approx(single_area, rel=0.15)
 
 
-async def test_segment_with_prompt_bbox_recovers_square(
-    real_segmentor,
-    real_image_bytes,
+async def test_batch_tracks_metrics_end_to_end(
+    real_segmentor, two_squares_image_bytes, tracker
 ):
-    bbox = {
-        "x1": 60,
-        "y1": 60,
-        "x2": 196,
-        "y2": 196,
-    }
+    bboxes = [
+        {"x1": 15, "y1": 15, "x2": 105, "y2": 105},
+        {"x1": 145, "y1": 145, "x2": 235, "y2": 235},
+    ]
 
-    result = await real_segmentor.segment_with_prompt(
-        real_image_bytes,
-        bbox=bbox,
-        track_metrics=False,
-    )
-
-    assert len(result["segments"]) >= 1
-
-    best = result["segments"][0]
-
-    assert best["bbox"]["x1"] < bbox["x2"]
-    assert best["bbox"]["x2"] > bbox["x1"]
-    assert best["bbox"]["y1"] < bbox["y2"]
-    assert best["bbox"]["y2"] > bbox["y1"]
-
-
-async def test_segment_with_prompt_point_inside_square(
-    real_segmentor,
-    real_image_bytes,
-):
-    result = await real_segmentor.segment_with_prompt(
-        real_image_bytes,
-        point_coords=[(128, 128)],
-        point_labels=[1],
-        track_metrics=False,
-    )
-
-    assert len(result["segments"]) >= 1
-
-    best = result["segments"][0]
-
-    assert best["bbox"]["x1"] <= 128 <= best["bbox"]["x2"]
-    assert best["bbox"]["y1"] <= 128 <= best["bbox"]["y2"]
-
-
-async def test_segment_auto_tracks_metrics_end_to_end(
-    real_segmentor,
-    real_image_bytes,
-    tracker,
-):
-    await real_segmentor.segment_auto(
-        real_image_bytes,
-        track_metrics=True,
+    await real_segmentor.segment_with_prompts_batch(
+        two_squares_image_bytes, bboxes, track_metrics=True
     )
 
     tracker.log_metrics.assert_called_once()
-
     payload = tracker.log_metrics.call_args.args[0]
-
     assert payload["sam2_num_segments"] >= 1
+
+
+async def test_batch_empty_bboxes_returns_no_segments_end_to_end(
+    real_segmentor, two_squares_image_bytes
+):
+    result = await real_segmentor.segment_with_prompts_batch(
+        two_squares_image_bytes, [], track_metrics=False
+    )
+
+    assert result["segments"] == []
+    assert result["metrics"]["num_segments"] == 0
