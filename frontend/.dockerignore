@@ -1,0 +1,34 @@
+# Git
+.git
+.gitignore
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Tests / coverage
+tests/
+coverage/
