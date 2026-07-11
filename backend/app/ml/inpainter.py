@@ -538,9 +538,9 @@ class LaMaInpainter:
         
         await asyncio.to_thread(log_sync)
  
- 
+import threading
 _inpainter_instance = None
- 
+_inpainter_lock = threading.Lock()
  
 def get_inpainter(
     device: str = 'cuda',
@@ -557,5 +557,7 @@ def get_inpainter(
     """
     global _inpainter_instance
     if _inpainter_instance is None:
-        _inpainter_instance = LaMaInpainter(device, tracker=tracker)
+        with _inpainter_lock:
+            if _inpainter_instance is None:
+                _inpainter_instance = LaMaInpainter(device, tracker=tracker)
     return _inpainter_instance

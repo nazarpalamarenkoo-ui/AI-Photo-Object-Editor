@@ -214,8 +214,10 @@ class YOLODetector:
             )
         
         await asyncio.to_thread(log_sync)
-    
+
+import threading
 _detector_instance = None
+_detector_instance_lock = threading.Lock()
 
 def get_detector(
     model_path: str = 'weights/yolov10m.pt',
@@ -225,5 +227,7 @@ def get_detector(
     
     global _detector_instance
     if _detector_instance is None:
-        _detector_instance = YOLODetector(model_path, device, tracker=tracker)
+        with _detector_instance_lock:
+            if _detector_instance is None:
+                _detector_instance = YOLODetector(model_path, device, tracker=tracker)
     return _detector_instance

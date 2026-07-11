@@ -505,9 +505,10 @@ async def _normalize_size(processed_bytes: bytes, reference_bytes: bytes) -> byt
  
     return await asyncio.to_thread(sync)
  
- 
+import threading
 _yolo_lama_mode_instance = None
- 
+_yolo_lama_mode_lock = threading.Lock()
+
 def get_yolo_lama_mode(device: str = 'cuda') -> YoloLamaMode:
     """
     Singleton getter for YoloLamaMode.
@@ -519,5 +520,7 @@ def get_yolo_lama_mode(device: str = 'cuda') -> YoloLamaMode:
     """
     global _yolo_lama_mode_instance
     if _yolo_lama_mode_instance is None:
-        _yolo_lama_mode_instance = YoloLamaMode(device=device)
+        with _yolo_lama_mode_lock:
+            if _yolo_lama_mode_instance is None:
+                _yolo_lama_mode_instance = YoloLamaMode(device=device)
     return _yolo_lama_mode_instance

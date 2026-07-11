@@ -73,9 +73,9 @@ class MLPipeline(
         """Return list of supported YOLO classes (80 COCO classes)."""
         return self.yolo_lama_mode.get_supported_classes()
 
-
+import threading
 _pipeline_instance = None
-
+_pipeline_lock = threading.Lock()
 
 def get_pipeline(device: str = "cuda") -> MLPipeline:
     """
@@ -89,5 +89,7 @@ def get_pipeline(device: str = "cuda") -> MLPipeline:
     """
     global _pipeline_instance
     if _pipeline_instance is None:
-        _pipeline_instance = MLPipeline(device=device)
+        with _pipeline_lock:
+            if _pipeline_instance is None:
+                _pipeline_instance = MLPipeline(device=device)
     return _pipeline_instance
