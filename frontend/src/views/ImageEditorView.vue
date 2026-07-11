@@ -18,6 +18,7 @@
         v-model:activeTool="activeTool"
         v-model:modelConfig="modelPreset"
         v-model:mode="mode"
+        v-model:useHybrid="useHybridSegment"
         :zoom="zoom"
         :canUndo="canUndo"
         :mlLoading="mlLoading"
@@ -146,6 +147,7 @@ const activeTool = ref('select')
 const zoom = ref(1)
 const modelPreset = ref<LdmConfig>(PRESETS.quality)
 const mode = ref<EditingMode>('yolo')
+const useHybridSegment = ref(false)
 
 const {
   image, imageUrl, loading,
@@ -168,9 +170,9 @@ const {
 } = useMlOperations(imageId, detections, selectedBboxIds)
 
 const {
-  segments, regions: samRegions, selectedMaskId, segmenting,
+  segments, selectedMaskId, segmenting,
   mlError: samError, useEdgeBlending: samUseEdgeBlending, replacementFile: samReplacementFile,
-  handleSegment, handleSegmentWithPrompt, handleSegmentByPolygon, toggleMaskSelection,
+  handleSegment, handleSegmentHybrid, handleSegmentWithPrompt, handleSegmentByPolygon, toggleMaskSelection,
   handleSamRemove, handleSamReplace, handleSamReplaceWithAsset,
   onReplacementSelect: onSamReplacementSelect, clearSegments,
   promptMode, promptLabel, promptPoints, promptBbox,
@@ -231,6 +233,7 @@ function onToggleSelection(id: number) {
 
 function onRun() {
   if (mode.value === 'yolo') handleDetect()
+  else if (useHybridSegment.value) handleSegmentHybrid()
   else handleSegment()
 }
 
