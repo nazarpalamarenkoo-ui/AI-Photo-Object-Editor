@@ -3,7 +3,6 @@
   min-width: 260px;
   background: var(--bg-sidebar);
   border-left: 1px solid var(--border);
-  overflow-y: auto;
   flex-shrink: 0;
 }
 
@@ -60,7 +59,22 @@
   flex-direction: column;
   gap: 2px;
   max-height: 220px;
-  overflow-y: auto;
+  overflow-y: auto;     
+  padding-right: 2px;    
+}
+
+.detection-list::-webkit-scrollbar {
+  width: 5px;
+}
+.detection-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+.detection-list::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+.detection-list::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
 }
 
 .det-item {
