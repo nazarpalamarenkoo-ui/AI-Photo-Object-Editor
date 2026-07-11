@@ -17,6 +17,7 @@ vi.mock('@/api/ml', () => ({
 
 import { mlApi, PRESETS } from '@/api/ml'
 import { useSegmentation } from '@/composables/useSegmentation'
+import type { MLResultResponse } from '@/types/Index'
 
 const mockedMlApi = vi.mocked(mlApi, true)
 
@@ -28,7 +29,14 @@ const makeSegment = (maskId: number, bboxId = maskId): SegmentInfo => ({
   stability_score: 0.9
 })
 
-const makeMLResult = (presigned_url: string) => ({ presigned_url })
+const makeMLResult = (
+  overrides: Partial<MLResultResponse> & { presigned_url: string }
+): MLResultResponse => ({
+  result_url: 'https://cdn.example.com/result.jpg',
+  metrics: {},
+  timestamp: '2026-01-01T00:00:00Z',
+  ...overrides,
+})
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -344,7 +352,9 @@ describe('useSegmentation: handleSamRemove', () => {
   })
 
   it('calls samRemoveObject with default preset and expandMaskPixels of 12', async () => {
-    mockedMlApi.samRemoveObject.mockResolvedValue(makeMLResult('https://cdn.example.com/removed.jpg'))
+    mockedMlApi.samRemoveObject.mockResolvedValue(
+      makeMLResult({ presigned_url: 'https://cdn.example.com/removed.jpg' })
+    )
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
     const { toggleMaskSelection, handleSamRemove } = useSegmentation(9, ref(''), ref([]))
@@ -356,7 +366,7 @@ describe('useSegmentation: handleSamRemove', () => {
   })
 
   it('calls samRemoveObject with a custom ldm config when provided', async () => {
-    mockedMlApi.samRemoveObject.mockResolvedValue(makeMLResult('https://cdn.example.com/removed.jpg'))
+    mockedMlApi.samRemoveObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/removed.jpg' }))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
     const customLdm = { ldm_steps: 5, ldm_sampler: 'ddim' as const, hd_strategy: 'ORIGINAL' as const }
@@ -369,7 +379,7 @@ describe('useSegmentation: handleSamRemove', () => {
   })
 
   it('updates currentImageUrl from result', async () => {
-    mockedMlApi.samRemoveObject.mockResolvedValue(makeMLResult('https://cdn.example.com/removed.jpg'))
+    mockedMlApi.samRemoveObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/removed.jpg' }))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
     const currentImageUrl = ref('')
@@ -388,7 +398,7 @@ describe('useSegmentation: handleSamRemove', () => {
       image_size: [800, 600],
       timestamp: '2026-01-01T00:00:00Z'
     })
-    mockedMlApi.samRemoveObject.mockResolvedValue(makeMLResult('https://cdn.example.com/removed.jpg'))
+    mockedMlApi.samRemoveObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/removed.jpg' }))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
     const { handleSegment, toggleMaskSelection, handleSamRemove, segments } = useSegmentation(9, ref(''), ref([]))
@@ -402,7 +412,7 @@ describe('useSegmentation: handleSamRemove', () => {
   })
 
   it('clears selectedMaskId after removal', async () => {
-    mockedMlApi.samRemoveObject.mockResolvedValue(makeMLResult('https://cdn.example.com/removed.jpg'))
+    mockedMlApi.samRemoveObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/removed.jpg' }))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
     const { toggleMaskSelection, handleSamRemove, selectedMaskId } = useSegmentation(9, ref(''), ref([]))
@@ -414,7 +424,7 @@ describe('useSegmentation: handleSamRemove', () => {
   })
 
   it('updates history after removal', async () => {
-    mockedMlApi.samRemoveObject.mockResolvedValue(makeMLResult('https://cdn.example.com/removed.jpg'))
+    mockedMlApi.samRemoveObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/removed.jpg' }))
     mockedMlApi.getHistory.mockResolvedValue({ history: ['step1', 'step2'] })
 
     const history = ref<string[]>([])
@@ -475,7 +485,7 @@ describe('useSegmentation: handleSamReplace', () => {
 
   it('calls samReplaceObject with correct arguments and default ldm preset', async () => {
     const file = makeFile()
-    mockedMlApi.samReplaceObject.mockResolvedValue(makeMLResult('https://cdn.example.com/replaced.jpg'))
+    mockedMlApi.samReplaceObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/replaced.jpg' }))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
     const { toggleMaskSelection, replacementFile, handleSamReplace } = useSegmentation(9, ref(''), ref([]))
@@ -492,7 +502,7 @@ describe('useSegmentation: handleSamReplace', () => {
 
   it('calls samReplaceObject with a custom ldm config when provided', async () => {
     const file = makeFile()
-    mockedMlApi.samReplaceObject.mockResolvedValue(makeMLResult('https://cdn.example.com/replaced.jpg'))
+    mockedMlApi.samReplaceObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/replaced.jpg' }))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
     const customLdm = { ldm_steps: 5, ldm_sampler: 'ddim' as const, hd_strategy: 'ORIGINAL' as const }
@@ -509,7 +519,7 @@ describe('useSegmentation: handleSamReplace', () => {
   })
 
   it('updates currentImageUrl after replacement', async () => {
-    mockedMlApi.samReplaceObject.mockResolvedValue(makeMLResult('https://cdn.example.com/replaced.jpg'))
+    mockedMlApi.samReplaceObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/replaced.jpg' }))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
     const currentImageUrl = ref('')
@@ -529,7 +539,7 @@ describe('useSegmentation: handleSamReplace', () => {
       image_size: [800, 600],
       timestamp: '2026-01-01T00:00:00Z'
     })
-    mockedMlApi.samReplaceObject.mockResolvedValue(makeMLResult('https://cdn.example.com/replaced.jpg'))
+    mockedMlApi.samReplaceObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/replaced.jpg' }))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
     const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplace, segments } =
@@ -545,7 +555,7 @@ describe('useSegmentation: handleSamReplace', () => {
   })
 
   it('clears selectedMaskId and replacementFile after success', async () => {
-    mockedMlApi.samReplaceObject.mockResolvedValue(makeMLResult('https://cdn.example.com/replaced.jpg'))
+    mockedMlApi.samReplaceObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/replaced.jpg' }))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
     const { toggleMaskSelection, replacementFile, handleSamReplace, selectedMaskId } =
@@ -560,7 +570,7 @@ describe('useSegmentation: handleSamReplace', () => {
   })
 
   it('updates history after replacement', async () => {
-    mockedMlApi.samReplaceObject.mockResolvedValue(makeMLResult('https://cdn.example.com/replaced.jpg'))
+    mockedMlApi.samReplaceObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/replaced.jpg' }))
     mockedMlApi.getHistory.mockResolvedValue({ history: ['step1'] })
 
     const history = ref<string[]>([])

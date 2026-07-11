@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { ref } from 'vue'
-import type { Detection, Image } from '@/types/Index'
+import type { Detection, Image, MLResultResponse } from '@/types/Index'
 
 vi.mock('@/api/ml', () => ({
   PRESETS: {
@@ -44,7 +44,12 @@ const makeDetection = (bboxId: number): Detection => ({
   confidence: 0.95,
 })
 
-const makeMLResult = (presigned_url: string) => ({ presigned_url })
+const makeMLResult = (presigned_url: string): MLResultResponse => ({
+  result_url: 'https://cdn.example.com/result.jpg',
+  presigned_url,
+  metrics: {},
+  timestamp: '2026-01-01T00:00:00Z',
+})
 
 beforeEach(() => {
   vi.clearAllMocks()
