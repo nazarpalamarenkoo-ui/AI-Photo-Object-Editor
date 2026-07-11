@@ -19,7 +19,7 @@ vi.mock('@/api/clients', () => ({
 }))
 
 import apiClient from '@/api/clients'
-import { mlApi, PRESETS } from '@/api/ml'
+import { mlApi, PRESETS, MLJobError} from '@/api/ml'
 
 const mockedClient = vi.mocked(apiClient, true)
 
@@ -95,6 +95,20 @@ const fakeAsset: Asset = {
   created_at: '2026-01-01T00:00:00Z',
 }
 
+function mockJobSuccess<T>(jobId: string, result: T) {
+  mockedClient.post.mockResolvedValue({ data: { job_id: jobId } })
+  mockedClient.get.mockResolvedValue({
+    data: { job_id: jobId, status: 'complete', result },
+  })
+}
+
+function mockJobFailure(jobId: string, error: string) {
+  mockedClient.post.mockResolvedValue({ data: { job_id: jobId } })
+  mockedClient.get.mockResolvedValue({
+    data: { job_id: jobId, status: 'complete', error },
+  })
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
 })
@@ -166,12 +180,12 @@ describe('mlApi: getSupportedClasses', () => {
 })
 
 describe('mlApi: removeObject', () => {
-  it('posts to correct url with default params', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+  it('enqueues to correct async url with default params', async () => {
+    mockJobSuccess('job-1', fakeMLResult)
 
     await mlApi.removeObject(1, 2)
 
-    expect(mockedClient.post).toHaveBeenCalledWith('/ml/images/1/remove/2', {
+    expect(mockedClient.post).toHaveBeenCalledWith('/ml/images/1/remove/2/async', {
       expand_mask_pixels: 5,
       use_edge_blending: false,
       ldm: qualityLdm,
@@ -179,39 +193,55 @@ describe('mlApi: removeObject', () => {
   })
 
   it('passes custom params', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+    mockJobSuccess('job-1', fakeMLResult)
 
     await mlApi.removeObject(1, 2, 15, true, fastLdm)
 
-    expect(mockedClient.post).toHaveBeenCalledWith('/ml/images/1/remove/2', {
+    expect(mockedClient.post).toHaveBeenCalledWith('/ml/images/1/remove/2/async', {
       expand_mask_pixels: 15,
       use_edge_blending: true,
       ldm: fastLdm,
     })
   })
 
-  it('returns MLResultResponse', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+  it('polls the job and returns MLResultResponse', async () => {
+    mockJobSuccess('job-1', fakeMLResult)
 
     const result = await mlApi.removeObject(1, 2)
 
+    expect(mockedClient.get).toHaveBeenCalledWith('/ml/jobs/job-1')
     expect(result).toEqual(fakeMLResult)
   })
 
-  it('propagates error', async () => {
+  it('propagates enqueue error', async () => {
     mockedClient.post.mockRejectedValue(new Error('remove failed'))
 
     await expect(mlApi.removeObject(1, 2)).rejects.toThrow('remove failed')
   })
+
+  it('throws MLJobError when the job itself fails', async () => {
+    mockJobFailure('job-1', 'inpainting crashed')
+
+    await expect(mlApi.removeObject(1, 2)).rejects.toThrow(MLJobError)
+  })
+
+  it('calls onStatus callback with job status', async () => {
+    mockJobSuccess('job-1', fakeMLResult)
+    const onStatus = vi.fn()
+
+    await mlApi.removeObject(1, 2, 5, false, qualityLdm, onStatus)
+
+    expect(onStatus).toHaveBeenCalledWith('complete')
+  })
 })
 
 describe('mlApi: removeMultipleObjects', () => {
-  it('posts to correct url with default params', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+  it('enqueues to correct async url with default params', async () => {
+    mockJobSuccess('job-2', fakeMLResult)
 
     await mlApi.removeMultipleObjects(1, [2, 3, 4])
 
-    expect(mockedClient.post).toHaveBeenCalledWith('/ml/images/1/remove-multiple', {
+    expect(mockedClient.post).toHaveBeenCalledWith('/ml/images/1/remove-multiple/async', {
       bbox_ids: [2, 3, 4],
       expand_mask_pixels: 5,
       use_edge_blending: false,
@@ -220,11 +250,11 @@ describe('mlApi: removeMultipleObjects', () => {
   })
 
   it('passes custom params', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+    mockJobSuccess('job-2', fakeMLResult)
 
     await mlApi.removeMultipleObjects(1, [2, 3], 10, true, fastLdm)
 
-    expect(mockedClient.post).toHaveBeenCalledWith('/ml/images/1/remove-multiple', {
+    expect(mockedClient.post).toHaveBeenCalledWith('/ml/images/1/remove-multiple/async', {
       bbox_ids: [2, 3],
       expand_mask_pixels: 10,
       use_edge_blending: true,
@@ -232,37 +262,44 @@ describe('mlApi: removeMultipleObjects', () => {
     })
   })
 
-  it('returns MLResultResponse', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+  it('polls the job and returns MLResultResponse', async () => {
+    mockJobSuccess('job-2', fakeMLResult)
 
     const result = await mlApi.removeMultipleObjects(1, [2, 3])
 
+    expect(mockedClient.get).toHaveBeenCalledWith('/ml/jobs/job-2')
     expect(result).toEqual(fakeMLResult)
   })
 
-  it('propagates error', async () => {
+  it('propagates enqueue error', async () => {
     mockedClient.post.mockRejectedValue(new Error('remove multiple failed'))
 
     await expect(mlApi.removeMultipleObjects(1, [2, 3])).rejects.toThrow('remove multiple failed')
+  })
+
+  it('throws MLJobError when the job itself fails', async () => {
+    mockJobFailure('job-2', 'batch inpainting crashed')
+
+    await expect(mlApi.removeMultipleObjects(1, [2, 3])).rejects.toThrow(MLJobError)
   })
 })
 
 describe('mlApi: replaceObject', () => {
   const fakeFile = new File(['img'], 'replacement.png', { type: 'image/png' })
 
-  it('posts multipart/form-data to correct url', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+  it('posts multipart/form-data to correct async url', async () => {
+    mockJobSuccess('job-3', fakeMLResult)
 
     await mlApi.replaceObject(1, 2, fakeFile)
 
     const [url, body] = mockedClient.post.mock.calls[0]
-    expect(url).toBe('/ml/images/1/replace/2')
+    expect(url).toBe('/ml/images/1/replace/2/async')
     expect(body).toBeInstanceOf(FormData)
     expect((body as FormData).get('replacement_file')).toBe(fakeFile)
   })
 
   it('sends default query params', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+    mockJobSuccess('job-3', fakeMLResult)
 
     await mlApi.replaceObject(1, 2, fakeFile)
 
@@ -279,7 +316,7 @@ describe('mlApi: replaceObject', () => {
   })
 
   it('passes custom options', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+    mockJobSuccess('job-3', fakeMLResult)
 
     await mlApi.replaceObject(1, 2, fakeFile, {
       expandMaskPixels: 12,
@@ -298,7 +335,7 @@ describe('mlApi: replaceObject', () => {
   })
 
   it('sets multipart/form-data header', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+    mockJobSuccess('job-3', fakeMLResult)
 
     await mlApi.replaceObject(1, 2, fakeFile)
 
@@ -306,62 +343,76 @@ describe('mlApi: replaceObject', () => {
     expect((config as any).headers['Content-Type']).toBe('multipart/form-data')
   })
 
-  it('returns MLResultResponse', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+  it('polls the job and returns MLResultResponse', async () => {
+    mockJobSuccess('job-3', fakeMLResult)
 
     const result = await mlApi.replaceObject(1, 2, fakeFile)
 
+    expect(mockedClient.get).toHaveBeenCalledWith('/ml/jobs/job-3')
     expect(result).toEqual(fakeMLResult)
   })
 
-  it('propagates error', async () => {
+  it('propagates enqueue error', async () => {
     mockedClient.post.mockRejectedValue(new Error('replace failed'))
 
     await expect(mlApi.replaceObject(1, 2, fakeFile)).rejects.toThrow('replace failed')
   })
+
+  it('throws MLJobError when the job itself fails', async () => {
+    mockJobFailure('job-3', 'replace crashed')
+
+    await expect(mlApi.replaceObject(1, 2, fakeFile)).rejects.toThrow(MLJobError)
+  })
 })
 
 describe('mlApi: segmentObjects', () => {
-  it('posts to correct url with default params', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeSegmentResponse })
+  it('enqueues to correct async url with default params', async () => {
+    mockJobSuccess('job-4', fakeSegmentResponse)
 
     await mlApi.segmentObjects(1)
 
     expect(mockedClient.post).toHaveBeenCalledWith(
-      '/ml/images/1/segment',
+      '/ml/images/1/segment/async',
       { min_area: 500, max_segments: 50 }
     )
   })
 
   it('passes custom minArea and maxSegments', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeSegmentResponse })
+    mockJobSuccess('job-4', fakeSegmentResponse)
 
     await mlApi.segmentObjects(1, 1000, 10)
 
     expect(mockedClient.post).toHaveBeenCalledWith(
-      '/ml/images/1/segment',
+      '/ml/images/1/segment/async',
       { min_area: 1000, max_segments: 10 }
     )
   })
 
-  it('returns SegmentResponse', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeSegmentResponse })
+  it('polls the job and returns SegmentResponse', async () => {
+    mockJobSuccess('job-4', fakeSegmentResponse)
 
     const result = await mlApi.segmentObjects(1)
 
+    expect(mockedClient.get).toHaveBeenCalledWith('/ml/jobs/job-4')
     expect(result).toEqual(fakeSegmentResponse)
   })
 
-  it('propagates error', async () => {
+  it('propagates enqueue error', async () => {
     mockedClient.post.mockRejectedValue(new Error('segmentation failed'))
 
     await expect(mlApi.segmentObjects(1)).rejects.toThrow('segmentation failed')
   })
+
+  it('throws MLJobError when the job itself fails', async () => {
+    mockJobFailure('job-4', 'SAM crashed')
+
+    await expect(mlApi.segmentObjects(1)).rejects.toThrow(MLJobError)
+  })
 })
 
 describe('mlApi: segmentWithPrompt', () => {
-  it('posts point_coords and point_labels', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeSegmentResponse })
+  it('posts point_coords and point_labels to async url', async () => {
+    mockJobSuccess('job-5', fakeSegmentResponse)
 
     await mlApi.segmentWithPrompt(1, {
       pointCoords: [[120, 340]],
@@ -369,7 +420,7 @@ describe('mlApi: segmentWithPrompt', () => {
     })
 
     expect(mockedClient.post).toHaveBeenCalledWith(
-      '/ml/images/1/segment/prompt',
+      '/ml/images/1/segment/prompt/async',
       {
         point_coords: [[120, 340]],
         point_labels: [1],
@@ -380,7 +431,7 @@ describe('mlApi: segmentWithPrompt', () => {
   })
 
   it('posts bbox prompt', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeSegmentResponse })
+    mockJobSuccess('job-5', fakeSegmentResponse)
 
     await mlApi.segmentWithPrompt(1, {
       bbox: { x1: 10, y1: 10, x2: 100, y2: 100 },
@@ -392,7 +443,7 @@ describe('mlApi: segmentWithPrompt', () => {
   })
 
   it('passes multimask_output when set', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeSegmentResponse })
+    mockJobSuccess('job-5', fakeSegmentResponse)
 
     await mlApi.segmentWithPrompt(1, {
       pointCoords: [[1, 1]],
@@ -404,20 +455,29 @@ describe('mlApi: segmentWithPrompt', () => {
     expect((body as any).multimask_output).toBe(true)
   })
 
-  it('returns SegmentResponse', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeSegmentResponse })
+  it('polls the job and returns SegmentResponse', async () => {
+    mockJobSuccess('job-5', fakeSegmentResponse)
 
     const result = await mlApi.segmentWithPrompt(1, { pointCoords: [[1, 1]], pointLabels: [1] })
 
+    expect(mockedClient.get).toHaveBeenCalledWith('/ml/jobs/job-5')
     expect(result).toEqual(fakeSegmentResponse)
   })
 
-  it('propagates error', async () => {
+  it('propagates enqueue error', async () => {
     mockedClient.post.mockRejectedValue(new Error('prompt segmentation failed'))
 
     await expect(
       mlApi.segmentWithPrompt(1, { pointCoords: [[1, 1]], pointLabels: [1] })
     ).rejects.toThrow('prompt segmentation failed')
+  })
+
+  it('throws MLJobError when the job itself fails', async () => {
+    mockJobFailure('job-5', 'prompt segmentation crashed')
+
+    await expect(
+      mlApi.segmentWithPrompt(1, { pointCoords: [[1, 1]], pointLabels: [1] })
+    ).rejects.toThrow(MLJobError)
   })
 })
 
@@ -429,12 +489,12 @@ describe('mlApi: segmentByPolygon', () => {
     [10, 100],
   ]
 
-  it('posts to correct url with default params', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeSegmentResponse })
+  it('enqueues to correct async url with default params', async () => {
+    mockJobSuccess('job-6', fakeSegmentResponse)
 
     await mlApi.segmentByPolygon(1, { points })
 
-    expect(mockedClient.post).toHaveBeenCalledWith('/ml/images/1/segment/polygon', {
+    expect(mockedClient.post).toHaveBeenCalledWith('/ml/images/1/segment/polygon/async', {
       points,
       smooth: true,
       smoothing_factor: 0,
@@ -443,7 +503,7 @@ describe('mlApi: segmentByPolygon', () => {
   })
 
   it('passes custom smoothing and feathering params', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeSegmentResponse })
+    mockJobSuccess('job-6', fakeSegmentResponse)
 
     await mlApi.segmentByPolygon(1, {
       points,
@@ -452,7 +512,7 @@ describe('mlApi: segmentByPolygon', () => {
       featherPx: 3,
     })
 
-    expect(mockedClient.post).toHaveBeenCalledWith('/ml/images/1/segment/polygon', {
+    expect(mockedClient.post).toHaveBeenCalledWith('/ml/images/1/segment/polygon/async', {
       points,
       smooth: false,
       smoothing_factor: 0.5,
@@ -460,29 +520,36 @@ describe('mlApi: segmentByPolygon', () => {
     })
   })
 
-  it('returns SegmentResponse', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeSegmentResponse })
+  it('polls the job and returns SegmentResponse', async () => {
+    mockJobSuccess('job-6', fakeSegmentResponse)
 
     const result = await mlApi.segmentByPolygon(1, { points })
 
+    expect(mockedClient.get).toHaveBeenCalledWith('/ml/jobs/job-6')
     expect(result).toEqual(fakeSegmentResponse)
   })
 
-  it('propagates error', async () => {
+  it('propagates enqueue error', async () => {
     mockedClient.post.mockRejectedValue(new Error('polygon segmentation failed'))
 
     await expect(mlApi.segmentByPolygon(1, { points })).rejects.toThrow('polygon segmentation failed')
   })
+
+  it('throws MLJobError when the job itself fails', async () => {
+    mockJobFailure('job-6', 'polygon segmentation crashed')
+
+    await expect(mlApi.segmentByPolygon(1, { points })).rejects.toThrow(MLJobError)
+  })
 })
 
 describe('mlApi: samRemoveObject', () => {
-  it('posts to correct url with default params', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+  it('enqueues to correct async url with default params', async () => {
+    mockJobSuccess('job-7', fakeMLResult)
 
     await mlApi.samRemoveObject(1, 3)
 
     expect(mockedClient.post).toHaveBeenCalledWith(
-      '/ml/images/1/segment/3/remove',
+      '/ml/images/1/segment/3/remove/async',
       {
         expand_mask_pixels: 12,
         use_edge_blending: false,
@@ -492,7 +559,7 @@ describe('mlApi: samRemoveObject', () => {
   })
 
   it('passes custom expandMaskPixels, useEdgeBlending and ldm', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+    mockJobSuccess('job-7', fakeMLResult)
 
     await mlApi.samRemoveObject(1, 3, 20, false, fastLdm)
 
@@ -502,37 +569,127 @@ describe('mlApi: samRemoveObject', () => {
     expect((body as any).ldm).toEqual(fastLdm)
   })
 
-  it('returns MLResultResponse', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+  it('polls the job and returns MLResultResponse', async () => {
+    mockJobSuccess('job-7', fakeMLResult)
 
     const result = await mlApi.samRemoveObject(1, 3)
 
+    expect(mockedClient.get).toHaveBeenCalledWith('/ml/jobs/job-7')
     expect(result).toEqual(fakeMLResult)
   })
 
-  it('propagates error', async () => {
+  it('propagates enqueue error', async () => {
     mockedClient.post.mockRejectedValue(new Error('sam remove failed'))
 
     await expect(mlApi.samRemoveObject(1, 3)).rejects.toThrow('sam remove failed')
   })
-})
 
+  it('throws MLJobError when the job itself fails', async () => {
+    mockJobFailure('job-7', 'sam remove crashed')
+
+    await expect(mlApi.samRemoveObject(1, 3)).rejects.toThrow(MLJobError)
+  })
+})
+describe('mlApi: segmentHybrid', () => {
+  it('enqueues to correct async url with default params', async () => {
+    mockJobSuccess('job-11', fakeSegmentResponse)
+ 
+    await mlApi.segmentHybrid(1)
+ 
+    expect(mockedClient.post).toHaveBeenCalledWith(
+      '/ml/images/1/segment/hybrid/async',
+      {
+        yolo_conf_threshold: 0.35,
+        yolo_classes: null,
+        fallback_min_area: 800,
+        fallback_max_segments: 50,
+        overlap_iou_thresh: 0.5,
+      }
+    )
+  })
+ 
+  it('passes custom params', async () => {
+    mockJobSuccess('job-11', fakeSegmentResponse)
+ 
+    await mlApi.segmentHybrid(1, {
+      yoloConfThreshold: 0.6,
+      yoloClasses: ['cat', 'dog'],
+      fallbackMinArea: 1200,
+      fallbackMaxSegments: 25,
+      overlapIouThresh: 0.4,
+    })
+ 
+    expect(mockedClient.post).toHaveBeenCalledWith(
+      '/ml/images/1/segment/hybrid/async',
+      {
+        yolo_conf_threshold: 0.6,
+        yolo_classes: ['cat', 'dog'],
+        fallback_min_area: 1200,
+        fallback_max_segments: 25,
+        overlap_iou_thresh: 0.4,
+      }
+    )
+  })
+ 
+  it('applies defaults for params not provided in a partial object', async () => {
+    mockJobSuccess('job-11', fakeSegmentResponse)
+ 
+    await mlApi.segmentHybrid(1, { yoloConfThreshold: 0.7 })
+ 
+    const [, body] = mockedClient.post.mock.calls[0]
+    expect((body as any).yolo_conf_threshold).toBe(0.7)
+    expect((body as any).yolo_classes).toBeNull()
+    expect((body as any).fallback_min_area).toBe(800)
+    expect((body as any).fallback_max_segments).toBe(50)
+    expect((body as any).overlap_iou_thresh).toBe(0.5)
+  })
+ 
+  it('polls the job and returns SegmentResponse', async () => {
+    mockJobSuccess('job-11', fakeSegmentResponse)
+ 
+    const result = await mlApi.segmentHybrid(1)
+ 
+    expect(mockedClient.get).toHaveBeenCalledWith('/ml/jobs/job-11')
+    expect(result).toEqual(fakeSegmentResponse)
+  })
+ 
+  it('calls onStatus callback with job status', async () => {
+    mockJobSuccess('job-11', fakeSegmentResponse)
+    const onStatus = vi.fn()
+ 
+    await mlApi.segmentHybrid(1, {}, onStatus)
+ 
+    expect(onStatus).toHaveBeenCalledWith('complete')
+  })
+ 
+  it('propagates enqueue error', async () => {
+    mockedClient.post.mockRejectedValue(new Error('hybrid segmentation failed'))
+ 
+    await expect(mlApi.segmentHybrid(1)).rejects.toThrow('hybrid segmentation failed')
+  })
+ 
+  it('throws MLJobError when the job itself fails', async () => {
+    mockJobFailure('job-11', 'hybrid segmentation crashed')
+ 
+    await expect(mlApi.segmentHybrid(1)).rejects.toThrow(MLJobError)
+  })
+})
 describe('mlApi: samReplaceObject', () => {
   const fakeFile = new File(['img'], 'replacement.png', { type: 'image/png' })
 
-  it('posts multipart/form-data to correct url', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+  it('posts multipart/form-data to correct async url', async () => {
+    mockJobSuccess('job-8', fakeMLResult)
 
     await mlApi.samReplaceObject(1, 3, fakeFile)
 
     const [url, body] = mockedClient.post.mock.calls[0]
-    expect(url).toBe('/ml/images/1/segment/3/replace')
+    expect(url).toBe('/ml/images/1/segment/3/replace/async')
     expect(body).toBeInstanceOf(FormData)
     expect((body as FormData).get('replacement_file')).toBe(fakeFile)
   })
 
   it('sends default query params', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+    mockJobSuccess('job-8', fakeMLResult)
 
     await mlApi.samReplaceObject(1, 3, fakeFile)
 
@@ -549,7 +706,7 @@ describe('mlApi: samReplaceObject', () => {
   })
 
   it('passes custom options', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+    mockJobSuccess('job-8', fakeMLResult)
 
     await mlApi.samReplaceObject(1, 3, fakeFile, {
       expandMaskPixels: 15,
@@ -568,7 +725,7 @@ describe('mlApi: samReplaceObject', () => {
   })
 
   it('sets multipart/form-data header', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+    mockJobSuccess('job-8', fakeMLResult)
 
     await mlApi.samReplaceObject(1, 3, fakeFile)
 
@@ -576,29 +733,36 @@ describe('mlApi: samReplaceObject', () => {
     expect((config as any).headers['Content-Type']).toBe('multipart/form-data')
   })
 
-  it('returns MLResultResponse', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+  it('polls the job and returns MLResultResponse', async () => {
+    mockJobSuccess('job-8', fakeMLResult)
 
     const result = await mlApi.samReplaceObject(1, 3, fakeFile)
 
+    expect(mockedClient.get).toHaveBeenCalledWith('/ml/jobs/job-8')
     expect(result).toEqual(fakeMLResult)
   })
 
-  it('propagates error', async () => {
+  it('propagates enqueue error', async () => {
     mockedClient.post.mockRejectedValue(new Error('sam replace failed'))
 
     await expect(mlApi.samReplaceObject(1, 3, fakeFile)).rejects.toThrow('sam replace failed')
   })
+
+  it('throws MLJobError when the job itself fails', async () => {
+    mockJobFailure('job-8', 'sam replace crashed')
+
+    await expect(mlApi.samReplaceObject(1, 3, fakeFile)).rejects.toThrow(MLJobError)
+  })
 })
 
 describe('mlApi: samReplaceObjectWithAsset', () => {
-  it('posts to correct url with undefined body and default params', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+  it('posts to correct async url with undefined body and default params', async () => {
+    mockJobSuccess('job-9', fakeMLResult)
 
     await mlApi.samReplaceObjectWithAsset(1, 3, 'asset-123')
 
     const [url, body, config] = mockedClient.post.mock.calls[0]
-    expect(url).toBe('/ml/images/1/segment/3/replace')
+    expect(url).toBe('/ml/images/1/segment/3/replace/async')
     expect(body).toBeUndefined()
     expect((config as any).params).toEqual({
       asset_id: 'asset-123',
@@ -613,7 +777,7 @@ describe('mlApi: samReplaceObjectWithAsset', () => {
   })
 
   it('passes custom options', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+    mockJobSuccess('job-9', fakeMLResult)
 
     await mlApi.samReplaceObjectWithAsset(1, 3, 'asset-123', {
       expandMaskPixels: 20,
@@ -631,61 +795,77 @@ describe('mlApi: samReplaceObjectWithAsset', () => {
     expect((config as any).params.ldm_steps).toBe(10)
   })
 
-  it('returns MLResultResponse', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeMLResult })
+  it('polls the job and returns MLResultResponse', async () => {
+    mockJobSuccess('job-9', fakeMLResult)
 
     const result = await mlApi.samReplaceObjectWithAsset(1, 3, 'asset-123')
 
+    expect(mockedClient.get).toHaveBeenCalledWith('/ml/jobs/job-9')
     expect(result).toEqual(fakeMLResult)
   })
 
-  it('propagates error', async () => {
+  it('propagates enqueue error', async () => {
     mockedClient.post.mockRejectedValue(new Error('replace with asset failed'))
 
     await expect(
       mlApi.samReplaceObjectWithAsset(1, 3, 'asset-123')
     ).rejects.toThrow('replace with asset failed')
   })
+
+  it('throws MLJobError when the job itself fails', async () => {
+    mockJobFailure('job-9', 'replace with asset crashed')
+
+    await expect(mlApi.samReplaceObjectWithAsset(1, 3, 'asset-123')).rejects.toThrow(MLJobError)
+  })
 })
 
 describe('mlApi: extractObject', () => {
-  it('posts to correct url with default params', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeExtractResponse })
+  it('enqueues to correct async url with default params', async () => {
+    mockJobSuccess('job-10', fakeExtractResponse)
 
     await mlApi.extractObject(1, 4)
 
     expect(mockedClient.post).toHaveBeenCalledWith(
-      '/ml/images/1/segment/4/extract',
+      '/ml/images/1/segment/4/extract/async',
       { padding_pixels: 8, label: undefined, persist_to_s3: false }
     )
   })
 
   it('passes custom paddingPixels, label and persistToS3', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeExtractResponse })
+    mockJobSuccess('job-10', fakeExtractResponse)
 
     await mlApi.extractObject(1, 4, { paddingPixels: 20, label: 'my cat', persistToS3: true })
 
     expect(mockedClient.post).toHaveBeenCalledWith(
-      '/ml/images/1/segment/4/extract',
+      '/ml/images/1/segment/4/extract/async',
       { padding_pixels: 20, label: 'my cat', persist_to_s3: true }
     )
   })
 
-  it('returns ExtractResponse', async () => {
-    mockedClient.post.mockResolvedValue({ data: fakeExtractResponse })
+  it('polls the job and returns ExtractResponse', async () => {
+    mockJobSuccess('job-10', fakeExtractResponse)
 
     const result = await mlApi.extractObject(1, 4)
 
+    expect(mockedClient.get).toHaveBeenCalledWith('/ml/jobs/job-10')
     expect(result).toEqual(fakeExtractResponse)
   })
 
-  it('propagates error', async () => {
+  it('propagates enqueue error', async () => {
     mockedClient.post.mockRejectedValue(new Error('extract failed'))
 
     await expect(mlApi.extractObject(1, 4)).rejects.toThrow('extract failed')
   })
+
+  it('throws MLJobError when the job itself fails', async () => {
+    mockJobFailure('job-10', 'extract crashed')
+
+    await expect(mlApi.extractObject(1, 4)).rejects.toThrow(MLJobError)
+  })
 })
 
+// pasteExtractedObject stays synchronous — no worker task / async route exists
+// for it in the backend (see app/worker.py and app/api/routes/ml.py).
 describe('mlApi: pasteExtractedObject', () => {
   const targetBbox = { x1: 50, y1: 60, x2: 140, y2: 250 }
 

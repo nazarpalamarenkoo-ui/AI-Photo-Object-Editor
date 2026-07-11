@@ -67,6 +67,9 @@ export interface Detection {
 
 export type EditingMode = 'yolo' | 'sam'
 
+export interface EnqueueResponse {
+  job_id: string
+}
 export interface RegionItem {
   id: number
   bbox: Bbox
@@ -118,6 +121,18 @@ export interface MLResultResponse {
   metrics: Record<string, unknown>
   timestamp: string
 }
+export interface JobStatusResponse<T> {
+  job_id: string
+  status: 'deferred' | 'queued' | 'in_progress' | 'complete' | 'not_found'
+  result?: T
+  error?: string
+}
+export interface PollOptions {
+  intervalMs?: number
+  timeoutMs?: number
+  onStatus?: (status: JobStatusResponse<unknown>['status']) => void
+}
+export type SegmentSource = 'yolo' | 'sam_auto'
 
 export interface SegmentInfo {
   mask_id: number
@@ -125,6 +140,15 @@ export interface SegmentInfo {
   bbox: Bbox
   area: number
   stability_score: number | null
+  source?: SegmentSource
+}
+
+export interface SegmentHybridParams {
+  yoloConfThreshold?: number
+  yoloClasses?: string[]
+  fallbackMinArea?: number
+  fallbackMaxSegments?: number
+  overlapIouThresh?: number
 }
 export type PromptMode = 'points' | 'box' | 'polygon' | null
 

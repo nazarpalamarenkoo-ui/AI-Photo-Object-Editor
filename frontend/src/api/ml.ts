@@ -13,11 +13,39 @@ import type {
   ReplaceOptions,
   Asset,
   SegmentByPolygonParams,
+  SegmentHybridParams,
+  PollOptions,
+  JobStatusResponse,
+  EnqueueResponse
 } from '@/types/Index'
 
 export const PRESETS: Record<string, LdmConfig> = {
   fast:    { ldm_steps: 10, ldm_sampler: 'plms', hd_strategy: 'CROP' },
   quality: { ldm_steps: 25, ldm_sampler: 'plms', hd_strategy: 'CROP' },
+}
+
+export class MLJobError extends Error {}
+export class MLJobTimeoutError extends Error {}
+
+async function pollJob<T>(jobId: string, opts: PollOptions = {}): Promise<T> {
+  const { intervalMs = 1000, timeoutMs = 300_000, onStatus } = opts
+  const start = Date.now()
+
+  while (true) {
+    const { data } = await apiClient.get<JobStatusResponse<T>>(`/ml/jobs/${jobId}`)
+    onStatus?.(data.status)
+
+    if (data.status === 'complete') {
+      if (data.error) throw new MLJobError(data.error)
+      return data.result as T
+    }
+
+    if (Date.now() - start > timeoutMs) {
+      throw new MLJobTimeoutError(`Job ${jobId} did not complete within ${timeoutMs}ms`)
+    }
+
+    await new Promise((r) => setTimeout(r, intervalMs))
+  }
 }
 
 export const mlApi = {
@@ -37,16 +65,17 @@ export const mlApi = {
     bboxId: number,
     expandMaskPixels = 5,
     useEdgeBlending = false,
-    ldm: LdmConfig = PRESETS.quality): Promise<MLResultResponse> {
-    const { data } = await apiClient.post<MLResultResponse>(
-      `/ml/images/${imageId}/remove/${bboxId}`,
+    ldm: LdmConfig = PRESETS.quality,
+    onStatus?: PollOptions['onStatus']): Promise<MLResultResponse> {
+    const { data } = await apiClient.post<EnqueueResponse>(
+      `/ml/images/${imageId}/remove/${bboxId}/async`,
       {
         expand_mask_pixels: expandMaskPixels,
         use_edge_blending: useEdgeBlending,
         ldm,
       }
     )
-    return data
+    return pollJob<MLResultResponse>(data.job_id, { onStatus })
   },
 
   async removeMultipleObjects(
@@ -54,9 +83,10 @@ export const mlApi = {
     bboxIds: number[],
     expandMaskPixels = 5,
     useEdgeBlending = false,
-    ldm: LdmConfig = PRESETS.quality): Promise<MLResultResponse> {
-    const { data } = await apiClient.post<MLResultResponse>(
-      `/ml/images/${imageId}/remove-multiple`,
+    ldm: LdmConfig = PRESETS.quality,
+    onStatus?: PollOptions['onStatus']): Promise<MLResultResponse> {
+    const { data } = await apiClient.post<EnqueueResponse>(
+      `/ml/images/${imageId}/remove-multiple/async`,
       {
         bbox_ids: bboxIds,
         expand_mask_pixels: expandMaskPixels,
@@ -64,21 +94,22 @@ export const mlApi = {
         ldm,
       }
     )
-    return data
+    return pollJob<MLResultResponse>(data.job_id, { onStatus })
   },
 
   async replaceObject(
     imageId: number,
     bboxId: number,
     replacementFile: File,
-    options: ReplaceOptions = {}): Promise<MLResultResponse> {
+    options: ReplaceOptions = {},
+    onStatus?: PollOptions['onStatus']): Promise<MLResultResponse> {
     const formData = new FormData()
     formData.append('replacement_file', replacementFile)
 
     const ldm = options.ldm ?? PRESETS.quality
 
-    const { data } = await apiClient.post<MLResultResponse>(
-      `/ml/images/${imageId}/replace/${bboxId}`,
+    const { data } = await apiClient.post<EnqueueResponse>(
+      `/ml/images/${imageId}/replace/${bboxId}/async`,
       formData,
       {
         headers: { 'Content-Type': 'multipart/form-data' },
@@ -93,19 +124,19 @@ export const mlApi = {
         }
       }
     )
-    return data
+    return pollJob<MLResultResponse>(data.job_id, { onStatus })
   },
-
 
   async segmentObjects(
     imageId: number,
     minArea = 500,
-    maxSegments = 50): Promise<SegmentResponse> {
-    const { data } = await apiClient.post<SegmentResponse>(
-      `/ml/images/${imageId}/segment`,
+    maxSegments = 50,
+    onStatus?: PollOptions['onStatus']): Promise<SegmentResponse> {
+    const { data } = await apiClient.post<EnqueueResponse>(
+      `/ml/images/${imageId}/segment/async`,
       { min_area: minArea, max_segments: maxSegments }
     )
-    return data
+    return pollJob<SegmentResponse>(data.job_id, { onStatus })
   },
 
   async segmentWithPrompt(
@@ -115,7 +146,8 @@ export const mlApi = {
       pointLabels?: number[]
       bbox?: Bbox
       multimask_output?: boolean
-    }
+    },
+    onStatus?: PollOptions['onStatus']
   ): Promise<SegmentResponse> {
     const payload = {
       point_coords: params.pointCoords ?? null,
@@ -125,18 +157,37 @@ export const mlApi = {
         : null,
         multimask_output: params.multimask_output ?? false,
     }
-    const { data } = await apiClient.post<SegmentResponse>(
-      `/ml/images/${imageId}/segment/prompt`,
+    const { data } = await apiClient.post<EnqueueResponse>(
+      `/ml/images/${imageId}/segment/prompt/async`,
       payload
     )
-    return data
+    return pollJob<SegmentResponse>(data.job_id, { onStatus })
   },
+
+  async segmentHybrid(
+    imageId: number,
+    params: SegmentHybridParams = {},
+    onStatus?: PollOptions['onStatus']): Promise<SegmentResponse> {
+    const { data } = await apiClient.post<EnqueueResponse>(
+      `/ml/images/${imageId}/segment/hybrid/async`,
+      {
+        yolo_conf_threshold: params.yoloConfThreshold ?? 0.35,
+        yolo_classes: params.yoloClasses ?? null,
+        fallback_min_area: params.fallbackMinArea ?? 800,
+        fallback_max_segments: params.fallbackMaxSegments ?? 50,
+        overlap_iou_thresh: params.overlapIouThresh ?? 0.5,
+      }
+    )
+    return pollJob<SegmentResponse>(data.job_id, { onStatus })
+  },
+
   async segmentByPolygon(
     imageId: number,
-    params: SegmentByPolygonParams
+    params: SegmentByPolygonParams,
+    onStatus?: PollOptions['onStatus']
   ): Promise<SegmentResponse> {
-    const { data } = await apiClient.post<SegmentResponse>(
-      `/ml/images/${imageId}/segment/polygon`,
+    const { data } = await apiClient.post<EnqueueResponse>(
+      `/ml/images/${imageId}/segment/polygon/async`,
       {
         points: params.points,
         smooth: params.smooth ?? true,
@@ -144,37 +195,40 @@ export const mlApi = {
         feather_px: params.featherPx ?? 0,
       }
     )
-    return data
+    return pollJob<SegmentResponse>(data.job_id, { onStatus })
   },
+
   async samRemoveObject(
     imageId: number,
     maskId: number,
     expandMaskPixels = 12,
     useEdgeBlending = false,
-    ldm: LdmConfig = PRESETS.quality): Promise<MLResultResponse> {
-    const { data } = await apiClient.post<MLResultResponse>(
-      `/ml/images/${imageId}/segment/${maskId}/remove`,
+    ldm: LdmConfig = PRESETS.quality,
+    onStatus?: PollOptions['onStatus']): Promise<MLResultResponse> {
+    const { data } = await apiClient.post<EnqueueResponse>(
+      `/ml/images/${imageId}/segment/${maskId}/remove/async`,
       {
         expand_mask_pixels: expandMaskPixels,
         use_edge_blending: useEdgeBlending,
         ldm,
       }
     )
-    return data
+    return pollJob<MLResultResponse>(data.job_id, { onStatus })
   },
 
   async samReplaceObject(
     imageId: number,
     maskId: number,
     replacementFile: File,
-    options: ReplaceOptions = {}): Promise<MLResultResponse> {
+    options: ReplaceOptions = {},
+    onStatus?: PollOptions['onStatus']): Promise<MLResultResponse> {
     const formData = new FormData()
     formData.append('replacement_file', replacementFile)
 
     const ldm = options.ldm ?? PRESETS.quality
 
-    const { data } = await apiClient.post<MLResultResponse>(
-      `/ml/images/${imageId}/segment/${maskId}/replace`,
+    const { data } = await apiClient.post<EnqueueResponse>(
+      `/ml/images/${imageId}/segment/${maskId}/replace/async`,
       formData,
       {
         headers: { 'Content-Type': 'multipart/form-data' },
@@ -189,18 +243,19 @@ export const mlApi = {
         }
       }
     )
-    return data
+    return pollJob<MLResultResponse>(data.job_id, { onStatus })
   },
 
   async samReplaceObjectWithAsset(
     imageId: number,
     maskId: number,
     assetId: string,
-    options: ReplaceOptions = {}): Promise<MLResultResponse> {
+    options: ReplaceOptions = {},
+    onStatus?: PollOptions['onStatus']): Promise<MLResultResponse> {
     const ldm = options.ldm ?? PRESETS.quality
 
-    const { data } = await apiClient.post<MLResultResponse>(
-      `/ml/images/${imageId}/segment/${maskId}/replace`,
+    const { data } = await apiClient.post<EnqueueResponse>(
+      `/ml/images/${imageId}/segment/${maskId}/replace/async`,
       undefined,
       {
         params: {
@@ -215,23 +270,24 @@ export const mlApi = {
         }
       }
     )
-    return data
+    return pollJob<MLResultResponse>(data.job_id, { onStatus })
   },
 
   async extractObject(
     imageId: number,
     maskId: number,
-    params: { paddingPixels?: number; label?: string; persistToS3?: boolean } = {}
+    params: { paddingPixels?: number; label?: string; persistToS3?: boolean } = {},
+    onStatus?: PollOptions['onStatus']
   ): Promise<ExtractResponse> {
-    const { data } = await apiClient.post<ExtractResponse>(
-      `/ml/images/${imageId}/segment/${maskId}/extract`,
+    const { data } = await apiClient.post<EnqueueResponse>(
+      `/ml/images/${imageId}/segment/${maskId}/extract/async`,
       {
         padding_pixels: params.paddingPixels ?? 8,
         label: params.label,
         persist_to_s3: params.persistToS3 ?? false,
       }
     )
-    return data
+    return pollJob<ExtractResponse>(data.job_id, { onStatus })
   },
 
   async pasteExtractedObject(
@@ -260,7 +316,6 @@ export const mlApi = {
     )
     return data
   },
-
 
   async listAssets(limit = 50, offset = 0): Promise<Asset[]> {
     const { data } = await apiClient.get<Asset[]>('/ml/assets', {
