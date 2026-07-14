@@ -370,4 +370,9 @@ export const mlApi = {
   async resetState(imageId: number): Promise<void> {
     await apiClient.post(`/ml/images/${imageId}/reset`)
   },
+
+  async getCurrentState(imageId: number): Promise<{ presigned_url: string; is_edited: boolean; history: string[] }> {
+    const { data } = await apiClient.get(`/ml/images/${imageId}/current`)
+    return data
+  },
 }

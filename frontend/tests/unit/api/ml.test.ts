@@ -1208,4 +1208,45 @@ describe('mlApi: resetState', () => {
 
     await expect(mlApi.resetState(1)).rejects.toThrow('reset failed')
   })
+
+describe('mlApi: getCurrentState', () => {
+    const fakeCurrentState = {
+      presigned_url: 'https://storage.example.com/current.jpg',
+      is_edited: true,
+      history: ['remove', 'replace'],
+    }
+
+    it('gets from correct url', async () => {
+      mockedClient.get.mockResolvedValue({ data: fakeCurrentState })
+
+      await mlApi.getCurrentState(1)
+
+      expect(mockedClient.get).toHaveBeenCalledWith('/ml/images/1/current')
+    })
+
+    it('returns current state response', async () => {
+      mockedClient.get.mockResolvedValue({ data: fakeCurrentState })
+
+      const result = await mlApi.getCurrentState(1)
+
+      expect(result).toEqual(fakeCurrentState)
+    })
+
+    it('returns is_edited false when image has no edits', async () => {
+      mockedClient.get.mockResolvedValue({
+        data: { presigned_url: 'https://storage.example.com/original.jpg', is_edited: false, history: [] },
+      })
+
+      const result = await mlApi.getCurrentState(1)
+
+      expect(result.is_edited).toBe(false)
+      expect(result.history).toEqual([])
+    })
+
+    it('propagates error', async () => {
+      mockedClient.get.mockRejectedValue(new Error('current state failed'))
+
+      await expect(mlApi.getCurrentState(1)).rejects.toThrow('current state failed')
+    })
+  })
 })
