@@ -6,6 +6,9 @@ from app.ml.modes.yolo_lama_mode import YoloLamaMode
 from app.ml.modes.sam_lama_mode import SAMLamaMode
 from app.ml.experiment_tracker import ExperimentTracker
 from app.ml.pipeline.validator import Validator
+from app.core.logging import get_logger, log_execution
+
+logger = get_logger(__name__)
 
 
 class ReplacementMixin:
@@ -54,7 +57,14 @@ class ReplacementMixin:
         """
         start_time = time.time()
 
-        try:
+        with log_execution(
+            "pipeline_replace_object",
+            logger=logger,
+            expand_mask_pixels=expand_mask_pixels,
+            use_color_matching=use_color_matching,
+            use_edge_blending=use_edge_blending,
+            color_match_method=color_match_method,
+        ):
             self.validator.validate_image_bytes(image_bytes)
             self.validator.validate_bbox(selected_bbox)
             self.validator.validate_image_bytes(replacement_image_bytes)
@@ -84,11 +94,7 @@ class ReplacementMixin:
                     "color_match_method": color_match_method,
                 })
 
-            return result
-
-        except Exception as e:
-            print(f"Object replacement failed: {e}")
-            raise
+        return result
 
     async def sam_replace_object(
         self,
@@ -146,7 +152,15 @@ class ReplacementMixin:
         """
         start_time = time.time()
 
-        try:
+        with log_execution(
+            "pipeline_sam_replace_object",
+            logger=logger,
+            expand_mask_pixels=expand_mask_pixels,
+            use_color_matching=use_color_matching,
+            use_edge_blending=use_edge_blending,
+            color_match_method=color_match_method,
+            replacement_is_cutout=replacement_is_cutout,
+        ):
             self.validator.validate_image_bytes(image_bytes)
             self.validator.validate_mask_bytes(mask_bytes)
             self.validator.validate_bbox(bbox)
@@ -179,8 +193,4 @@ class ReplacementMixin:
                     "replacement_is_cutout": replacement_is_cutout,
                 })
 
-            return result
-
-        except Exception as e:
-            print(f"SAM object replacement failed: {e}")
-            raise
+        return result

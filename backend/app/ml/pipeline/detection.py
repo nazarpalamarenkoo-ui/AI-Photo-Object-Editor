@@ -5,6 +5,9 @@ from datetime import datetime
 from app.ml.modes.yolo_lama_mode import YoloLamaMode
 from app.ml.experiment_tracker import ExperimentTracker
 from app.ml.pipeline.validator import Validator
+from app.core.logging import get_logger, log_execution
+
+logger = get_logger(__name__)
 
 
 class DetectionMixin:
@@ -37,7 +40,12 @@ class DetectionMixin:
         """
         start_time = time.time()
 
-        try:
+        with log_execution(
+            "pipeline_detect_objects",
+            logger=logger,
+            conf_threshold=conf_threshold,
+            classes=classes,
+        ):
             self.validator.validate_image_bytes(image_bytes)
 
             result = await self.yolo_lama_mode.detect_objects(
@@ -63,8 +71,4 @@ class DetectionMixin:
                     conf_threshold=conf_threshold,
                 )
 
-            return result
-
-        except Exception as e:
-            print(f"Detection failed: {e}")
-            raise
+        return result

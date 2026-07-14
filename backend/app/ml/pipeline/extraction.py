@@ -5,6 +5,9 @@ from datetime import datetime
 from app.ml.modes.sam_lama_mode import SAMLamaMode
 from app.ml.experiment_tracker import ExperimentTracker
 from app.ml.pipeline.validator import Validator
+from app.core.logging import get_logger, log_execution
+
+logger = get_logger(__name__)
 
 
 class ExtractionMixin:
@@ -45,7 +48,12 @@ class ExtractionMixin:
         """
         start_time = time.time()
 
-        try:
+        with log_execution(
+            "pipeline_sam_extract_object",
+            logger=logger,
+            padding_pixels=padding_pixels,
+            output_format=output_format,
+        ):
             self.validator.validate_image_bytes(image_bytes)
             self.validator.validate_mask_bytes(mask_bytes)
             self.validator.validate_bbox(bbox)
@@ -71,11 +79,7 @@ class ExtractionMixin:
                     "padding_pixels": padding_pixels,
                 })
 
-            return result
-
-        except Exception as e:
-            print(f"SAM object extraction failed: {e}")
-            raise
+        return result
 
     async def sam_paste_extracted_object(
         self,
@@ -114,7 +118,13 @@ class ExtractionMixin:
         """
         start_time = time.time()
 
-        try:
+        with log_execution(
+            "pipeline_sam_paste_extracted_object",
+            logger=logger,
+            scale=scale,
+            use_color_matching=use_color_matching,
+            use_edge_blending=use_edge_blending,
+        ):
             self.validator.validate_image_bytes(image_bytes)
             self.validator.validate_image_bytes(extracted_bytes)
             self.validator.validate_bbox(target_bbox)
@@ -143,8 +153,4 @@ class ExtractionMixin:
                     "edge_blending": use_edge_blending,
                 })
 
-            return result
-
-        except Exception as e:
-            print(f"SAM paste extracted object failed: {e}")
-            raise
+        return result

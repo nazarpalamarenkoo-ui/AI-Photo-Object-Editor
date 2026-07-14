@@ -6,6 +6,9 @@ from app.ml.modes.yolo_lama_mode import YoloLamaMode
 from app.ml.modes.sam_lama_mode import SAMLamaMode
 from app.ml.experiment_tracker import ExperimentTracker
 from app.ml.pipeline.validator import Validator
+from app.core.logging import get_logger, log_execution
+
+logger = get_logger(__name__)
 
 
 class RemovalMixin:
@@ -48,7 +51,12 @@ class RemovalMixin:
         """
         start_time = time.time()
 
-        try:
+        with log_execution(
+            "pipeline_remove_object",
+            logger=logger,
+            expand_mask_pixels=expand_mask_pixels,
+            use_edge_blending=use_edge_blending,
+        ):
             self.validator.validate_image_bytes(image_bytes)
             self.validator.validate_bbox(selected_bbox)
 
@@ -73,11 +81,7 @@ class RemovalMixin:
                     "edge_blending": use_edge_blending,
                 })
 
-            return result
-
-        except Exception as e:
-            print(f"Object removal failed: {e}")
-            raise
+        return result
 
     async def remove_multiple_objects(
         self,
@@ -113,7 +117,13 @@ class RemovalMixin:
         """
         start_time = time.time()
 
-        try:
+        with log_execution(
+            "pipeline_remove_multiple_objects",
+            logger=logger,
+            num_objects=len(selected_bboxes) if selected_bboxes else 0,
+            expand_mask_pixels=expand_mask_pixels,
+            use_edge_blending=use_edge_blending,
+        ):
             self.validator.validate_image_bytes(image_bytes)
 
             if not selected_bboxes:
@@ -142,11 +152,7 @@ class RemovalMixin:
                     "edge_blending": use_edge_blending,
                 })
 
-            return result
-
-        except Exception as e:
-            print(f"Multiple objects removal failed: {e}")
-            raise
+        return result
 
     async def sam_remove_object(
         self,
@@ -182,7 +188,12 @@ class RemovalMixin:
         """
         start_time = time.time()
 
-        try:
+        with log_execution(
+            "pipeline_sam_remove_object",
+            logger=logger,
+            expand_mask_pixels=expand_mask_pixels,
+            use_edge_blending=use_edge_blending,
+        ):
             self.validator.validate_image_bytes(image_bytes)
             self.validator.validate_mask_bytes(mask_bytes)
 
@@ -206,8 +217,4 @@ class RemovalMixin:
                     "edge_blending": use_edge_blending,
                 })
 
-            return result
-
-        except Exception as e:
-            print(f"SAM object removal failed: {e}")
-            raise
+        return result
