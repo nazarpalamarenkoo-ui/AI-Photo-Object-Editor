@@ -19,6 +19,5 @@ app.use(PrimeVue, {
   }
 })
 
-// Відновлюємо юзера з токена перед монтуванням
 const auth = useAuthStore()
 auth.init().then(() => app.mount('#app'))
