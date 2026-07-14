@@ -5,7 +5,13 @@ import numpy as np
 from PIL import Image
 from io import BytesIO
 
+from app.config.settings import settings
+from app.config.device_manager import DeviceManager
 from app.ml.experiment_tracker import ExperimentTracker, get_tracker
+from app.core.logging import get_logger, log_ml_operation
+
+logger = get_logger(__name__)
+
 
 class SAM2Segmentor:
     
@@ -29,9 +35,12 @@ class SAM2Segmentor:
             from sam2.build_sam import build_sam2
             from sam2.sam2_image_predictor import SAM2ImagePredictor
             from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
-            
+
+            self.model_path = model_path
             self.device = device
             self.tracker = tracker or get_tracker()
+
+            logger.info("sam2_model_loading", model=model_path, device=device)
             self.segmentor = build_sam2(
             "configs/sam2.1/sam2.1_hiera_s.yaml",
             model_path,
@@ -48,9 +57,10 @@ class SAM2Segmentor:
                 stability_score_thresh = 0.92,
                 min_mask_region_area = 100,
             )
-            print(f"SAM2 loaded on {device}")
+            logger.info("sam2_model_loaded", model=model_path, device=device)
             
         except ImportError as e:
+            logger.error("sam2_model_load_failed", model=model_path, device=device, exc_info=e)
             raise RuntimeError(
                 f"sam2 not installed: {e}. Please install the SAM2 package")
             
@@ -76,13 +86,24 @@ class SAM2Segmentor:
             - metrics: Dict
         """
         start_time = time.time()
-        
-        segments = await asyncio.to_thread(
-            self._segment_auto_sync, image_bytes
-        )
 
-        inference_time = (time.time() - start_time) * 1000
-        metrics = self._calculate_metrics(segments, inference_time)
+        async with log_ml_operation(
+            "sam2_segment_auto",
+            model=self.model_path,
+            device=self.device,
+            image_size_bytes=len(image_bytes),
+        ) as op:
+            segments = await asyncio.to_thread(
+                self._segment_auto_sync, image_bytes
+            )
+
+            inference_time = (time.time() - start_time) * 1000
+            metrics = self._calculate_metrics(segments, inference_time)
+
+            op.set_output(
+                num_segments=metrics["num_segments"],
+                avg_stability=round(metrics.get("avg_stability", 0.0), 4),
+            )
 
         if track_metrics:
             await self._track_metrics(metrics)
@@ -149,14 +170,27 @@ class SAM2Segmentor:
 
         if multimask_output is None:
             multimask_output = not (bbox is not None or (point_coords and len(point_coords) > 1))
-            
-        segments = await asyncio.to_thread(
-            self._segment_prompt_sync,
-            image_bytes, point_coords, point_labels, bbox, multimask_output
-        )
 
-        inference_time = (time.time() - start_time) * 1000
-        metrics = self._calculate_metrics(segments, inference_time)
+        async with log_ml_operation(
+            "sam2_segment_prompt",
+            model=self.model_path,
+            device=self.device,
+            has_points=point_coords is not None,
+            has_bbox=bbox is not None,
+            multimask_output=multimask_output,
+        ) as op:
+            segments = await asyncio.to_thread(
+                self._segment_prompt_sync,
+                image_bytes, point_coords, point_labels, bbox, multimask_output
+            )
+
+            inference_time = (time.time() - start_time) * 1000
+            metrics = self._calculate_metrics(segments, inference_time)
+
+            op.set_output(
+                num_segments=metrics["num_segments"],
+                avg_stability=round(metrics.get("avg_stability", 0.0), 4),
+            )
 
         if track_metrics:
             await self._track_metrics(metrics)
@@ -244,12 +278,23 @@ class SAM2Segmentor:
         """
         start_time = time.time()
 
-        segments = await asyncio.to_thread(
-            self._segment_prompts_batch_sync, image_bytes, bboxes
-        )
+        async with log_ml_operation(
+            "sam2_segment_prompts_batch",
+            model=self.model_path,
+            device=self.device,
+            num_bboxes=len(bboxes),
+        ) as op:
+            segments = await asyncio.to_thread(
+                self._segment_prompts_batch_sync, image_bytes, bboxes
+            )
 
-        inference_time = (time.time() - start_time) * 1000
-        metrics = self._calculate_metrics(segments, inference_time)
+            inference_time = (time.time() - start_time) * 1000
+            metrics = self._calculate_metrics(segments, inference_time)
+
+            op.set_output(
+                num_segments=metrics["num_segments"],
+                avg_stability=round(metrics.get("avg_stability", 0.0), 4),
+            )
 
         if track_metrics:
             await self._track_metrics(metrics)
@@ -333,12 +378,11 @@ _segmentor_lock = threading.Lock()
 
 def get_segmentor(
     model_path: str = "weights/sam2.1_hiera_s.pt",
-    device: str = "cpu",
     tracker: Optional[ExperimentTracker] = None
 ) -> SAM2Segmentor:
     global _segmentor_instance
     if _segmentor_instance is None:
         with _segmentor_lock:
             if _segmentor_instance is None:
-                _segmentor_instance = SAM2Segmentor(model_path, device, tracker)
+                _segmentor_instance = SAM2Segmentor(device=DeviceManager.get(settings.SAM_DEVICE))
     return _segmentor_instance

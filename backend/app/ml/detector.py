@@ -4,8 +4,14 @@ from pathlib import Path
 from typing import Optional, Dict, List
 import numpy as np
 from PIL import Image
- 
+
+from app.config.settings import settings
+from app.config.device_manager import DeviceManager
 from app.ml.experiment_tracker import ExperimentTracker, get_tracker
+from app.core.logging import get_logger, log_ml_operation
+
+logger = get_logger(__name__)
+
 
 class YOLODetector:
     """
@@ -53,12 +59,18 @@ class YOLODetector:
             self.conf_threshold = conf_threshold
             self.tracker = tracker or get_tracker()
  
-            print(f"Loading YOLO model: {model_path}")
+            logger.info("yolo_model_loading", model=model_path, device=device)
             self.model = YOLO(model_path)
             self.model.to(device)
-            print(f"YOLO loaded. Classes: {len(self.model.names)}")
+            logger.info(
+                "yolo_model_loaded",
+                model=model_path,
+                device=device,
+                num_classes=len(self.model.names),
+            )
  
         except ImportError as e:
+            logger.error("yolo_model_load_failed", model=model_path, device=device, exc_info=e)
             raise RuntimeError(
                 f"ultralytics not installed: {e}. "
                 "Set ML_ENABLED=false to run without ML."
@@ -93,16 +105,29 @@ class YOLODetector:
         
         conf = conf_threshold or self.conf_threshold
         start_time = time.time()
-        
-        detections = await asyncio.to_thread(
-            self._detect_sync,
-            image_path,
-            conf,
-            classes
-        )
-        inference_time = (time.time() - start_time) * 1000
-        metrics = self._calculate_metrics(detections, inference_time)
-        
+
+        async with log_ml_operation(
+            "yolo_detect",
+            model=self.model_path,
+            device=self.device,
+            conf_threshold=conf,
+            class_filter=classes,
+        ) as op:
+            detections = await asyncio.to_thread(
+                self._detect_sync,
+                image_path,
+                conf,
+                classes
+            )
+            inference_time = (time.time() - start_time) * 1000
+            metrics = self._calculate_metrics(detections, inference_time)
+
+            op.set_output(
+                num_detections=metrics["num_detections"],
+                avg_confidence=round(metrics.get("avg_confidence", 0.0), 4),
+                classes_detected=metrics.get("classes_detected", []),
+            )
+
         if track_metrics:
             await self._track_metrics(metrics, image_path)
         
@@ -220,14 +245,19 @@ _detector_instance = None
 _detector_instance_lock = threading.Lock()
 
 def get_detector(
-    model_path: str = 'weights/yolov10m.pt',
-    device: str = 'cuda',
-    tracker: Optional[ExperimentTracker] = None
+    model_path: str = "weights/yolov10m.pt",
+    tracker: Optional[ExperimentTracker] = None,
 ) -> YOLODetector:
-    
+
     global _detector_instance
+
     if _detector_instance is None:
         with _detector_instance_lock:
             if _detector_instance is None:
-                _detector_instance = YOLODetector(model_path, device, tracker=tracker)
+                _detector_instance = YOLODetector(
+                    model_path=model_path,
+                    device=DeviceManager.get(settings.YOLO_DEVICE),
+                    tracker=tracker,
+                )
+
     return _detector_instance

@@ -5,6 +5,9 @@ from datetime import datetime
 from app.ml.modes.sam_lama_mode import SAMLamaMode
 from app.ml.experiment_tracker import ExperimentTracker
 from app.ml.pipeline.validator import Validator
+from app.core.logging import get_logger, log_execution
+
+logger = get_logger(__name__)
 
 
 class SegmentationMixin:
@@ -38,7 +41,12 @@ class SegmentationMixin:
         """
         start_time = time.time()
 
-        try:
+        with log_execution(
+            "pipeline_sam_segment_auto",
+            logger=logger,
+            min_area=min_area,
+            max_segments=max_segments,
+        ):
             self.validator.validate_image_bytes(image_bytes)
 
             result = await self.sam_lama_mode.segment_objects(
@@ -57,11 +65,7 @@ class SegmentationMixin:
                     "min_area": min_area,
                 })
 
-            return result
-
-        except Exception as e:
-            print(f"SAM auto-segmentation failed: {e}")
-            raise
+        return result
 
     async def sam_segment_with_prompt(
         self,
@@ -95,7 +99,12 @@ class SegmentationMixin:
         """
         start_time = time.time()
 
-        try:
+        with log_execution(
+            "pipeline_sam_segment_prompt",
+            logger=logger,
+            has_points=point_coords is not None,
+            has_bbox=bbox is not None,
+        ):
             self.validator.validate_image_bytes(image_bytes)
 
             if point_coords is None and bbox is None:
@@ -127,12 +136,8 @@ class SegmentationMixin:
                     "has_bbox": bbox is not None,
                 })
 
-            return result
+        return result
 
-        except Exception as e:
-            print(f"SAM prompt segmentation failed: {e}")
-            raise
-        
     async def sam_segment_with_prompts_batch(
         self,
         image_bytes: bytes,
@@ -162,7 +167,11 @@ class SegmentationMixin:
         """
         start_time = time.time()
 
-        try:
+        with log_execution(
+            "pipeline_sam_segment_prompts_batch",
+            logger=logger,
+            num_bboxes=len(bboxes) if bboxes else 0,
+        ):
             self.validator.validate_image_bytes(image_bytes)
 
             if not bboxes:
@@ -186,12 +195,8 @@ class SegmentationMixin:
                     "processing_time": time.time() - start_time,
                 })
 
-            return result
+        return result
 
-        except Exception as e:
-            print(f"SAM batched prompt segmentation failed: {e}")
-            raise
-        
     async def sam_segment_by_polygon(
         self,
         image_bytes: bytes,
@@ -216,7 +221,11 @@ class SegmentationMixin:
         """
         start_time = time.time()
 
-        try:
+        with log_execution(
+            "pipeline_sam_segment_polygon",
+            logger=logger,
+            num_points=len(points) if points else 0,
+        ):
             self.validator.validate_image_bytes(image_bytes)
 
             if points is None or len(points) < 3:
@@ -239,8 +248,4 @@ class SegmentationMixin:
                     "processing_time": time.time() - start_time,
                 })
 
-            return result
-
-        except Exception as e:
-            print(f"Polygon segmentation failed: {e}")
-            raise
+        return result

@@ -130,7 +130,6 @@ def mode(
         edge_blender=real_edge_blender,
         color_matcher=real_color_matcher,
         background_remover=stub_background_remover,
-        device="cpu",
     )
 
 async def test_remove_object_end_to_end_returns_correct_size(mode):

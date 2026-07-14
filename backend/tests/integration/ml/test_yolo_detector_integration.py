@@ -45,7 +45,7 @@ def detector():
         ]       
         mock_yolo.return_value = mock_model
 
-        detector = YOLODetector(device='cpu')
+        detector = YOLODetector()
         yield detector
 
 

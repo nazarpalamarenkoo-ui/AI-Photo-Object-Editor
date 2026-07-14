@@ -76,7 +76,6 @@ def pipeline(yolo_lama_mode, sam_lama_mode, tracker, validator) -> MLPipeline:
         sam_mode=sam_lama_mode,
         tracker=tracker,
         validator=validator,
-        device="cpu",
     )
 
 

@@ -35,10 +35,10 @@ def factory_mocks():
 
 
 def test_constructor_default_initialization_uses_factories(factory_mocks):
-    pipeline = MLPipeline(device="cpu")
+    pipeline = MLPipeline()
 
-    factory_mocks["get_yolo_lama_mode"].assert_called_once_with(device="cpu")
-    factory_mocks["get_sam_mode"].assert_called_once_with(device="cpu")
+    factory_mocks["get_yolo_lama_mode"].assert_called_once_with()
+    factory_mocks["get_sam_mode"].assert_called_once_with()
     factory_mocks["get_tracker"].assert_called_once()
     factory_mocks["get_validator"].assert_called_once()
     assert pipeline.device == "cpu"
@@ -51,8 +51,8 @@ def test_constructor_default_initialization_uses_factories(factory_mocks):
 def test_constructor_default_device_is_cuda(factory_mocks):
     MLPipeline()
 
-    factory_mocks["get_yolo_lama_mode"].assert_called_once_with(device="cuda")
-    factory_mocks["get_sam_mode"].assert_called_once_with(device="cuda")
+    factory_mocks["get_yolo_lama_mode"].assert_called_once_with()
+    factory_mocks["get_sam_mode"].assert_called_once_with()
 
 
 def test_constructor_custom_dependency_injection_skips_factories(factory_mocks):
@@ -66,7 +66,6 @@ def test_constructor_custom_dependency_injection_skips_factories(factory_mocks):
         sam_mode=custom_sam_mode,
         tracker=custom_tracker,
         validator=custom_validator,
-        device="cpu",
     )
 
     factory_mocks["get_yolo_lama_mode"].assert_not_called()
@@ -82,7 +81,7 @@ def test_constructor_custom_dependency_injection_skips_factories(factory_mocks):
 def test_constructor_partial_dependency_injection_falls_back_to_factories(factory_mocks):
     custom_mode = MagicMock(name="custom_yolo_lama_mode")
 
-    pipeline = MLPipeline(mode=custom_mode, device="cpu")
+    pipeline = MLPipeline(mode=custom_mode)
 
     assert pipeline.yolo_lama_mode is custom_mode
     factory_mocks["get_yolo_lama_mode"].assert_not_called()
@@ -94,7 +93,7 @@ def test_constructor_partial_dependency_injection_falls_back_to_factories(factor
 def test_get_supported_classes_delegates_to_yolo_lama_mode(factory_mocks):
     custom_mode = MagicMock()
     custom_mode.get_supported_classes = MagicMock(return_value=["car", "person"])
-    pipeline = MLPipeline(mode=custom_mode, device="cpu")
+    pipeline = MLPipeline(mode=custom_mode)
 
     classes = pipeline.get_supported_classes()
 
@@ -103,23 +102,23 @@ def test_get_supported_classes_delegates_to_yolo_lama_mode(factory_mocks):
 
 
 def test_get_pipeline_returns_singleton(factory_mocks):
-    first = pipeline_module.get_pipeline(device="cpu")
-    second = pipeline_module.get_pipeline(device="cpu")
+    first = pipeline_module.get_pipeline()
+    second = pipeline_module.get_pipeline()
 
     assert first is second
     factory_mocks["get_yolo_lama_mode"].assert_called_once()
 
 
 def test_get_pipeline_creates_instance_with_given_device(factory_mocks):
-    pipeline = pipeline_module.get_pipeline(device="cpu")
+    pipeline = pipeline_module.get_pipeline()
 
     assert isinstance(pipeline, MLPipeline)
     assert pipeline.device == "cpu"
 
 
 def test_get_pipeline_ignores_device_on_subsequent_calls(factory_mocks):
-    first = pipeline_module.get_pipeline(device="cpu")
-    second = pipeline_module.get_pipeline(device="cuda")
+    first = pipeline_module.get_pipeline()
+    second = pipeline_module.get_pipeline()
 
     assert first is second
     assert second.device == "cpu"

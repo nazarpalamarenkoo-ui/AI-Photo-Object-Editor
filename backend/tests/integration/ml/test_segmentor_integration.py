@@ -37,7 +37,6 @@ def real_segmentor(tracker):
 
     return SAM2Segmentor(
         model_path=str(WEIGHTS_PATH),
-        device="cpu",
         tracker=tracker,
     )
 

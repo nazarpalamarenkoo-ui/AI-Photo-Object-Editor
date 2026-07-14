@@ -19,7 +19,7 @@ def inpainter():
         fake_result = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
         mock_model.return_value = fake_result
 
-        inpainter = LaMaInpainter(device='cpu')
+        inpainter = LaMaInpainter()
 
         yield inpainter
 

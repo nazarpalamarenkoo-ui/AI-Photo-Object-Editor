@@ -6,14 +6,20 @@ import numpy as np
 from PIL import Image
 from io import BytesIO
 import cv2
+
+from app.config.settings import settings
+from app.config.device_manager import DeviceManager
 from app.ml.experiment_tracker import ExperimentTracker, get_tracker
- 
- 
+from app.core.logging import get_logger, log_ml_operation
+
+logger = get_logger(__name__)
+
+
 class InpaintMode(str, Enum):
     REMOVE = "remove"
     REPLACE = "replace"
- 
- 
+
+
 class LaMaInpainter:
     """
     LaMa-based image inpainter.
@@ -44,10 +50,11 @@ class LaMaInpainter:
         try:
             from lama_cleaner.model_manager import ModelManager
             from lama_cleaner.schema import Config, HDStrategy
- 
+
             self.device = device
             self.tracker = tracker or get_tracker()
- 
+
+            logger.info("lama_model_loading", model="lama", device=device)
             self.model_manager = ModelManager(
                 name='lama',
                 device=self.device # type: ignore
@@ -60,9 +67,10 @@ class LaMaInpainter:
                 hd_strategy_crop_trigger_size=800,
                 hd_strategy_resize_limit=2048,
             )
-            print(f"LaMa Inpainter initialized (device: {device})")
- 
+            logger.info("lama_model_loaded", model="lama", device=device)
+
         except ImportError as e:
+            logger.error("lama_model_load_failed", model="lama", device=device, exc_info=e)
             raise RuntimeError(
                 f"lama-cleaner not installed or incompatible: {e}. "
                 "Set ML_ENABLED=false to run without ML."
@@ -107,9 +115,14 @@ class LaMaInpainter:
             ValueError: If REPLACE mode and no replacement_image_bytes
         """
         if not mask_bytes and not bbox:
+            logger.warning("lama_inpaint_invalid_input", mode=mode.value, reason="missing mask_bytes/bbox")
             raise ValueError("Either mask_bytes or bbox must be provided")
         
         if mode == InpaintMode.REPLACE and not replacement_image_bytes:
+            logger.warning(
+                "lama_inpaint_invalid_input", mode=mode.value,
+                reason="missing replacement_image_bytes for REPLACE mode",
+            )
             raise ValueError("replacement_image_bytes required for REPLACE mode")
         
         from lama_cleaner.schema import Config, HDStrategy
@@ -123,35 +136,48 @@ class LaMaInpainter:
         )
 
         start_time = time.time()
-        
-        # Run inpainting based on mode
-        if mode == InpaintMode.REMOVE:
-            result_bytes = await self._inpaint_remove(
+
+        async with log_ml_operation(
+            "lama_inpaint",
+            model="lama",
+            mode=mode.value,
+            ldm_steps=ldm_steps,
+            ldm_sampler=ldm_sampler,
+            hd_strategy=hd_strategy,
+        ) as op:
+            # Run inpainting based on mode
+            if mode == InpaintMode.REMOVE:
+                result_bytes = await self._inpaint_remove(
+                    image_bytes,
+                    mask_bytes,
+                    bbox,
+                    config
+                )
+            else:
+                result_bytes = await self._inpaint_replace(
+                    image_bytes,
+                    mask_bytes,
+                    bbox,
+                    replacement_image_bytes,
+                    config
+                )
+
+            processing_time = (time.time() - start_time) * 1000  # ms
+
+            # Calculate processing metrics
+            metrics = await self._calculate_metrics(
                 image_bytes,
                 mask_bytes,
                 bbox,
-                config
+                processing_time,
+                mode
             )
-        else:
-            result_bytes = await self._inpaint_replace(
-                image_bytes,
-                mask_bytes,
-                bbox,
-                replacement_image_bytes,
-                config
+
+            op.set_output(
+                mask_size_pixels=metrics["mask_size_pixels"],
+                result_size_bytes=len(result_bytes),
             )
-        
-        processing_time = (time.time() - start_time) * 1000  # ms
-        
-        # Calculate processing metrics
-        metrics = await self._calculate_metrics(
-            image_bytes,
-            mask_bytes,
-            bbox,
-            processing_time,
-            mode
-        )
-        
+
         # Track metrics to MLflow
         if track_metrics:
             await self._track_metrics(metrics)
@@ -537,13 +563,12 @@ class LaMaInpainter:
             )
         
         await asyncio.to_thread(log_sync)
- 
+
 import threading
 _inpainter_instance = None
 _inpainter_lock = threading.Lock()
- 
+
 def get_inpainter(
-    device: str = 'cuda',
     tracker: Optional[ExperimentTracker] = None
 ) -> LaMaInpainter:
     """
@@ -559,5 +584,5 @@ def get_inpainter(
     if _inpainter_instance is None:
         with _inpainter_lock:
             if _inpainter_instance is None:
-                _inpainter_instance = LaMaInpainter(device, tracker=tracker)
+                _inpainter_instance = LaMaInpainter(device=DeviceManager.get(settings.LAMA_DEVICE), tracker=tracker)
     return _inpainter_instance

@@ -30,7 +30,6 @@ def test_init_dependencies():
         edge_blender=MagicMock(),
         color_matcher=MagicMock(),
         background_remover=MagicMock(),
-        device="cpu"
     )
 
     assert mode.detector is detector

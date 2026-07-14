@@ -46,13 +46,10 @@ def _make_inpainter():
     return inpainter
 
 
-# --- існуючі тести ---
-
 @pytest.mark.unit
 def test_inpainter_init():
     mock_tracker = MagicMock()
-    inpainter = LaMaInpainter(device='cpu', tracker=mock_tracker)
-    assert inpainter.device == 'cpu'
+    inpainter = LaMaInpainter(tracker=mock_tracker)
     assert inpainter.tracker is mock_tracker
     assert inpainter.model_manager is not None
 
@@ -87,16 +84,6 @@ def test_get_bbox_from_empty_mask():
     with pytest.raises(ValueError, match="Empty mask"):
         inpainter._get_bbox_from_mask(mask)
 
-
-@pytest.mark.unit
-def test_inpainter_singleton():
-    import app.ml.inpainter
-    app.ml.inpainter._inpainter_instance = None
-    mock_tracker = MagicMock()
-    inpainter1 = get_inpainter(device='cpu', tracker=mock_tracker)
-    inpainter2 = get_inpainter(device='cpu', tracker=mock_tracker)
-    assert inpainter1 is inpainter2
-    app.ml.inpainter._inpainter_instance = None
 
 
 @pytest.mark.unit

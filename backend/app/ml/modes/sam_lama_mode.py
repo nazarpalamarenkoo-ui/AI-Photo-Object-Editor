@@ -4,6 +4,8 @@ from io import BytesIO
 import numpy as np
 from PIL import Image
 
+from app.config.settings import settings
+from app.config.device_manager import DeviceManager
 from app.ml.segmentor import SAM2Segmentor, get_segmentor
 from app.ml.inpainter import LaMaInpainter, InpaintMode, get_inpainter
 from app.ml.processors.edge_blender import EdgeBlender, get_edge_blender
@@ -11,6 +13,10 @@ from app.ml.processors.color_matcher import ColorMatcher, get_color_matcher
 from app.ml.processors.background_remover import BackgroundRemover, get_background_remover
 from app.ml.processors.image_compositor import get_compositor
 from app.ml.processors.polygon_mask import PolygonMasker, get_polygon_masker
+
+from app.core.logging import get_logger, log_execution, log_ml_operation
+
+logger = get_logger(__name__)
 
 
 class SAMLamaMode:
@@ -21,7 +27,7 @@ class SAMLamaMode:
         1. segment_objects          — auto-segmentation (without prompts)
         2. segment_with_prompt      — point/bbox prompt segmentation
         3. remove_object            — SAM mask → LaMa remove → EdgeBlend
-        4. replace_object           — SAM mask → LaMa remove → composite → ColorMatch
+        4. replace_object            — SAM mask → LaMa remove → composite → ColorMatch
         5. extract_object           — SAM mask → RGBA PNG crop
         6. paste_extracted_object   — RGBA PNG → scale → composite → ColorMatch → EdgeBlend
     """
@@ -34,18 +40,16 @@ class SAMLamaMode:
         color_matcher: Optional[ColorMatcher] = None,
         background_remover: Optional[BackgroundRemover] = None,
         polygon_masker: Optional[PolygonMasker] = None,
-        device: str = "cpu",
     ):
-        self.device = device
-        self.segmentor = segmentor or get_segmentor(device=device)
-        self.inpainter = inpainter or get_inpainter(device=device)
+        self.device = DeviceManager.get(settings.SAM_DEVICE)
+        self.segmentor = segmentor or get_segmentor()
+        self.inpainter = inpainter or get_inpainter()
         self.edge_blender = edge_blender or get_edge_blender()
         self.color_matcher = color_matcher or get_color_matcher()
         self.background_remover = background_remover or get_background_remover(rembg_available=True)
         self.compositor = get_compositor()
         self.polygon_masker = polygon_masker or get_polygon_masker()
-        print(f"SAMMode initialized (device: {device})")
-
+        logger.info("sam_lama_mode_initialized", device=str(self.device))
 
     async def segment_objects(
         self,
@@ -67,17 +71,31 @@ class SAMLamaMode:
                 - metrics:    Dict
                 - image_size: (W, H)
         """
-        result = await self.segmentor.segment_auto(image_bytes)
-
-        filtered = [
-            s for s in result["segments"]
-            if s["area"] >= min_area
-        ][:max_segments]
-
-        for idx, seg in enumerate(filtered):
-            seg["bbox_id"] = idx
-
         img = Image.open(BytesIO(image_bytes))
+
+        async with log_ml_operation(
+            "sam_segment_auto",
+            model="sam2.1",
+            device=str(self.device),
+            image_size=img.size,
+            min_area=min_area,
+            max_segments=max_segments,
+        ) as op:
+            result = await self.segmentor.segment_auto(image_bytes)
+
+            filtered = [
+                s for s in result["segments"]
+                if s["area"] >= min_area
+            ][:max_segments]
+
+            for idx, seg in enumerate(filtered):
+                seg["bbox_id"] = idx
+
+            op.set_output(
+                num_segments=len(filtered),
+                num_segments_raw=len(result["segments"]),
+            )
+
         return {
             "segments": filtered,
             "metrics": result["metrics"],
@@ -107,24 +125,36 @@ class SAMLamaMode:
                 - metrics:    Dict
                 - image_size: tuple[int, int] — (W, H)
         """
-        result = await self.segmentor.segment_with_prompt(
-            image_bytes,
-            point_coords=point_coords,
-            point_labels=point_labels,
-            bbox=bbox,
-            multimask_output=multimask_output
-        )
-
-        for idx, seg in enumerate(result["segments"]):
-            seg["bbox_id"] = idx
-
         img = Image.open(BytesIO(image_bytes))
+
+        async with log_ml_operation(
+            "sam_segment_prompt",
+            model="sam2.1",
+            device=str(self.device),
+            image_size=img.size,
+            num_points=len(point_coords) if point_coords else 0,
+            has_bbox=bbox is not None,
+            multimask_output=multimask_output,
+        ) as op:
+            result = await self.segmentor.segment_with_prompt(
+                image_bytes,
+                point_coords=point_coords,
+                point_labels=point_labels,
+                bbox=bbox,
+                multimask_output=multimask_output
+            )
+
+            for idx, seg in enumerate(result["segments"]):
+                seg["bbox_id"] = idx
+
+            op.set_output(num_segments=len(result["segments"]))
+
         return {
             "segments": result["segments"],
             "metrics": result["metrics"],
             "image_size": img.size,
         }
-        
+
     async def segment_with_prompts_batch(
         self,
         image_bytes: bytes,
@@ -144,22 +174,31 @@ class SAMLamaMode:
                 - metrics:    Dict
                 - image_size: tuple[int, int] — (W, H)
         """
-        result = await self.segmentor.segment_with_prompts_batch(
-            image_bytes=image_bytes,
-            bboxes=bboxes,
-        )
-
-        for idx, seg in enumerate(result["segments"]):
-            seg["bbox_id"] = idx
-
         img = Image.open(BytesIO(image_bytes))
+
+        async with log_ml_operation(
+            "sam_segment_batch",
+            model="sam2.1",
+            device=str(self.device),
+            image_size=img.size,
+            num_bboxes=len(bboxes),
+        ) as op:
+            result = await self.segmentor.segment_with_prompts_batch(
+                image_bytes=image_bytes,
+                bboxes=bboxes,
+            )
+
+            for idx, seg in enumerate(result["segments"]):
+                seg["bbox_id"] = idx
+
+            op.set_output(num_segments=len(result["segments"]))
+
         return {
             "segments": result["segments"],
             "metrics": result["metrics"],
             "image_size": img.size,
         }
-        
-        
+
     async def segment_by_polygon(
         self,
         image_bytes: bytes,
@@ -175,40 +214,48 @@ class SAMLamaMode:
             Dict: segments (1 element: bbox, area, mask_bytes, mask_id=0,
                 bbox_id=0, source='polygon'), metrics, image_size
         """
-        img = Image.open(BytesIO(image_bytes))
-        W, H = img.size
-
-        mask_bytes = await self.polygon_masker.generate_mask(
-            image_size=(W, H),
-            points=points,
+        with log_execution(
+            "polygon_segment",
+            logger=logger,
+            num_points=len(points),
             smooth=smooth,
-            smoothing_factor=smoothing_factor,
             feather_px=feather_px,
-        )
+        ):
+            img = Image.open(BytesIO(image_bytes))
+            W, H = img.size
 
-        mask_arr = np.array(Image.open(BytesIO(mask_bytes)))
-        ys, xs = np.where(mask_arr > 0)
-        if len(xs) == 0:
-            raise ValueError("Polygon produced an empty mask — check point coordinates")
+            mask_bytes = await self.polygon_masker.generate_mask(
+                image_size=(W, H),
+                points=points,
+                smooth=smooth,
+                smoothing_factor=smoothing_factor,
+                feather_px=feather_px,
+            )
 
-        bbox = {"x1": int(xs.min()), "y1": int(ys.min()), "x2": int(xs.max()), "y2": int(ys.max())}
-        area = int((mask_arr > 0).sum())
+            mask_arr = np.array(Image.open(BytesIO(mask_bytes)))
+            ys, xs = np.where(mask_arr > 0)
+            if len(xs) == 0:
+                logger.warning("polygon_mask_empty", num_points=len(points))
+                raise ValueError("Polygon produced an empty mask — check point coordinates")
 
-        segment = {
-            "mask_id": 0,
-            "bbox_id": 0,
-            "bbox": bbox,
-            "area": area,
-            "source": "polygon",
-            "mask_bytes": mask_bytes,
-        }
+            bbox = {"x1": int(xs.min()), "y1": int(ys.min()), "x2": int(xs.max()), "y2": int(ys.max())}
+            area = int((mask_arr > 0).sum())
+
+            segment = {
+                "mask_id": 0,
+                "bbox_id": 0,
+                "bbox": bbox,
+                "area": area,
+                "source": "polygon",
+                "mask_bytes": mask_bytes,
+            }
 
         return {
             "segments": [segment],
             "metrics": {"num_segments": 1, "total_area_px": area},
             "image_size": (W, H),
         }
-    
+
     async def remove_object(
         self,
         image_bytes: bytes,
@@ -241,29 +288,41 @@ class SAMLamaMode:
                 - result_bytes: bytes — resulting JPEG image
                 - metrics:      Dict
         """
-        if expand_mask_pixels > 0:
-            mask_bytes = await self._dilate_mask(mask_bytes, expand_mask_pixels)
-
-        inpaint_result = await self.inpainter.inpaint(
-            image_bytes=image_bytes,
-            mask_bytes=mask_bytes,
-            mode=InpaintMode.REMOVE,
-            track_metrics=True,
+        async with log_ml_operation(
+            "lama_remove_object",
+            model="lama",
+            device=str(self.device),
+            expand_mask_pixels=expand_mask_pixels,
             ldm_steps=ldm_steps,
             ldm_sampler=ldm_sampler,
             hd_strategy=hd_strategy,
-        )
+            use_edge_blending=use_edge_blending,
+        ) as op:
+            if expand_mask_pixels > 0:
+                mask_bytes = await self._dilate_mask(mask_bytes, expand_mask_pixels)
 
-        result_bytes = inpaint_result["result_bytes"]
-        result_bytes = await _normalize_size(result_bytes, image_bytes)
-
-        if use_edge_blending:
-            result_bytes = await self.edge_blender.auto_blend(
-                original_image_bytes=image_bytes,
-                processed_image_bytes=result_bytes,
+            inpaint_result = await self.inpainter.inpaint(
+                image_bytes=image_bytes,
                 mask_bytes=mask_bytes,
-                expand_mask_pixels=expand_mask_pixels,
+                mode=InpaintMode.REMOVE,
+                track_metrics=True,
+                ldm_steps=ldm_steps,
+                ldm_sampler=ldm_sampler,
+                hd_strategy=hd_strategy,
             )
+
+            result_bytes = inpaint_result["result_bytes"]
+            result_bytes = await _normalize_size(result_bytes, image_bytes)
+
+            if use_edge_blending:
+                result_bytes = await self.edge_blender.auto_blend(
+                    original_image_bytes=image_bytes,
+                    processed_image_bytes=result_bytes,
+                    mask_bytes=mask_bytes,
+                    expand_mask_pixels=expand_mask_pixels,
+                )
+
+            op.set_output(**inpaint_result["metrics"])
 
         return {
             "result_bytes": result_bytes,
@@ -318,7 +377,7 @@ class SAMLamaMode:
             replacement_is_cutout:     If True, skip rembg background removal
                                        and treat replacement_image_bytes as an
                                        already-transparent RGBA cutout that
-                                       only needs resizing to the bbox 
+                                       only needs resizing to the bbox
                                        (default: False)
 
         Returns:
@@ -329,58 +388,70 @@ class SAMLamaMode:
         bbox_w = bbox["x2"] - bbox["x1"]
         bbox_h = bbox["y2"] - bbox["y1"]
 
-        if replacement_is_cutout:
-            replacement_rgba = await asyncio.to_thread(
-                self._resize_rgba_to_bbox, replacement_image_bytes, (bbox_w, bbox_h)
-            )
-        else:
-            replacement_rgba = await self.background_remover.remove_and_resize(
-                replacement_image_bytes, (bbox_w, bbox_h)
-            )
+        async with log_ml_operation(
+            "lama_replace_object",
+            model="lama",
+            device=str(self.device),
+            bbox_w=bbox_w,
+            bbox_h=bbox_h,
+            replacement_is_cutout=replacement_is_cutout,
+            use_color_matching=use_color_matching,
+            use_edge_blending=use_edge_blending,
+            color_match_method=color_match_method,
+        ) as op:
+            if replacement_is_cutout:
+                replacement_rgba = await asyncio.to_thread(
+                    self._resize_rgba_to_bbox, replacement_image_bytes, (bbox_w, bbox_h)
+                )
+            else:
+                replacement_rgba = await self.background_remover.remove_and_resize(
+                    replacement_image_bytes, (bbox_w, bbox_h)
+                )
 
-        if expand_mask_pixels > 0:
-            mask_bytes = await self._dilate_mask(mask_bytes, expand_mask_pixels)
+            if expand_mask_pixels > 0:
+                mask_bytes = await self._dilate_mask(mask_bytes, expand_mask_pixels)
 
-        inpaint_result = await self.inpainter.inpaint(
-            image_bytes=image_bytes,
-            mask_bytes=mask_bytes,
-            mode=InpaintMode.REMOVE,
-            track_metrics=True,
-            ldm_steps=ldm_steps,
-            ldm_sampler=ldm_sampler,
-            hd_strategy=hd_strategy,
-        )
-
-        clean_bytes = await _normalize_size(inpaint_result["result_bytes"], image_bytes)
-
-        result_bytes = self.compositor.compose(
-            clean_bg_bytes=clean_bytes,
-            replacement_rgba_bytes=replacement_rgba,
-            bbox=bbox,
-            edge_softness=0,
-        )
-
-        if use_color_matching:
-            result_bytes = self.color_matcher.match_against_original(
-                result_bytes=result_bytes,
-                original_image_bytes=image_bytes,
-                bbox=bbox,
-                method=color_match_method, # type: ignore
-            )
-
-        if use_edge_blending:
-            result_bytes = await self.edge_blender.auto_blend(
-                original_image_bytes=image_bytes,
-                processed_image_bytes=result_bytes,
+            inpaint_result = await self.inpainter.inpaint(
+                image_bytes=image_bytes,
                 mask_bytes=mask_bytes,
-                expand_mask_pixels=expand_mask_pixels,
+                mode=InpaintMode.REMOVE,
+                track_metrics=True,
+                ldm_steps=ldm_steps,
+                ldm_sampler=ldm_sampler,
+                hd_strategy=hd_strategy,
             )
+
+            clean_bytes = await _normalize_size(inpaint_result["result_bytes"], image_bytes)
+
+            result_bytes = self.compositor.compose(
+                clean_bg_bytes=clean_bytes,
+                replacement_rgba_bytes=replacement_rgba,
+                bbox=bbox,
+                edge_softness=0,
+            )
+
+            if use_color_matching:
+                result_bytes = self.color_matcher.match_against_original(
+                    result_bytes=result_bytes,
+                    original_image_bytes=image_bytes,
+                    bbox=bbox,
+                    method=color_match_method,  # type: ignore
+                )
+
+            if use_edge_blending:
+                result_bytes = await self.edge_blender.auto_blend(
+                    original_image_bytes=image_bytes,
+                    processed_image_bytes=result_bytes,
+                    mask_bytes=mask_bytes,
+                    expand_mask_pixels=expand_mask_pixels,
+                )
+
+            op.set_output(**inpaint_result["metrics"])
 
         return {
             "result_bytes": result_bytes,
             "metrics": inpaint_result["metrics"],
         }
-
 
     async def extract_object(
         self,
@@ -413,10 +484,22 @@ class SAMLamaMode:
                 - object_size:     tuple  — (W, H) of the extracted object
                 - area_pixels:     int    — number of non-transparent pixels
         """
-        return await asyncio.to_thread(
-            self._extract_object_sync,
-            image_bytes, mask_bytes, bbox, padding_pixels, output_format
-        )
+        with log_execution(
+            "extract_object",
+            logger=logger,
+            padding_pixels=padding_pixels,
+            output_format=output_format,
+        ):
+            result = await asyncio.to_thread(
+                self._extract_object_sync,
+                image_bytes, mask_bytes, bbox, padding_pixels, output_format
+            )
+            logger.info(
+                "extract_object_stats",
+                object_size=result["object_size"],
+                area_pixels=result["area_pixels"],
+            )
+        return result
 
     def _extract_object_sync(
         self,
@@ -456,7 +539,6 @@ class SAMLamaMode:
             "area_pixels": area_pixels,
         }
 
-
     async def paste_extracted_object(
         self,
         image_bytes: bytes,
@@ -492,36 +574,43 @@ class SAMLamaMode:
                 - paste_bbox:   Dict  — actual bounding box after scaling and centering
                 - object_size:  tuple — (W, H) after scaling
         """
-        result = await asyncio.to_thread(
-            self._paste_extracted_sync,
-            image_bytes, extracted_bytes, target_bbox, scale
-        )
-
-        result_bytes = result["result_bytes"]
-
-        if use_color_matching:
-            result_bytes = self.color_matcher.match_against_original(
-                result_bytes=result_bytes,
-                original_image_bytes=image_bytes,
-                bbox=result["paste_bbox"],
-                method=color_match_method, # type: ignore
+        with log_execution(
+            "paste_extracted_object",
+            logger=logger,
+            scale=scale,
+            use_color_matching=use_color_matching,
+            use_edge_blending=use_edge_blending,
+        ):
+            result = await asyncio.to_thread(
+                self._paste_extracted_sync,
+                image_bytes, extracted_bytes, target_bbox, scale
             )
 
-        if use_edge_blending:
-            mask_bytes = await self._alpha_to_mask(
-                extracted_bytes=extracted_bytes,
-                paste_bbox=result["paste_bbox"],
-                object_size=result["object_size"],
-                canvas_size=Image.open(BytesIO(image_bytes)).size,
-            )
-            result_bytes = await self.edge_blender.auto_blend(
-                original_image_bytes=image_bytes,
-                processed_image_bytes=result_bytes,
-                mask_bytes=mask_bytes,
-                expand_mask_pixels=6,
-            )
+            result_bytes = result["result_bytes"]
 
-        result["result_bytes"] = result_bytes
+            if use_color_matching:
+                result_bytes = self.color_matcher.match_against_original(
+                    result_bytes=result_bytes,
+                    original_image_bytes=image_bytes,
+                    bbox=result["paste_bbox"],
+                    method=color_match_method,  # type: ignore
+                )
+
+            if use_edge_blending:
+                mask_bytes = await self._alpha_to_mask(
+                    extracted_bytes=extracted_bytes,
+                    paste_bbox=result["paste_bbox"],
+                    object_size=result["object_size"],
+                    canvas_size=Image.open(BytesIO(image_bytes)).size,
+                )
+                result_bytes = await self.edge_blender.auto_blend(
+                    original_image_bytes=image_bytes,
+                    processed_image_bytes=result_bytes,
+                    mask_bytes=mask_bytes,
+                    expand_mask_pixels=6,
+                )
+
+            result["result_bytes"] = result_bytes
         return result
 
     def _paste_extracted_sync(
@@ -643,14 +732,15 @@ async def _normalize_size(processed_bytes: bytes, reference_bytes: bytes) -> byt
 
     return await asyncio.to_thread(sync)
 
+
 import threading
 _sam_mode_instance = None
 _sam_model_lock = threading.Lock()
 
-def get_sam_mode(device: str = "cpu") -> SAMLamaMode:
+def get_sam_mode() -> SAMLamaMode:
     global _sam_mode_instance
     if _sam_mode_instance is None:
         with _sam_model_lock:
             if _sam_mode_instance is None:
-                _sam_mode_instance = SAMLamaMode(device=device)
+                _sam_mode_instance = SAMLamaMode()
     return _sam_mode_instance

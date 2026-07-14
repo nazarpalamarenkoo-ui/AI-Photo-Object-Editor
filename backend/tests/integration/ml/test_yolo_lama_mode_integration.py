@@ -142,7 +142,6 @@ def mode(mock_detector, mock_inpainter, mock_edge_blender, mock_color_matcher,
         edge_blender=mock_edge_blender,
         color_matcher=mock_color_matcher,
         background_remover=mock_background_remover,
-        device='cpu'
     )
     m.compositor = mock_compositor
     return m

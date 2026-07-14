@@ -1,15 +1,20 @@
 from typing import List, Optional
 
+from app.config.settings import settings
+from app.config.device_manager import DeviceManager
 from app.ml.modes.yolo_lama_mode import YoloLamaMode, get_yolo_lama_mode
 from app.ml.modes.sam_lama_mode import SAMLamaMode, get_sam_mode
 from app.ml.experiment_tracker import ExperimentTracker, get_tracker
 from app.ml.pipeline.validator import Validator, get_validator
+from app.core.logging import get_logger
 
 from .detection import DetectionMixin
 from .removal import RemovalMixin
 from .replacement import ReplacementMixin
 from .segmentation import SegmentationMixin
 from .extraction import ExtractionMixin
+
+logger = get_logger(__name__)
 
 
 class MLPipeline(
@@ -51,7 +56,6 @@ class MLPipeline(
         sam_mode: Optional[SAMLamaMode] = None,
         tracker: Optional[ExperimentTracker] = None,
         validator: Optional[Validator] = None,
-        device: str = "cuda",
     ):
         """
         Initialize ML Pipeline.
@@ -63,11 +67,12 @@ class MLPipeline(
             validator:  Validator instance (default: auto-created)
             device:     Device to use ('cuda' or 'cpu')
         """
-        self.device = device
-        self.yolo_lama_mode = mode or get_yolo_lama_mode(device=device)
-        self.sam_lama_mode = sam_mode or get_sam_mode(device=device)
+        self.device = DeviceManager.get(settings.DEFAULT_DEVICE)
+        self.yolo_lama_mode = mode or get_yolo_lama_mode()
+        self.sam_lama_mode = sam_mode or get_sam_mode()
         self.tracker = tracker or get_tracker()
         self.validator = validator or get_validator()
+        logger.info("ml_pipeline_initialized", device=str(self.device))
 
     def get_supported_classes(self) -> List[str]:
         """Return list of supported YOLO classes (80 COCO classes)."""
@@ -77,7 +82,7 @@ import threading
 _pipeline_instance = None
 _pipeline_lock = threading.Lock()
 
-def get_pipeline(device: str = "cuda") -> MLPipeline:
+def get_pipeline() -> MLPipeline:
     """
     Singleton getter for MLPipeline.
 
@@ -91,5 +96,5 @@ def get_pipeline(device: str = "cuda") -> MLPipeline:
     if _pipeline_instance is None:
         with _pipeline_lock:
             if _pipeline_instance is None:
-                _pipeline_instance = MLPipeline(device=device)
+                _pipeline_instance = MLPipeline()
     return _pipeline_instance

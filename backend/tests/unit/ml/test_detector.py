@@ -52,7 +52,6 @@ def detector(mock_tracker, mock_yolo_model):
         
         detector = YOLODetector(
             model_path='yolov10n.pt',
-            device='cpu',
             conf_threshold=0.5,
             tracker=mock_tracker
         )
@@ -72,7 +71,6 @@ def test_detector_init_success(mock_yolo_class):
     
     detector = YOLODetector(
         model_path='yolov10n.pt',
-        device='cpu',
         conf_threshold=0.7,
         tracker=tracker
     )
@@ -85,26 +83,6 @@ def test_detector_init_success(mock_yolo_class):
     mock_yolo_class.assert_called_once_with('yolov10n.pt')
     mock_model.to.assert_called_once_with('cpu')
 
-
-@pytest.mark.unit
-@patch('ultralytics.YOLO')
-def test_detector_init_cuda(mock_yolo_class):
-    """Test detector initialization with CUDA device"""
-    mock_model = MagicMock()
-    mock_model.names = {0: 'person'}
-    mock_model.to = MagicMock(return_value=mock_model)
-    mock_yolo_class.return_value = mock_model
-    
-    tracker = MagicMock()
-    
-    detector = YOLODetector(
-        model_path='yolov10n.pt',
-        device='cuda',
-        tracker=tracker
-    )
-    
-    assert detector.device == 'cuda'
-    mock_model.to.assert_called_once_with('cuda')
 
 
 @pytest.mark.unit
@@ -120,7 +98,6 @@ def test_detector_init_custom_threshold(mock_yolo_class):
     
     detector = YOLODetector(
         model_path='yolov10n.pt',
-        device='cpu',
         conf_threshold=0.9,
         tracker=tracker
     )
@@ -349,36 +326,9 @@ def test_detector_singleton(mock_yolo_class):
     
     tracker = MagicMock()
     
-    detector1 = get_detector(device='cpu', tracker=tracker)
-    detector2 = get_detector(device='cpu', tracker=tracker)
+    detector1 = get_detector(tracker=tracker)
+    detector2 = get_detector(tracker=tracker)
     
-    assert detector1 is detector2
-    
-    # Cleanup
-    app.ml.detector._detector_instance = None
-
-
-@pytest.mark.unit
-@patch('ultralytics.YOLO')
-def test_detector_singleton_different_params(mock_yolo_class):
-    """Test singleton returns same instance even with different params"""
-    from app.ml.detector import get_detector
-    import app.ml.detector
-    
-    # Reset singleton
-    app.ml.detector._detector_instance = None
-    
-    mock_model = MagicMock()
-    mock_model.names = {0: 'person'}
-    mock_model.to = MagicMock(return_value=mock_model)
-    mock_yolo_class.return_value = mock_model
-    
-    tracker = MagicMock()
-    
-    detector1 = get_detector(device='cpu', tracker=tracker)
-    detector2 = get_detector(device='cuda', tracker=tracker)  # Different device!
-    
-    # Should return same instance (singleton)
     assert detector1 is detector2
     
     # Cleanup

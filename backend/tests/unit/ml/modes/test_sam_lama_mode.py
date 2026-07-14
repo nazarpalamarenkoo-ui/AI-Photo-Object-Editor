@@ -165,7 +165,6 @@ def mode(
         color_matcher=mock_color_matcher,
         background_remover=mock_background_remover,
         polygon_masker=mock_polygon_masker,
-        device="cpu",
     )
 
 
@@ -928,17 +927,3 @@ async def test_normalize_size_keeps_dimensions_when_already_matching():
     decoded = Image.open(BytesIO(normalized))
     assert decoded.size == (60, 60)
     assert decoded.format == "JPEG"
-
-
-def test_get_sam_mode_returns_singleton(monkeypatch):
-    module = pytest.importorskip(MODULE_PATH)
-    monkeypatch.setattr(module, "_sam_mode_instance", None)
-
-    fake_instance = MagicMock(name="fake_sam_mode")
-    monkeypatch.setattr(module, "SAMLamaMode", MagicMock(return_value=fake_instance))
-
-    first = module.get_sam_mode(device="cpu")
-    second = module.get_sam_mode(device="cuda")
-
-    assert first is second
-    module.SAMLamaMode.assert_called_once_with(device="cpu")
