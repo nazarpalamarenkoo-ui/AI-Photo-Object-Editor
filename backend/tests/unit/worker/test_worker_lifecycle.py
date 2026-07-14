@@ -1,9 +1,10 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.workers.worker import _build_ml_deps, startup, shutdown, WorkerSettings, ML_DEVICE
+from app.workers.worker import _build_ml_deps, startup, shutdown, WorkerSettings
 
 
+pytestmark = pytest.mark.unit
 @pytest.mark.asyncio
 class TestBuildMlDeps:
     async def test_yields_all_expected_dependencies(self):
@@ -39,7 +40,7 @@ class TestBuildMlDeps:
 
             MockImageRepo.assert_called_once_with(fake_db)
             MockDetectionRepo.assert_called_once_with(fake_db)
-            mock_get_pipeline.assert_called_once_with(device=ML_DEVICE)
+            mock_get_pipeline.assert_called_once_with()
 
     async def test_closes_redis_connections_on_normal_exit(self):
         fake_db = MagicMock()
@@ -104,7 +105,7 @@ class TestStartup:
     async def test_warms_up_pipeline_with_configured_device(self):
         with patch("app.workers.worker.get_pipeline") as mock_get_pipeline:
             await startup(ctx={})
-            mock_get_pipeline.assert_called_once_with(device=ML_DEVICE)
+            mock_get_pipeline.assert_called_once_with()
 
 
 @pytest.mark.asyncio

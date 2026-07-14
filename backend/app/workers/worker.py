@@ -1,4 +1,3 @@
-import logging
 from contextlib import asynccontextmanager
 from typing import List, Optional, Tuple
 
@@ -19,9 +18,11 @@ from app.services.ml.editing_service import EditingService
 from app.services.ml.segmentation_service import SegmentationService
 from app.services.ml.assets_service import AssetService
 
-logger = logging.getLogger("arq.worker")
+from app.core.logging import configure_logging, get_logger, log_job
+ 
+configure_logging()
+logger = get_logger("arq.worker")
 
-ML_DEVICE = getattr(settings, "ML_DEVICE", "cpu")
 
 
 @asynccontextmanager
@@ -36,7 +37,7 @@ async def _build_ml_deps(db):
     redis_assets = RedisAssetsStorage()
     image_repo = ImageRepository(db)
     detection_repo = DetectionRepository(db)
-    pipeline = get_pipeline(device=ML_DEVICE)
+    pipeline = get_pipeline()
 
     try:
         yield {
@@ -54,7 +55,7 @@ async def _build_ml_deps(db):
         await redis_history.close()
         await redis_assets.close()
 
-
+@log_job(queue="segmentation")
 async def segment_objects_task(
     ctx, image_id: int, user_id: int, min_area: int = 500, max_segments: int = 50
 ) -> dict:
@@ -66,7 +67,7 @@ async def segment_objects_task(
                 min_area=min_area, max_segments=max_segments,
             )
 
-
+@log_job(queue="segmentation")
 async def segment_with_prompt_task(
     ctx,
     image_id: int,
@@ -85,7 +86,7 @@ async def segment_with_prompt_task(
                 bbox=bbox, multimask_output=multimask_output,
             )
 
-
+@log_job(queue="segmentation")
 async def segment_by_polygon_task(
     ctx,
     image_id: int,
@@ -103,7 +104,8 @@ async def segment_by_polygon_task(
                 smooth=smooth, smoothing_factor=smoothing_factor,
                 feather_px=feather_px,
             )
-
+            
+@log_job(queue="segmentation")
 async def segment_hybrid_task(
     ctx,
     image_id: int,
@@ -126,6 +128,7 @@ async def segment_hybrid_task(
                 overlap_iou_thresh=overlap_iou_thresh,
             )
             
+@log_job(queue="segmentation")            
 async def sam_remove_object_task(
     ctx,
     image_id: int,
@@ -148,7 +151,7 @@ async def sam_remove_object_task(
                 hd_strategy=hd_strategy,
             )
 
-
+@log_job(queue="segmentation")
 async def sam_replace_object_task(
     ctx,
     image_id: int,
@@ -179,7 +182,7 @@ async def sam_replace_object_task(
                 replacement_is_cutout=replacement_is_cutout,
             )
 
-
+@log_job(queue="inpainting")
 async def remove_object_task(
     ctx,
     image_id: int,
@@ -203,6 +206,7 @@ async def remove_object_task(
             )
 
 
+@log_job(queue="inpainting")
 async def remove_multiple_objects_task(
     ctx,
     image_id: int,
@@ -225,7 +229,7 @@ async def remove_multiple_objects_task(
                 hd_strategy=hd_strategy,
             )
 
-
+@log_job(queue="inpainting")
 async def replace_object_task(
     ctx,
     image_id: int,
@@ -254,7 +258,7 @@ async def replace_object_task(
                 hd_strategy=hd_strategy,
             )
 
-
+@log_job(queue="segmentation")
 async def sam_extract_object_task(
     ctx,
     image_id: int,
@@ -283,13 +287,13 @@ async def startup(ctx):
     equivalent of the lifespan-preload in app. arq calls this before
     processing the first task.
     """
-    logger.info("Warming up ML pipeline (device=%s)...", ML_DEVICE)
-    get_pipeline(device=ML_DEVICE)
-    logger.info("ML pipeline ready.")
+    logger.info("ml_pipeline_warmup_started")
+    get_pipeline()
+    logger.info("ml_pipeline_warmup_finished")
 
 
 async def shutdown(ctx):
-    logger.info("Worker shutting down.")
+    logger.info("worker_shutdown")
 
 
 class WorkerSettings:
