@@ -7,6 +7,9 @@ from app.db.models.user import User
 from app.db.schemas.user import UserResponse, UserUpdate, ChangePassword
 from app.repository.user_repo import UserRepository
 from app.services.user_service import UserService
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
@@ -29,12 +32,19 @@ async def update_me(
 ):
     """Update username or email."""
     try:
-        return await service.update_user(
+        updated = await service.update_user(
             user_id=current_user.id,
             username=body.username,
             email=body.email,
         )
+        logger.info(
+            "user_profile_updated",
+            username_changed=body.username is not None,
+            email_changed=body.email is not None,
+        )
+        return updated
     except ValueError as e:
+        logger.warning("user_profile_update_failed", error=str(e))
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -51,8 +61,10 @@ async def change_password(
             old_password=body.old_password,
             new_password=body.new_password,
         )
+        logger.info("password_changed")
         return {"detail": "Password updated successfully"}
     except ValueError as e:
+        logger.warning("password_change_failed", error=str(e))
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -63,4 +75,5 @@ async def delete_me(
 ):
     """Delete current user account."""
     await service.delete_user(current_user.id)
+    logger.info("user_account_deleted")
     return {"detail": "Account deleted successfully"}

@@ -10,6 +10,9 @@ from app.config.settings import settings
 from app.db.db_connect import get_db
 from app.db.models.user import User
 from app.api.auth.schema import TokenData
+from app.core.logging import get_logger, bind_user
+
+logger = get_logger(__name__)
 
 SECRET_KEY = settings.SECRET_KEY_AUTH
 ALGORITHM = "HS256"
@@ -41,16 +44,23 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub") # type: ignore
         if username is None:
+            logger.warning("auth_token_missing_subject")
             raise credentials_exception
         token_data = TokenData(username=username)
     except JWTError:
+        logger.warning("auth_token_invalid")
         raise credentials_exception
     
     result = await db.execute(select(User).filter(User.username == token_data.username))
     user = result.scalars().first()
 
     if user is None:
+        logger.warning("auth_token_user_not_found", username=token_data.username)
         raise credentials_exception
+
+    # Bind user_id into contextvars so every downstream log line in this
+    # request (services, ML pipeline, repositories) carries it automatically.
+    bind_user(user.id)
 
     return user
 
@@ -59,6 +69,8 @@ async def authenticate_user(db: AsyncSession, email: str, password: str):
     user = result.scalars().first()
 
     if user and verify_password(password, user.password_hash):
+        logger.info("login_succeeded", user_id=user.id)
         return {"user": user}
-    return None
 
+    logger.warning("login_failed", email=email)
+    return None

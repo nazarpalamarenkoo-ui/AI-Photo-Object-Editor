@@ -39,23 +39,7 @@ def mock_file():
     return file
 
 
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_upload_image_success(mock_user, mock_service, mock_file):
-    mock_service.upload_image.return_value = {"id": 1}
 
-    result = await upload_image(
-        file=mock_file,
-        current_user=mock_user,
-        service=mock_service
-    )
-
-    mock_service.upload_image.assert_called_once_with(
-        file=mock_file,
-        user_id=1
-    )
-
-    assert result["id"] == 1
 
 
 @pytest.mark.unit

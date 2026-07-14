@@ -10,6 +10,9 @@ from jose import JWTError, jwt
 from app.config.settings import settings
 from app.api.auth.schema import SignUpArgs
 from app.repository.user_repo import UserRepository
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 mail_config = ConnectionConfig(
     MAIL_USERNAME = settings.MAIL_USERNAME,
@@ -42,12 +45,18 @@ async def send_confirmation_email(token: str, signup_args: SignUpArgs):
         },
         subtype=MessageType.html
     )
-    await fm.send_message(message, template_name='signup_confirmation.html')
+    try:
+        await fm.send_message(message, template_name='signup_confirmation.html')
+        logger.info("confirmation_email_sent", email=signup_args.email)
+    except Exception as e:
+        logger.error("confirmation_email_failed", email=signup_args.email, exc_info=e)
+        raise
 
 
 async def send_reset_password_email(db: AsyncSession, email: EmailStr, token: str):
     user = await UserRepository(db).get_by_email(email)
     if not user:
+        logger.warning("reset_password_email_user_not_found", email=email)
         raise HTTPException(status_code=404, detail="User not found")
 
     subject = f'Image editor service - password recovery for user {user.username}'
@@ -63,7 +72,12 @@ async def send_reset_password_email(db: AsyncSession, email: EmailStr, token: st
         },
         subtype=MessageType.html
     )
-    await fm.send_message(message, template_name='reset_password.html')
+    try:
+        await fm.send_message(message, template_name='reset_password.html')
+        logger.info("reset_password_email_sent", email=email, user_id=user.id)
+    except Exception as e:
+        logger.error("reset_password_email_failed", email=email, user_id=user.id, exc_info=e)
+        raise
 
 
 def generate_password_reset_token(email: EmailStr) -> str:
@@ -76,6 +90,7 @@ def validate_password_reset_token(token: str) -> EmailStr:
         decoded_token = jwt.decode(token, SECRET_KEY, algorithms=ALGORITHM)
         return str(decoded_token["sub"])
     except JWTError:
+        logger.warning("password_reset_token_invalid")
         raise HTTPException(status_code=400, detail="Invalid token")
 
 
@@ -93,4 +108,5 @@ def validate_signup_confirmation_token(token: str) -> SignUpArgs:
         decoded_token = jwt.decode(token, SECRET_KEY, algorithms=ALGORITHM)
         return SignUpArgs(**loads(decoded_token["sub"]))
     except JWTError as e:
+        logger.warning("signup_confirmation_token_invalid", error=str(e))
         raise HTTPException(status_code=400, detail=str(e))

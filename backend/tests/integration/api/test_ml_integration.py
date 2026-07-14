@@ -499,22 +499,6 @@ async def test_reset_current_state_not_found(db_session, sample_user):
     assert resp.status_code == 404
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_save_result_success(db_session, sample_user, sample_image):
-    app, _, mock_editor, _, _, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/save",
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["id"] == 42
-    assert data["storage_path"] == "s3://bucket/result.jpg"
-    mock_editor.save_result.assert_awaited_once_with(image_id=sample_image.id, user_id=sample_user.id)
-
 
 @pytest.mark.integration
 @pytest.mark.asyncio

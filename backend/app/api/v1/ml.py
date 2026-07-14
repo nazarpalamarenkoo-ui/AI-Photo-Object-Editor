@@ -41,6 +41,9 @@ from app.storage.s3_storage import S3Storage
 from app.storage.redis.redis_storage import RedisStorage
 from app.storage.redis.redis_history import RedisHistory
 from app.storage.redis.redis_assets import RedisAssetsStorage
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/ml", tags=["ML"])
 
@@ -164,6 +167,7 @@ async def remove_object_async(
         ldm_sampler=body.ldm.ldm_sampler,
         hd_strategy=body.ldm.hd_strategy,
     )
+    logger.info("ml_job_enqueued", task="remove_object_task", job_id=job.job_id)
     return {"job_id": job.job_id}
 
 
@@ -208,6 +212,7 @@ async def remove_multiple_objects_async(
         ldm_sampler=body.ldm.ldm_sampler,
         hd_strategy=body.ldm.hd_strategy,
     )
+    logger.info("ml_job_enqueued", task="remove_multiple_objects_task", job_id=job.job_id)
     return {"job_id": job.job_id}
 
 
@@ -264,7 +269,28 @@ async def replace_object_async(
         ldm_sampler=body.ldm.ldm_sampler,
         hd_strategy=body.ldm.hd_strategy,
     )
+    logger.info("ml_job_enqueued", task="replace_object_task", job_id=job.job_id)
     return {"job_id": job.job_id}
+
+
+@router.get("/images/{image_id}/current")
+async def get_current_state(
+    image_id: int,
+    current_user: User = Depends(get_current_user),
+    service: EditingService = Depends(get_editor),
+):
+    """
+    Return the presigned URL that reflects the ACTUAL working state of the image
+    (Redis current_state if edits exist, otherwise the original upload).
+
+    The editor page must call this on mount instead of the plain image presigned
+    URL, or a refresh/crash/reconnect will show the untouched original even though
+    the backend still holds — and keeps building on top of — the edited state.
+    """
+    try:
+        return await service.get_current_state(image_id=image_id, user_id=current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=_http_status(e), detail=str(e))
 
 
 @router.post("/images/{image_id}/reset")
@@ -277,6 +303,7 @@ async def reset_current_state(
     try:
         await service._get_image_authorized(image_id, current_user.id)
         await service.reset_current_state(image_id)
+        logger.info("image_state_reset", image_id=image_id)
         return {"detail": "State reset to original image"}
     except ValueError as e:
         raise HTTPException(status_code=_http_status(e), detail=str(e))
@@ -290,7 +317,9 @@ async def save_result(
 ):
     """Persist current working state as a new Image in the workspace."""
     try:
-        return await service.save_result(image_id=image_id, user_id=current_user.id)
+        result = await service.save_result(image_id=image_id, user_id=current_user.id)
+        logger.info("image_result_saved", source_image_id=image_id, new_image_id=result.id)
+        return result
     except ValueError as e:
         raise HTTPException(status_code=_http_status(e), detail=str(e))
 
@@ -364,6 +393,7 @@ async def segment_objects_async(
         min_area=body.min_area,
         max_segments=body.max_segments,
     )
+    logger.info("ml_job_enqueued", task="segment_objects_task", job_id=job.job_id)
     return {"job_id": job.job_id}
 
 
@@ -406,6 +436,7 @@ async def segment_with_prompt_async(
         bbox=bbox_dict,
         multimask_output=body.multimask_output,
     )
+    logger.info("ml_job_enqueued", task="segment_with_prompt_task", job_id=job.job_id)
     return {"job_id": job.job_id}
 
 
@@ -446,6 +477,7 @@ async def segment_by_polygon_async(
         smoothing_factor=body.smoothing_factor,
         feather_px=body.feather_px,
     )
+    logger.info("ml_job_enqueued", task="segment_by_polygon_task", job_id=job.job_id)
     return {"job_id": job.job_id}
 
 @router.post("/images/{image_id}/segment/hybrid", response_model=SegmentResponse)
@@ -487,6 +519,7 @@ async def segment_hybrid_async(
         fallback_max_segments=body.fallback_max_segments,
         overlap_iou_thresh=body.overlap_iou_thresh,
     )
+    logger.info("ml_job_enqueued", task="segment_hybrid_task", job_id=job.job_id)
     return {"job_id": job.job_id}
 
 @router.post("/images/{image_id}/segment/{mask_id}/remove", response_model=MLResultResponse)
@@ -532,6 +565,7 @@ async def sam_remove_object_async(
         ldm_sampler=body.ldm.ldm_sampler,
         hd_strategy=body.ldm.hd_strategy,
     )
+    logger.info("ml_job_enqueued", task="sam_remove_object_task", job_id=job.job_id)
     return {"job_id": job.job_id}
 
 
@@ -619,6 +653,7 @@ async def sam_replace_object_async(
         hd_strategy=body.ldm.hd_strategy,
         replacement_is_cutout=replacement_is_cutout,
     )
+    logger.info("ml_job_enqueued", task="sam_replace_object_task", job_id=job.job_id)
     return {"job_id": job.job_id}
 
 
@@ -661,6 +696,7 @@ async def extract_object_async(
         label=body.label,
         persist_to_s3=body.persist_to_s3,
     )
+    logger.info("ml_job_enqueued", task="sam_extract_object_task", job_id=job.job_id)
     return {"job_id": job.job_id}
 
 
@@ -739,7 +775,9 @@ async def rename_asset(
     service: AssetService = Depends(get_asset),
 ):
     try:
-        return await service.rename_asset(current_user.id, asset_id, body.label)
+        result = await service.rename_asset(current_user.id, asset_id, body.label)
+        logger.info("asset_renamed", asset_id=asset_id, label=body.label)
+        return result
     except ValueError as e:
         raise HTTPException(status_code=_http_status(e), detail=str(e))
 
@@ -752,6 +790,7 @@ async def delete_asset(
 ):
     try:
         await service.delete_asset(current_user.id, asset_id)
+        logger.info("asset_deleted", asset_id=asset_id)
         return {"detail": "Asset deleted"}
     except ValueError as e:
         raise HTTPException(status_code=_http_status(e), detail=str(e))

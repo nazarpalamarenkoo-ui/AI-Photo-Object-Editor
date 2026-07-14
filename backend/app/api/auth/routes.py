@@ -15,6 +15,9 @@ from app.api.auth.auth import create_access_token
 from app.db.db_connect import get_db
 from app.repository.user_repo import UserRepository
 from app.services.user_service import UserService
+from app.core.logging import get_logger, bind_user
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
@@ -30,7 +33,10 @@ async def login(
 ):
     user = await service.authenticate_user(args.email, args.password)
     if not user:
+        logger.warning("login_failed", email=args.email)
         raise HTTPException(status_code=400, detail="Incorrect email or password")
+    bind_user(user.id)
+    logger.info("login_succeeded")
     access_token = create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
 
@@ -41,10 +47,12 @@ async def signup(
     service: UserService = Depends(get_user_service)
 ):
     if await service.user_repo.exists_by_email(signup_args.email):
+        logger.warning("signup_rejected_email_exists", email=signup_args.email)
         raise HTTPException(status_code=400, detail="This user already exists")
 
     token = generate_signup_confirmation_token(signup_args)
     await send_confirmation_email(token, signup_args)
+    logger.info("signup_confirmation_email_sent", email=signup_args.email)
 
     raise HTTPException(status_code=200, detail="Email has been sent")
 
@@ -57,6 +65,7 @@ async def signup_confirmation(
     args = validate_signup_confirmation_token(token)
 
     if await service.user_repo.exists_by_email(args.email):
+        logger.info("signup_confirmation_already_confirmed", email=args.email)
         raise HTTPException(status_code=200, detail="Email has been already confirmed")
 
     user = await service.create_user(
@@ -64,6 +73,8 @@ async def signup_confirmation(
         email=args.email,
         password=args.password
     )
+    bind_user(user.id)
+    logger.info("signup_confirmed", email=args.email)
 
     access_token = create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
@@ -76,6 +87,7 @@ async def recover_password(
 ):
     token = generate_password_reset_token(email)
     await send_reset_password_email(db, email, token)
+    logger.info("password_recovery_email_sent", email=email)
     raise HTTPException(status_code=200, detail="Email has been sent")
 
 
@@ -87,10 +99,13 @@ async def reset_password(
 ):
     user = await service.user_repo.get_by_email(email)
     if not user:
+        logger.warning("password_reset_user_not_found", email=email)
         raise HTTPException(status_code=404, detail="User not found")
 
     from passlib.context import CryptContext
     pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
     await service.user_repo.update_password(user, pwd_context.hash(new_password))
+    bind_user(user.id)
+    logger.info("password_reset_completed")
 
     raise HTTPException(status_code=200, detail="Password updated successfully")

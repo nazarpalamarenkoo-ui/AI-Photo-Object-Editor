@@ -11,6 +11,9 @@ from app.repository.image_repo import ImageRepository
 from app.services.image_service import ImageService
 from app.storage.s3_storage import S3Storage
 from app.storage.redis.redis_storage import RedisStorage
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/images", tags=["Images"])
 
@@ -31,8 +34,10 @@ async def upload_image(
     """Upload image to S3 and save metadata to DB."""
     try:
         image = await service.upload_image(file=file, user_id=current_user.id)
+        logger.info("image_uploaded", image_id=image.id, filename=file.filename)
         return image
     except ValueError as e:
+        logger.warning("image_upload_failed", filename=file.filename, error=str(e))
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -115,5 +120,7 @@ async def delete_image(
     """Delete image from S3, Redis cache and DB."""
     try:
         await service.delete_image(image_id=image_id, user_id=current_user.id)
+        logger.info("image_deleted", image_id=image_id)
     except ValueError as e:
+        logger.warning("image_delete_failed", image_id=image_id, error=str(e))
         raise HTTPException(status_code=404, detail=str(e))

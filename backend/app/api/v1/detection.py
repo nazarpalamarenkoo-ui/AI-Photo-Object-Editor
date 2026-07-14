@@ -10,6 +10,9 @@ from app.repository.detection_repo import DetectionRepository
 from app.repository.image_repo import ImageRepository
 from app.services.detection_service import DetectionService
 from app.storage.redis.redis_storage import RedisStorage
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/detections", tags=["Detections"])
 
@@ -21,6 +24,11 @@ def get_detection_service(db: AsyncSession = Depends(get_db)) -> DetectionServic
         detection_repo=DetectionRepository(db),
         image_repo=ImageRepository(db)
     )
+
+
+def _status_for(e: ValueError) -> int:
+    msg = str(e).lower()
+    return 404 if "not found" in msg else 403 if "unauthorized" in msg else 400
 
 
 @router.get("/images/{image_id}", response_model=List[DetectionResponse])
@@ -38,8 +46,7 @@ async def get_image_detections(
             use_cache=use_cache
         )
     except ValueError as e:
-        status = 404 if "not found" in str(e).lower() else 403 if "unauthorized" in str(e).lower() else 400
-        raise HTTPException(status_code=status, detail=str(e))
+        raise HTTPException(status_code=_status_for(e), detail=str(e))
 
 
 @router.get("/images/{image_id}/bbox/{bbox_id}", response_model=DetectionResponse)
@@ -57,8 +64,7 @@ async def get_detection_by_bbox(
             user_id=current_user.id
         )
     except ValueError as e:
-        status = 404 if "not found" in str(e).lower() else 403 if "unauthorized" in str(e).lower() else 400
-        raise HTTPException(status_code=status, detail=str(e))
+        raise HTTPException(status_code=_status_for(e), detail=str(e))
 
 
 @router.get("/images/{image_id}/stats")
@@ -74,8 +80,7 @@ async def get_detection_stats(
             user_id=current_user.id
         )
     except ValueError as e:
-        status = 404 if "not found" in str(e).lower() else 403 if "unauthorized" in str(e).lower() else 400
-        raise HTTPException(status_code=status, detail=str(e))
+        raise HTTPException(status_code=_status_for(e), detail=str(e))
 
 
 @router.delete("/images/{image_id}")
@@ -90,7 +95,8 @@ async def delete_image_detections(
             image_id=image_id,
             user_id=current_user.id
         )
+        logger.info("image_detections_deleted", image_id=image_id, deleted=count)
         return {"deleted": count}
     except ValueError as e:
-        status = 404 if "not found" in str(e).lower() else 403 if "unauthorized" in str(e).lower() else 400
-        raise HTTPException(status_code=status, detail=str(e))
+        logger.warning("image_detections_delete_failed", image_id=image_id, error=str(e))
+        raise HTTPException(status_code=_status_for(e), detail=str(e))
