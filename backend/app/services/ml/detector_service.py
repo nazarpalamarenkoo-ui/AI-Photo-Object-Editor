@@ -2,6 +2,9 @@ from typing import Dict, List, Optional
 
 from app.db.models.detection import Detection
 from app.services.ml.base_ml_service import BaseMLService
+from app.core.logging import get_logger, log_execution
+
+logger = get_logger(__name__)
 
 
 class DetectorService(BaseMLService):
@@ -38,38 +41,46 @@ class DetectorService(BaseMLService):
         Raises:
             ValueError: If image not found or unauthorized.
         """
-        image = await self._get_image_authorized(image_id, user_id)
-        image_bytes = await self._get_current_image_bytes(image_id, image.storage_path)
-
-        result = await self.pipeline.detect_objects(
-            image_bytes=image_bytes,
+        with log_execution(
+            "service_detect_objects",
+            logger=logger,
+            image_id=image_id,
             conf_threshold=conf_threshold,
-            classes=classes,
-            track_metrics=True,
-        )
+        ):
+            image = await self._get_image_authorized(image_id, user_id)
+            image_bytes = await self._get_current_image_bytes(image_id, image.storage_path)
 
-        detections = result["detections"]
-
-        db_detections = [
-            Detection(
-                image_id=image_id,
-                bbox_id=det["bbox_id"],
-                detected_class=det["detected_class"],
-                confidence=det["confidence"],
-                x1=det["x1"],
-                y1=det["y1"],
-                x2=det["x2"],
-                y2=det["y2"],
+            result = await self.pipeline.detect_objects(
+                image_bytes=image_bytes,
+                conf_threshold=conf_threshold,
+                classes=classes,
+                track_metrics=True,
             )
-            for det in detections
-        ]
 
-        await self.detection_repo.delete_by_image(image_id)
-        await self.redis_storage.delete(f"image:{image_id}:detections")
-        await self.detection_repo.create_many(db_detections)
-        await self.redis_storage.cache_detections(
-            image_id=image_id, detections=detections, ttl=3600
-        )
+            detections = result["detections"]
+
+            db_detections = [
+                Detection(
+                    image_id=image_id,
+                    bbox_id=det["bbox_id"],
+                    detected_class=det["detected_class"],
+                    confidence=det["confidence"],
+                    x1=det["x1"],
+                    y1=det["y1"],
+                    x2=det["x2"],
+                    y2=det["y2"],
+                )
+                for det in detections
+            ]
+
+            await self.detection_repo.delete_by_image(image_id)
+            await self.redis_storage.delete(f"image:{image_id}:detections")
+            await self.detection_repo.create_many(db_detections)
+            await self.redis_storage.cache_detections(
+                image_id=image_id, detections=detections, ttl=3600
+            )
+
+            logger.info("detections_persisted", image_id=image_id, num_detections=len(detections))
 
         return result
 

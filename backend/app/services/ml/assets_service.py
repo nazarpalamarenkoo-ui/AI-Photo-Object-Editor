@@ -4,6 +4,9 @@ from typing import Dict, List, Optional
 from app.services.ml.base_ml_service import BaseMLService
 from app.storage.redis import redis_assets
 from app.storage.redis.redis_assets import RedisAssetsStorage
+from app.core.logging import get_logger, log_execution
+
+logger = get_logger(__name__)
 
 
 class AssetService(BaseMLService):
@@ -44,38 +47,53 @@ class AssetService(BaseMLService):
             A dict with the new asset's ID, optional S3/presigned URLs,
             object size, area in pixels, cropped bbox, and timestamp.
         """
-        image = await self._get_image_authorized(image_id, user_id)
-        segment = await self._get_segment_or_raise(image_id, mask_id)
+        with log_execution(
+            "service_extract_object",
+            logger=logger,
+            image_id=image_id,
+            mask_id=mask_id,
+            persist_to_s3=persist_to_s3,
+        ):
+            image = await self._get_image_authorized(image_id, user_id)
+            segment = await self._get_segment_or_raise(image_id, mask_id)
 
-        image_bytes = await self._get_current_image_bytes(image_id, image.storage_path)
+            image_bytes = await self._get_current_image_bytes(image_id, image.storage_path)
 
-        result = await self.pipeline.sam_extract_object(
-            image_bytes=image_bytes,
-            mask_bytes=segment["mask_bytes"],
-            bbox=segment["bbox"],
-            padding_pixels=padding_pixels,
-            track_metrics=True,
-        )
-
-        s3_url, presigned_url = None, None
-        if persist_to_s3:
-            extract_path = (
-                f"extracted/{user_id}/{image_id}/"
-                f"mask_{mask_id}_{int(datetime.utcnow().timestamp())}.png"
-            )
-            s3_url, presigned_url = await self._upload_result(
-                result["extracted_bytes"], extract_path, content_type="image/png"
+            result = await self.pipeline.sam_extract_object(
+                image_bytes=image_bytes,
+                mask_bytes=segment["mask_bytes"],
+                bbox=segment["bbox"],
+                padding_pixels=padding_pixels,
+                track_metrics=True,
             )
 
-        asset_meta = await self.redis_assets.save_asset(
-            user_id=user_id,
-            extracted_bytes=result["extracted_bytes"],
-            source_image_id=image_id,
-            object_size=result["object_size"],
-            area_pixels=result["area_pixels"],
-            label=label,
-            s3_url=s3_url,
-        )
+            s3_url, presigned_url = None, None
+            if persist_to_s3:
+                extract_path = (
+                    f"extracted/{user_id}/{image_id}/"
+                    f"mask_{mask_id}_{int(datetime.utcnow().timestamp())}.png"
+                )
+                s3_url, presigned_url = await self._upload_result(
+                    result["extracted_bytes"], extract_path, content_type="image/png"
+                )
+
+            asset_meta = await self.redis_assets.save_asset(
+                user_id=user_id,
+                extracted_bytes=result["extracted_bytes"],
+                source_image_id=image_id,
+                object_size=result["object_size"],
+                area_pixels=result["area_pixels"],
+                label=label,
+                s3_url=s3_url,
+            )
+
+            logger.info(
+                "asset_extracted",
+                image_id=image_id,
+                mask_id=mask_id,
+                asset_id=asset_meta["asset_id"],
+                user_id=user_id,
+            )
 
         return {
             "asset_id": asset_meta["asset_id"],
@@ -99,7 +117,9 @@ class AssetService(BaseMLService):
         Returns:
             A list of asset metadata dicts.
         """
-        return await self.redis_assets.list_assets(user_id, limit=limit, offset=offset)
+        assets = await self.redis_assets.list_assets(user_id, limit=limit, offset=offset)
+        logger.debug("assets_listed", user_id=user_id, count=len(assets))
+        return assets
 
     async def get_asset_thumbnail(self, user_id: int, asset_id: str) -> Optional[bytes]:
         """
@@ -146,7 +166,9 @@ class AssetService(BaseMLService):
         """
         meta = await self.redis_assets.rename_asset(user_id, asset_id, label)
         if not meta:
+            logger.warning("asset_not_found", user_id=user_id, asset_id=asset_id)
             raise ValueError("Asset not found")
+        logger.info("asset_renamed", user_id=user_id, asset_id=asset_id, label=label)
         return meta
 
     async def delete_asset(self, user_id: int, asset_id: str) -> None:
@@ -163,7 +185,9 @@ class AssetService(BaseMLService):
         """
         deleted = await self.redis_assets.delete_asset(user_id, asset_id)
         if not deleted:
+            logger.warning("asset_not_found", user_id=user_id, asset_id=asset_id)
             raise ValueError("Asset not found")
+        logger.info("asset_deleted", user_id=user_id, asset_id=asset_id)
 
     async def paste_extracted_object(
         self,
@@ -197,46 +221,64 @@ class AssetService(BaseMLService):
 
         """
         if not asset_id and not extracted_url:
+            logger.warning(
+                "paste_missing_source", image_id=image_id, user_id=user_id
+            )
             raise ValueError("Provide either asset_id or extracted_url")
 
-        image = await self._get_image_authorized(image_id, user_id)
-        image_bytes = await self._get_current_image_bytes(image_id, image.storage_path)
-
-        if asset_id:
-            asset = await self.redis_assets.get_asset(user_id, asset_id, with_bytes=True)
-            if not asset or not asset.get("extracted_bytes"):
-                raise ValueError("Asset not found or expired")
-            extracted_bytes = asset["extracted_bytes"]
-        else:
-            try:
-                extracted_bytes = await self.s3.download(extracted_url)
-            except Exception as e:
-                raise ValueError(f"Failed to download extracted object from S3: {e}")
-
-        await self.redis_history.push_undo_state(
-            image_id, image_bytes, label=f"paste extracted (scale={scale})"
-        )
-
-        result = await self.pipeline.sam_paste_extracted_object(
-            image_bytes=image_bytes,
-            extracted_bytes=extracted_bytes,
-            target_bbox=target_bbox,
+        with log_execution(
+            "service_paste_extracted_object",
+            logger=logger,
+            image_id=image_id,
+            asset_id=asset_id,
             scale=scale,
-            use_color_matching=use_color_matching,
-            use_edge_blending=use_edge_blending,
-            color_match_method=color_match_method,
-            track_metrics=True,
-        )
+        ):
+            image = await self._get_image_authorized(image_id, user_id)
+            image_bytes = await self._get_current_image_bytes(image_id, image.storage_path)
 
-        await self._save_current_state(image_id, result["result_bytes"])
+            if asset_id:
+                asset = await self.redis_assets.get_asset(user_id, asset_id, with_bytes=True)
+                if not asset or not asset.get("extracted_bytes"):
+                    logger.warning(
+                        "asset_not_found_or_expired", user_id=user_id, asset_id=asset_id
+                    )
+                    raise ValueError("Asset not found or expired")
+                extracted_bytes = asset["extracted_bytes"]
+            else:
+                try:
+                    extracted_bytes = await self.s3.download(extracted_url)
+                except Exception as e:
+                    logger.error(
+                        "extracted_object_download_failed",
+                        extracted_url=extracted_url,
+                        exc_info=e,
+                    )
+                    raise ValueError(f"Failed to download extracted object from S3: {e}")
 
-        result_path = (
-            f"results/{user_id}/{image_id}/"
-            f"paste_{int(datetime.utcnow().timestamp())}.jpg"
-        )
-        result_url, presigned_url = await self._upload_result(
-            result["result_bytes"], result_path
-        )
+            await self.redis_history.push_undo_state(
+                image_id, image_bytes, label=f"paste extracted (scale={scale})"
+            )
+
+            result = await self.pipeline.sam_paste_extracted_object(
+                image_bytes=image_bytes,
+                extracted_bytes=extracted_bytes,
+                target_bbox=target_bbox,
+                scale=scale,
+                use_color_matching=use_color_matching,
+                use_edge_blending=use_edge_blending,
+                color_match_method=color_match_method,
+                track_metrics=True,
+            )
+
+            await self._save_current_state(image_id, result["result_bytes"])
+
+            result_path = (
+                f"results/{user_id}/{image_id}/"
+                f"paste_{int(datetime.utcnow().timestamp())}.jpg"
+            )
+            result_url, presigned_url = await self._upload_result(
+                result["result_bytes"], result_path
+            )
 
         return {
             "result_url": result_url,

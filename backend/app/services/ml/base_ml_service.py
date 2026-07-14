@@ -10,6 +10,9 @@ from app.storage.redis.redis_assets import RedisAssetsStorage
 from app.repository.image_repo import ImageRepository
 from app.repository.detection_repo import DetectionRepository
 from app.db.models.image import Image
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class BaseMLService:
@@ -43,15 +46,22 @@ class BaseMLService:
     def pipeline(self) -> MLPipeline:
         """Lazy initialization of the ML pipeline."""
         if self._pipeline is None:
-            self._pipeline = get_pipeline(device=self._device)
+            self._pipeline = get_pipeline()
         return self._pipeline
 
     async def _get_image_authorized(self, image_id: int, user_id: int) -> Image:
         """Fetch image from DB and verify ownership."""
         image = await self.image_repo.get_by_id(image_id)
         if not image:
+            logger.warning("image_not_found", image_id=image_id)
             raise ValueError(f"Image {image_id} not found")
         if image.user_id != user_id:
+            logger.warning(
+                "image_access_unauthorized",
+                image_id=image_id,
+                owner_user_id=image.user_id,
+                requesting_user_id=user_id,
+            )
             raise ValueError("Unauthorized: image belongs to different user")
         return image
 
@@ -62,6 +72,20 @@ class BaseMLService:
         if cached:
             return cached
         return await self.s3.download(storage_path)
+
+    async def _get_current_state_url(self, image_id: int, user_id: int, storage_path: str) -> Tuple[str, bool]:
+        """
+        Return for the image's current working state.
+        """
+        cached = await self.redis_storage.get_cache_image(image_id, suffix="current_state")
+        if cached:
+            url = await self._get_temp_url_from_bytes(
+                image_id=image_id, user_id=user_id, image_bytes=cached, op="current"
+            )
+            return url, True
+
+        url = await self.s3.get_presigned_url(path=storage_path, expiration=3600)
+        return url, False
 
     async def _save_current_state(self, image_id: int, image_bytes: bytes) -> None:
         """Persist working state to Redis (TTL 2 h)."""
@@ -97,10 +121,12 @@ class BaseMLService:
         """Fetch cached segment by mask_id or raise ValueError."""
         segments = await self.redis_storage.get_cached_segments(image_id)
         if not segments:
+            logger.warning("segments_not_cached", image_id=image_id)
             raise ValueError(
                 f"No segments found for image {image_id}. Run segment_objects first."
             )
         segment = next((s for s in segments if s["mask_id"] == mask_id), None)
         if not segment:
+            logger.warning("segment_not_found", image_id=image_id, mask_id=mask_id)
             raise ValueError(f"Segment with mask_id={mask_id} not found.")
         return segment
