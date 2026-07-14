@@ -12,25 +12,16 @@
   font-weight: 600;
   letter-spacing: 0.02em;
   text-transform: uppercase;
-  color: #8b8f98;
-}
-
-:global(.dark) .section-header {
-  color: #9a9fab;
+  color: var(--text-muted);
 }
 
 .badge {
-  background: #eef0f3;
-  color: #5b5f68;
+  background: var(--border-subtle);
+  color: var(--text-secondary);
   border-radius: 10px;
   padding: 1px 7px;
   font-size: 11px;
   font-weight: 600;
-}
-
-:global(.dark) .badge {
-  background: #2a2c33;
-  color: #c4c7cf;
 }
 
 .lib-empty {
@@ -40,25 +31,16 @@
   text-align: center;
   gap: 4px;
   padding: 20px 12px;
-  color: #9a9fab;
-  border: 1px dashed #d8dae0;
+  color: var(--text-muted);
+  border: 1px dashed var(--border);
   border-radius: 10px;
-}
-
-:global(.dark) .lib-empty {
-  border-color: #3a3d46;
-  color: #7d818c;
 }
 
 .lib-empty p {
   margin: 4px 0 0;
   font-size: 12.5px;
   font-weight: 600;
-  color: #6a6e78;
-}
-
-:global(.dark) .lib-empty p {
-  color: #b3b7c1;
+  color: var(--text-secondary);
 }
 
 .lib-empty span {
@@ -67,9 +49,9 @@
 }
 
 .lib-error {
-  background: rgba(255, 107, 107, 0.1);
-  color: #d94848;
-  border: 1px solid rgba(255, 107, 107, 0.35);
+  background: var(--danger-bg);
+  color: var(--danger);
+  border: 1px solid var(--danger);
   border-radius: 8px;
   padding: 6px 10px;
   font-size: 12px;
@@ -83,31 +65,26 @@
 
 .lib-card {
   position: relative;
-  border: 1.5px solid #e2e4e9;
+  border: 1.5px solid var(--border);
   border-radius: 10px;
   padding: 6px;
   cursor: pointer;
-  background: #fff;
+  background: var(--bg-panel);
   transition: border-color 0.15s ease, transform 0.1s ease;
 }
 
 .lib-card:hover {
-  border-color: #b3f000;
+  border-color: var(--accent-bright, var(--accent));
 }
 
 .lib-card.active {
-  border-color: #b3f000;
+  border-color: var(--accent-bright, var(--accent));
   box-shadow: 0 0 0 2px rgba(179, 240, 0, 0.25);
 }
 
 .lib-card.busy {
   opacity: 0.5;
   pointer-events: none;
-}
-
-:global(.dark) .lib-card {
-  background: #24262c;
-  border-color: #383b44;
 }
 
 .lib-thumb {
@@ -117,21 +94,13 @@
   border-radius: 6px;
   overflow: hidden;
   background:
-    linear-gradient(45deg, #eee 25%, transparent 25%) -6px 0 / 12px 12px,
-    linear-gradient(-45deg, #eee 25%, transparent 25%) -6px 0 / 12px 12px,
-    linear-gradient(45deg, transparent 75%, #eee 75%) 0 0 / 12px 12px,
-    linear-gradient(-45deg, transparent 75%, #eee 75%) 0 0 / 12px 12px;
+    linear-gradient(45deg, var(--border-subtle) 25%, transparent 25%) -6px 0 / 12px 12px,
+    linear-gradient(-45deg, var(--border-subtle) 25%, transparent 25%) -6px 0 / 12px 12px,
+    linear-gradient(45deg, transparent 75%, var(--border-subtle) 75%) 0 0 / 12px 12px,
+    linear-gradient(-45deg, transparent 75%, var(--border-subtle) 75%) 0 0 / 12px 12px;
   display: flex;
   align-items: center;
   justify-content: center;
-}
-
-:global(.dark) .lib-thumb {
-  background:
-    linear-gradient(45deg, #33353c 25%, transparent 25%) -6px 0 / 12px 12px,
-    linear-gradient(-45deg, #33353c 25%, transparent 25%) -6px 0 / 12px 12px,
-    linear-gradient(45deg, transparent 75%, #33353c 75%) 0 0 / 12px 12px,
-    linear-gradient(-45deg, transparent 75%, #33353c 75%) 0 0 / 12px 12px;
 }
 
 .lib-thumb img {
@@ -141,7 +110,7 @@
 }
 
 .lib-thumb-placeholder {
-  color: #b3b7c1;
+  color: var(--text-muted);
 }
 
 .lib-check {
@@ -151,8 +120,8 @@
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #b3f000;
-  color: #1a1c20;
+  background: var(--accent-bright, var(--accent));
+  color: var(--btn-primary-text);
   font-size: 10px;
   font-weight: 800;
   display: flex;
@@ -170,20 +139,16 @@
 .lib-label {
   font-size: 11.5px;
   font-weight: 600;
-  color: #2e3038;
+  color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   cursor: text;
 }
 
-:global(.dark) .lib-label {
-  color: #e4e6ea;
-}
-
 .lib-sub {
   font-size: 10px;
-  color: #9a9fab;
+  color: var(--text-muted);
 }
 
 .lib-rename-input {
@@ -191,7 +156,7 @@
   font-size: 11.5px;
   font-weight: 600;
   padding: 2px 4px;
-  border: 1px solid #b3f000;
+  border: 1px solid var(--accent-bright, var(--accent));
   border-radius: 4px;
   outline: none;
   background: transparent;
@@ -221,7 +186,7 @@
 }
 
 .lib-delete:hover {
-  background: #ff6b6b;
+  background: var(--danger);
 }
 
 .lib-load-more,
@@ -229,25 +194,19 @@
   align-self: center;
   font-size: 11.5px;
   font-weight: 600;
-  color: #6a6e78;
+  color: var(--text-secondary);
   background: none;
-  border: 1px solid #d8dae0;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 6px 14px;
   cursor: pointer;
 }
 
 .lib-load-more:hover {
-  border-color: #b3f000;
+  border-color: var(--accent-bright, var(--accent));
 }
 
 .lib-load-more:disabled {
   opacity: 0.6;
   cursor: default;
-}
-
-:global(.dark) .lib-load-more,
-:global(.dark) .lib-loading {
-  color: #b3b7c1;
-  border-color: #3a3d46;
 }
