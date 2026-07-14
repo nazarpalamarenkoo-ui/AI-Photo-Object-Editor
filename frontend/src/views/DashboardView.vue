@@ -32,7 +32,6 @@ import { useDashboard } from '@/composables/useDashboard'
 import DashboardNavbar from '@/components/DashboardNavbar.vue'
 import DashboardGrid from '@/components/DashboardGrid.vue'
 
-import '@/styles/views/dashboardvue.css'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -59,3 +58,6 @@ const {
   formatDate,
 } = useDashboard()
 </script>
+<style scoped>
+@import '@/styles/views/dashboardvue.css';
+</style>

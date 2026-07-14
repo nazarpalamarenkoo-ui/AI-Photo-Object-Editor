@@ -81,5 +81,5 @@ async function submit() {
 </script>
 
 <style scoped>
-@import '../styles/views/registervue.css';
+@import '@/styles/views/registervue.css';
 </style>

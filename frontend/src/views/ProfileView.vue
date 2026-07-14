@@ -248,5 +248,5 @@ function handleLogout() {
 </script>
 
 <style scoped>
-@import '../styles/views/profilevue.css';
+@import '@/styles/views/profilevue.css';
 </style>

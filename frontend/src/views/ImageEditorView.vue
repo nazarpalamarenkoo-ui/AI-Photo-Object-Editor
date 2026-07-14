@@ -124,7 +124,7 @@ import EditorToolbar from '@/components/EditorToolbar.vue'
 import EditorCanvas from '@/components/EditorCanvas.vue'
 import EditorSidebar from '@/components/EditorSidebar.vue'
 
-import '@/styles/views/editorvue.css'
+
 
 const router = useRouter()
 const route = useRoute()
@@ -150,7 +150,7 @@ const mode = ref<EditingMode>('yolo')
 const useHybridSegment = ref(false)
 
 const {
-  image, imageUrl, loading,
+  image, imageUrl, originalImageUrl, loading,
   imageLoaded, naturalSize,
   detections, onImageLoad,
 } = useImageEditor(imageId)
@@ -243,7 +243,7 @@ async function onClearRegions() {
 }
 
 function onReset() {
-  handleReset(imageUrl.value)
+  handleReset(originalImageUrl.value)
   clearSegments()
   clearExtracted()
   setPromptMode(null)
@@ -295,3 +295,6 @@ onMounted(() => {
   onUnmounted(() => document.removeEventListener('keydown', onKeydown))
 })
 </script>
+<style scoped>
+@import '@/styles/views/editorvue.css'
+</style>

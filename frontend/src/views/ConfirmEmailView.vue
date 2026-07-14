@@ -64,5 +64,5 @@ onMounted(async () => {
 </script>
 
 <style>
-@import '../styles/views/registervue.css';
+@import '@/styles/views/registervue.css';
 </style>

@@ -116,6 +116,6 @@ async function handleLogin() {
 </script>
 
 <style scoped>
-@import '../styles/views/registervue.css';
-@import '../styles/views/loginvue.css';
+@import '@/styles/views/registervue.css';
+@import '@/styles/views/loginvue.css';
 </style>

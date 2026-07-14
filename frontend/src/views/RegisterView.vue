@@ -172,5 +172,5 @@ async function handleRegister() {
 </script>
 
 <style scoped>
-@import '../styles/views/registervue.css';
+@import '@/styles/views/registervue.css';
 </style>
