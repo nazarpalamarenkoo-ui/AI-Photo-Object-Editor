@@ -5,6 +5,9 @@ from app.repository.detection_repo import DetectionRepository
 from app.repository.image_repo import ImageRepository
 from app.storage.redis.redis_storage import RedisStorage
 from app.db.models.detection import Detection
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 class DetectionService:
     
@@ -31,19 +34,28 @@ class DetectionService:
         image = await self.image_repo.get_by_id(image_id)
         
         if not image:
+            logger.warning('image_not_found', image_id=image_id)
             raise ValueError(f'Image {image_id} not found')
         
         if image.user_id != user_id:
+            logger.warning(
+                'image_access_unauthorized',
+                image_id=image_id,
+                owner_user_id=image.user_id,
+                requesting_user_id=user_id,
+            )
             raise ValueError('Unauthorized: image belongs to different user')
         
         # Try cache first
         if use_cache:
             cached_detection = await self.redis.get_cached_detections(image_id)
             if cached_detection:
+                logger.debug('detections_cache_hit', image_id=image_id)
                 return cached_detection
         
         # Query DB   
         detections = await self.detection_repo.get_by_image(image_id)
+        logger.debug('detections_loaded_from_db', image_id=image_id, count=len(detections))
         
         # Cache result
         if use_cache and detections:
@@ -71,6 +83,9 @@ class DetectionService:
         )
         
         if not detection:
+            logger.warning(
+                'detection_not_found', image_id=image_id, bbox_id=bbox_id
+            )
             raise ValueError(
                 f'Detection with bbox_id {bbox_id} not found '
                 f'for image {image_id}'
@@ -87,9 +102,16 @@ class DetectionService:
         image = await self.image_repo.get_by_id(image_id)
         
         if not image:
+            logger.warning('image_not_found', image_id=image_id)
             raise ValueError(f'Image {image_id} not found')
         
         if image.user_id != user_id:
+            logger.warning(
+                'image_access_unauthorized',
+                image_id=image_id,
+                owner_user_id=image.user_id,
+                requesting_user_id=user_id,
+            )
             raise ValueError('Unauthorized: image belongs to different user')
         
         # Delete detections
@@ -97,6 +119,8 @@ class DetectionService:
         
         # Invalidate cache
         await self.redis.invalidate_image(image_id)
+        
+        logger.info('detections_deleted', image_id=image_id, count=count)
         
         return count
     

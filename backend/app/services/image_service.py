@@ -1,4 +1,3 @@
-from code import interact
 from typing import List, Optional
 from fastapi import UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,6 +6,9 @@ from app.repository.image_repo import ImageRepository
 from app.storage.s3_storage import S3Storage
 from app.storage.redis.redis_storage import RedisStorage
 from app.db.models.image import Image
+from app.core.logging import get_logger, log_execution
+
+logger = get_logger(__name__)
 
 class ImageService:
     
@@ -24,40 +26,54 @@ class ImageService:
         self.image_repo = image_repo
         
     async def upload_image(self, file: UploadFile, user_id: int) -> Image:
-        self._validate_file(file)
-        
-        storage_path = f'uploads/{user_id}/{file.filename}'
-        
-        file_content = await file.read()  # читаємо один раз
-        
-        s3_url = await self.s3.upload_bytes(
-            data=file_content,
-            path=storage_path,
-            content_type=file.content_type
-        )
-        
-        cache_key = await self.redis.cache_image(
-            image_id=0,
-            image_data=file_content,
-            suffix='original'
-        )
-        
-        image = await self.image_repo.create(
-            filename=file.filename,
-            storage_path=s3_url,
+        with log_execution(
+            "service_upload_image",
+            logger=logger,
             user_id=user_id,
-            cache_key=cache_key
-        )
-        
-        real_cache_key = await self.redis.cache_image(
-            image_id=image.id,
-            image_data=file_content,
-            suffix='original'
-        )
-        
-        image.cache_key = real_cache_key
-        await self.image_repo.update(image)
-        
+            filename=file.filename,
+            content_type=file.content_type,
+        ):
+            self._validate_file(file)
+
+            storage_path = f'uploads/{user_id}/{file.filename}'
+
+            file_content = await file.read()  # читаємо один раз
+
+            s3_url = await self.s3.upload_bytes(
+                data=file_content,
+                path=storage_path,
+                content_type=file.content_type
+            )
+
+            cache_key = await self.redis.cache_image(
+                image_id=0,
+                image_data=file_content,
+                suffix='original'
+            )
+
+            image = await self.image_repo.create(
+                filename=file.filename,
+                storage_path=s3_url,
+                user_id=user_id,
+                cache_key=cache_key
+            )
+
+            real_cache_key = await self.redis.cache_image(
+                image_id=image.id,
+                image_data=file_content,
+                suffix='original'
+            )
+
+            image.cache_key = real_cache_key
+            await self.image_repo.update(image)
+
+            logger.info(
+                "image_uploaded",
+                image_id=image.id,
+                user_id=user_id,
+                size_bytes=len(file_content),
+            )
+
         return image
     
     async def get_image(
@@ -69,9 +85,16 @@ class ImageService:
         image = await self.image_repo.get_by_id(image_id)
         
         if not image:
+            logger.warning('image_not_found', image_id=image_id)
             raise ValueError(f'Image {image_id} not found')
         
         if image.user_id != user_id:
+            logger.warning(
+                'image_access_unauthorized',
+                image_id=image_id,
+                owner_user_id=image.user_id,
+                requesting_user_id=user_id,
+            )
             raise ValueError('Unauthorized: image belongs to different user')
         
         return image
@@ -109,6 +132,8 @@ class ImageService:
         
         # Delete from DB
         success = await self.image_repo.delete(image_id)
+        
+        logger.info('image_deleted', image_id=image_id, user_id=user_id, success=success)
         
         return success
     
@@ -163,6 +188,11 @@ class ImageService:
         # Check file type
         allowed_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']
         if file.content_type not in allowed_types:
+            logger.warning(
+                'upload_rejected_invalid_type',
+                content_type=file.content_type,
+                filename=file.filename,
+            )
             raise ValueError(
                 f"Invalid file type: {file.content_type}. "
                 f"Allowed types: {', '.join(allowed_types)}"
@@ -171,6 +201,11 @@ class ImageService:
         # Check file size (max 10MB)
         max_size = 10 * 1024 * 1024  # 10MB in bytes
         if file.size and file.size > max_size:
+            logger.warning(
+                'upload_rejected_too_large',
+                size_bytes=file.size,
+                filename=file.filename,
+            )
             raise ValueError(
                 f"File too large: {file.size / (1024*1024):.2f}MB. "
                 f"Max size: 10MB"

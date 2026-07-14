@@ -4,6 +4,9 @@ from passlib.context import CryptContext
 
 from app.repository.user_repo import UserRepository
 from app.db.models.user import User
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 class UserService:
     
@@ -28,11 +31,13 @@ class UserService:
         # Check username uniqueness
         existing_user = await self.user_repo.get_by_username(username)
         if existing_user:
+            logger.warning('signup_rejected_username_taken', username=username)
             raise ValueError(f"Username '{username}' already exists")
         
         # Check email uniqueness
         existing_email = await self.user_repo.get_by_email(email)
         if existing_email:
+            logger.warning('signup_rejected_email_taken')
             raise ValueError(f"Email '{email}' already registered")
         
         self._validate_password(password)
@@ -44,6 +49,8 @@ class UserService:
             email = email,
             password_hash = password_hash
         )
+        
+        logger.info('user_created', user_id=user.id, username=username)
         
         return user
     
@@ -57,11 +64,15 @@ class UserService:
         user = await self.user_repo.get_by_email(email)
         
         if not user:
+            logger.warning('login_failed_unknown_email')
             return None
         
         # Verify password
         if not self.pwd_context.verify(password, user.password_hash):
+            logger.warning('login_failed_bad_password', user_id=user.id)
             return None
+        
+        logger.info('login_succeeded', user_id=user.id)
         
         return user
     
@@ -70,6 +81,7 @@ class UserService:
         user = await self.user_repo.get_by_id(user_id)
         
         if not user:
+            logger.warning('user_not_found', user_id=user_id)
             raise ValueError(f"User {user_id} not found")
         
         return user
@@ -101,6 +113,8 @@ class UserService:
         
         user = await self.user_repo.update(user)
         
+        logger.info('user_updated', user_id=user_id)
+        
         return user
     
     async def change_password(
@@ -113,6 +127,7 @@ class UserService:
         user = await self.get_user(user_id)
         
         if not self.pwd_context.verify(old_password, user.password_hash):
+            logger.warning('change_password_failed_wrong_current', user_id=user_id)
             raise ValueError("Incorrect current password")
         
         self._validate_password(new_password) 
@@ -121,6 +136,8 @@ class UserService:
         user.password_hash = self.pwd_context.hash(new_password)
         
         await self.user_repo.update(user)
+        
+        logger.info('password_changed', user_id=user_id)
         
         return True
     
@@ -131,6 +148,8 @@ class UserService:
         
         # Delete user (cascade deletes images and detections)
         success = await self.user_repo.delete(user_id)
+        
+        logger.info('user_deleted', user_id=user_id, success=success)
         
         return success
     
