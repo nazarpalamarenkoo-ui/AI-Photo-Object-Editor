@@ -54,7 +54,7 @@ async def signup(
     await send_confirmation_email(token, signup_args)
     logger.info("signup_confirmation_email_sent", email=signup_args.email)
 
-    raise HTTPException(status_code=200, detail="Email has been sent")
+    return {"detail": "Email has been sent"}
 
 
 @router.post("/signup-confirmation")
@@ -66,7 +66,7 @@ async def signup_confirmation(
 
     if await service.user_repo.exists_by_email(args.email):
         logger.info("signup_confirmation_already_confirmed", email=args.email)
-        raise HTTPException(status_code=200, detail="Email has been already confirmed")
+        return {"detail": "Email has been already confirmed"}
 
     user = await service.create_user(
         username=args.username,
@@ -88,7 +88,7 @@ async def recover_password(
     token = generate_password_reset_token(email)
     await send_reset_password_email(db, email, token)
     logger.info("password_recovery_email_sent", email=email)
-    raise HTTPException(status_code=200, detail="Email has been sent")
+    return {"detail": "Email has been sent"}
 
 
 @router.patch("/reset-password")
@@ -108,4 +108,4 @@ async def reset_password(
     bind_user(user.id)
     logger.info("password_reset_completed")
 
-    raise HTTPException(status_code=200, detail="Password updated successfully")
+    return {"detail": "Password updated successfully"}
