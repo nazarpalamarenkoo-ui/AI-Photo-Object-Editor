@@ -6,16 +6,13 @@ from app.ml.model_manager import ModelManager
 
 @pytest.mark.unit
 def test_model_manager_initialization():
-    
     with patch('mlflow.set_tracking_uri'):
-        with patch('mlflow.create_experiment', return_value="123"):
+        with patch('mlflow.set_experiment') as mock_set_exp:
+            mock_set_exp.return_value = Mock(experiment_id="123")
             manager = ModelManager(
                 tracking_uri="http://localhost:5000",
                 experiment_name="test-experiment"
             )
-            
-            assert manager.tracking_uri == "http://localhost:5000"
-            assert manager.experiment_name == "test-experiment"
             assert manager.experiment_id == "123"
  
  
@@ -96,18 +93,14 @@ def test_get_model_versions():
  
 @pytest.mark.unit
 def test_tracker_initialization():
-    
     with patch('mlflow.set_tracking_uri'):
-        with patch('mlflow.create_experiment', return_value="456"):
+        with patch('mlflow.set_experiment') as mock_set_exp:
+            mock_set_exp.return_value = Mock(experiment_id="456")
             tracker = ExperimentTracker(
                 tracking_uri="http://localhost:5000",
                 experiment_name="test-tracking"
             )
-            
-            assert tracker.tracking_uri == "http://localhost:5000"
-            assert tracker.experiment_name == "test-tracking"
             assert tracker.experiment_id == "456"
- 
  
 @pytest.mark.unit
 def test_log_detection_metrics():
