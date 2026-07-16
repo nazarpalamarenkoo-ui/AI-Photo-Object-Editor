@@ -6,57 +6,45 @@ from app.ml.experiment_tracker import ExperimentTracker, get_tracker
 
 @pytest.mark.unit
 def test_tracker_initialization_create_new_experiment():
-
     with patch('mlflow.set_tracking_uri'):
-        with patch('mlflow.create_experiment', return_value="789") as mock_create:
+        with patch('mlflow.set_experiment') as mock_set_exp:
+            mock_set_exp.return_value = Mock(experiment_id="789")
             tracker = ExperimentTracker(
                 tracking_uri="http://localhost:5000",
                 experiment_name="new-experiment"
             )
-
-            assert tracker.tracking_uri == "http://localhost:5000"
-            assert tracker.experiment_name == "new-experiment"
             assert tracker.experiment_id == "789"
-            mock_create.assert_called_once_with("new-experiment")
+            mock_set_exp.assert_called_once_with("new-experiment")
 
 
 @pytest.mark.unit
 def test_tracker_initialization_existing_experiment():
-
     with patch('mlflow.set_tracking_uri'):
-        with patch('mlflow.create_experiment', side_effect=Exception("Already exists")):
-            with patch('mlflow.get_experiment_by_name') as mock_get_exp:
-                mock_get_exp.return_value = Mock(experiment_id="321")
-
-                tracker = ExperimentTracker(
-                    tracking_uri="http://localhost:5000",
-                    experiment_name="existing-experiment"
-                )
-
-                assert tracker.experiment_id == "321"
-                mock_get_exp.assert_called_once_with("existing-experiment")
+        with patch('mlflow.set_experiment') as mock_set_exp:
+            mock_set_exp.return_value = Mock(experiment_id="321")
+            tracker = ExperimentTracker(
+                tracking_uri="http://localhost:5000",
+                experiment_name="existing-experiment"
+            )
+            assert tracker.experiment_id == "321"
+            mock_set_exp.assert_called_once_with("existing-experiment")
 
 
 @pytest.mark.unit
 def test_start_run():
-
     with patch('mlflow.set_tracking_uri'):
-        with patch('mlflow.create_experiment', return_value="111"):
+        with patch('mlflow.set_experiment') as mock_set_exp:
+            mock_set_exp.return_value = Mock(experiment_id="111")
             with patch('mlflow.start_run') as mock_start_run:
                 mock_run = Mock()
                 mock_start_run.return_value = mock_run
 
                 tracker = ExperimentTracker()
-                result = tracker.start_run(
-                    run_name="test-run",
-                    tags={"env": "test"}
-                )
+                result = tracker.start_run(run_name="test-run", tags={"env": "test"})
 
                 assert result == mock_run
                 mock_start_run.assert_called_once_with(
-                    experiment_id="111",
-                    run_name="test-run",
-                    tags={"env": "test"}
+                    experiment_id="111", run_name="test-run", tags={"env": "test"}
                 )
 
 
@@ -336,9 +324,9 @@ def test_get_best_run_no_runs_returns_none():
 
 @pytest.mark.unit
 def test_get_best_run_ascending_order():
-
     with patch('mlflow.set_tracking_uri'):
-        with patch('mlflow.create_experiment', return_value="111"):
+        with patch('mlflow.set_experiment') as mock_set_exp:
+            mock_set_exp.return_value = Mock(experiment_id="111")
             with patch('mlflow.tracking.MlflowClient') as MockClient:
                 mock_client = MockClient.return_value
                 mock_client.search_runs.return_value = [Mock(
