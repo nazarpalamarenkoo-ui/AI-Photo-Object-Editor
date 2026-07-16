@@ -4,7 +4,6 @@ from datetime import datetime
 
 from app.ml.modes.yolo_lama_mode import YoloLamaMode
 from app.ml.modes.sam_lama_mode import SAMLamaMode
-from app.ml.experiment_tracker import ExperimentTracker
 from app.ml.pipeline.validator import Validator
 from app.core.logging import get_logger, log_execution
 
@@ -14,7 +13,6 @@ logger = get_logger(__name__)
 class RemovalMixin:
     yolo_lama_mode: YoloLamaMode
     sam_lama_mode: SAMLamaMode
-    tracker: ExperimentTracker
     validator: Validator
 
     async def remove_object(
@@ -23,7 +21,6 @@ class RemovalMixin:
         selected_bbox: Dict[str, int],
         expand_mask_pixels: int = 10,
         use_edge_blending: bool = False,
-        track_metrics: bool = True,
         scene_bboxes: Optional[List[Dict[str, int]]] = None,
         ldm_steps: int = 25,
         ldm_sampler: str = "plms",
@@ -37,7 +34,6 @@ class RemovalMixin:
             selected_bbox:       Bounding box to remove {'x1','y1','x2','y2'}
             expand_mask_pixels:  Pixels to expand mask (default: 10)
             use_edge_blending:   Apply edge blending (default: True)
-            track_metrics:       Track metrics to MLflow (default: True)
             scene_bboxes:        Other bboxes in the scene (context for LaMa)
             ldm_steps:           LaMa inference steps (default: 25)
             ldm_sampler:         LaMa sampler (default: 'plms')
@@ -73,13 +69,6 @@ class RemovalMixin:
 
             result["timestamp"] = datetime.now().isoformat()
 
-            if track_metrics:
-                self.tracker.log_metrics({
-                    "operation": "remove_object",
-                    "processing_time": time.time() - start_time,
-                    "expand_mask_pixels": expand_mask_pixels,
-                    "edge_blending": use_edge_blending,
-                })
 
         return result
 
@@ -90,7 +79,6 @@ class RemovalMixin:
         expand_mask_pixels: int = 10,
         use_edge_blending: bool = False,
         scene_bboxes: Optional[List[Dict[str, int]]] = None,
-        track_metrics: bool = True,
         ldm_steps: int = 25,
         ldm_sampler: str = "plms",
         hd_strategy: str = "CROP",
@@ -104,7 +92,6 @@ class RemovalMixin:
             expand_mask_pixels:  Pixels to expand mask (default: 10)
             use_edge_blending:   Apply edge blending (default: True)
             scene_bboxes:        Other bboxes in the scene
-            track_metrics:       Track metrics to MLflow (default: True)
             ldm_steps:           LaMa inference steps (default: 25)
             ldm_sampler:         LaMa sampler (default: 'plms')
             hd_strategy:         HD strategy (default: 'CROP')
@@ -144,13 +131,6 @@ class RemovalMixin:
 
             result["timestamp"] = datetime.now().isoformat()
 
-            if track_metrics:
-                self.tracker.log_metrics({
-                    "operation": "remove_multiple_objects",
-                    "num_objects": len(selected_bboxes),
-                    "processing_time": time.time() - start_time,
-                    "edge_blending": use_edge_blending,
-                })
 
         return result
 
@@ -163,7 +143,6 @@ class RemovalMixin:
         ldm_steps: int = 25,
         ldm_sampler: str = "plms",
         hd_strategy: str = "CROP",
-        track_metrics: bool = True,
     ) -> Dict:
         """
         Remove object using a SAM mask + LaMa inpainting.
@@ -178,7 +157,6 @@ class RemovalMixin:
             ldm_steps:           LaMa inference steps (default: 25)
             ldm_sampler:         LaMa sampler (default: 'plms')
             hd_strategy:         HD strategy (default: 'CROP')
-            track_metrics:       Track metrics to MLflow (default: True)
 
         Returns:
             Dict:
@@ -209,12 +187,5 @@ class RemovalMixin:
 
             result["timestamp"] = datetime.now().isoformat()
 
-            if track_metrics:
-                self.tracker.log_metrics({
-                    "operation": "sam_remove_object",
-                    "processing_time": time.time() - start_time,
-                    "expand_mask_pixels": expand_mask_pixels,
-                    "edge_blending": use_edge_blending,
-                })
 
         return result

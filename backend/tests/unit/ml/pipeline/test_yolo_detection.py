@@ -34,17 +34,12 @@ async def test_detect_objects_adds_timestamp(host, image_bytes):
 
 
 async def test_detect_objects_tracker_called_when_metrics_present(host, image_bytes):
-    await host.detect_objects(image_bytes=image_bytes, conf_threshold=0.6, track_metrics=True)
-
-    host.tracker.log_detection_metrics.assert_called_once()
-    call_kwargs = host.tracker.log_detection_metrics.call_args.kwargs
-    assert call_kwargs["num_detections"] == 1
-    assert call_kwargs["avg_confidence"] == pytest.approx(0.95)
-    assert call_kwargs["conf_threshold"] == 0.6
+    await host.detect_objects(image_bytes=image_bytes, conf_threshold=0.6)
+    host.tracker.log_detection_metrics.assert_not_called()
 
 
 async def test_detect_objects_tracker_not_called_when_track_metrics_false(host, image_bytes):
-    await host.detect_objects(image_bytes=image_bytes, track_metrics=False)
+    await host.detect_objects(image_bytes=image_bytes)
 
     host.tracker.log_detection_metrics.assert_not_called()
 
@@ -55,23 +50,20 @@ async def test_detect_objects_tracker_not_called_when_metrics_missing(host, imag
         "image_size": (640, 480),
     })
 
-    await host.detect_objects(image_bytes=image_bytes, track_metrics=True)
+    await host.detect_objects(image_bytes=image_bytes)
 
     host.tracker.log_detection_metrics.assert_not_called()
 
 
-async def test_detect_objects_empty_detections_avg_confidence_none(host, image_bytes):
+async def test_detect_objects_empty_detections_metrics_passthrough(host, image_bytes):
     host.yolo_lama_mode.detect_objects = AsyncMock(return_value={
         "detections": [],
         "image_size": (640, 480),
         "metrics": {"inference_time": 0.1},
     })
-
-    await host.detect_objects(image_bytes=image_bytes, track_metrics=True)
-
-    call_kwargs = host.tracker.log_detection_metrics.call_args.kwargs
-    assert call_kwargs["num_detections"] == 0
-    assert call_kwargs["avg_confidence"] is None
+    result = await host.detect_objects(image_bytes=image_bytes)
+    assert result["detections"] == []
+    host.tracker.log_detection_metrics.assert_not_called()
 
 
 async def test_detect_objects_invalid_image_raises_validation_error(host, image_bytes):

@@ -42,15 +42,13 @@ async def test_sam_extract_object_calls_sam_lama_mode_with_params(host, image_by
 
 
 async def test_sam_extract_object_tracker_called_when_enabled(host, image_bytes, mask_bytes, bbox):
-    await host.sam_extract_object(image_bytes=image_bytes, mask_bytes=mask_bytes, bbox=bbox, track_metrics=True)
+    await host.sam_extract_object(image_bytes=image_bytes, mask_bytes=mask_bytes, bbox=bbox)
+    host.tracker.log_metrics.assert_not_called()
 
-    payload = host.tracker.log_metrics.call_args.args[0]
-    assert payload["operation"] == "sam_extract_object"
-    assert payload["area_pixels"] == 350
 
 
 async def test_sam_extract_object_tracker_not_called_when_disabled(host, image_bytes, mask_bytes, bbox):
-    await host.sam_extract_object(image_bytes=image_bytes, mask_bytes=mask_bytes, bbox=bbox, track_metrics=False)
+    await host.sam_extract_object(image_bytes=image_bytes, mask_bytes=mask_bytes, bbox=bbox)
 
     host.tracker.log_metrics.assert_not_called()
 
@@ -70,10 +68,6 @@ async def test_sam_extract_object_propagates_mode_exception(host, image_bytes, m
     with pytest.raises(RuntimeError, match="extraction failed"):
         await host.sam_extract_object(image_bytes=image_bytes, mask_bytes=mask_bytes, bbox=bbox)
 
-
-# ---------------------------------------------------------------------------
-# sam_paste_extracted_object
-# ---------------------------------------------------------------------------
 
 async def test_sam_paste_extracted_object_success(host, image_bytes, bbox):
     result = await host.sam_paste_extracted_object(
@@ -118,18 +112,14 @@ async def test_sam_paste_extracted_object_calls_mode_with_params(host, image_byt
 
 
 async def test_sam_paste_extracted_object_tracker_called_when_enabled(host, image_bytes, bbox):
-    await host.sam_paste_extracted_object(
-        image_bytes=image_bytes, extracted_bytes=image_bytes, target_bbox=bbox, track_metrics=True,
-    )
-
-    payload = host.tracker.log_metrics.call_args.args[0]
-    assert payload["operation"] == "sam_paste_extracted_object"
+    await host.sam_paste_extracted_object(image_bytes=image_bytes, extracted_bytes=image_bytes,
+                                           target_bbox=bbox)
+    host.tracker.log_metrics.assert_not_called()
 
 
 async def test_sam_paste_extracted_object_tracker_not_called_when_disabled(host, image_bytes, bbox):
     await host.sam_paste_extracted_object(
-        image_bytes=image_bytes, extracted_bytes=image_bytes, target_bbox=bbox, track_metrics=False,
-    )
+        image_bytes=image_bytes, extracted_bytes=image_bytes, target_bbox=bbox)
 
     host.tracker.log_metrics.assert_not_called()
 

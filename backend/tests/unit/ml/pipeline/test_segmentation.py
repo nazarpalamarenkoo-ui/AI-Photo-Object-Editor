@@ -87,9 +87,6 @@ async def test_sam_segment_with_prompts_batch_single_bbox_still_works(host, imag
     assert "timestamp" in result
 
 
-# ---------------------------------------------------------------------------
-# Validation errors
-# ---------------------------------------------------------------------------
 
 async def test_sam_segment_with_prompts_batch_empty_bboxes_raises(host, image_bytes):
     with pytest.raises(ValueError, match="Provide at least one bbox"):
@@ -147,36 +144,23 @@ async def test_sam_segment_with_prompts_batch_invalid_image_bytes_raises_before_
     host.sam_lama_mode.segment_with_prompts_batch.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# Metrics / tracking
-# ---------------------------------------------------------------------------
-
 async def test_sam_segment_with_prompts_batch_tracker_called_when_enabled(host, image_bytes, bboxes):
-    await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=bboxes, track_metrics=True)
+    await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=bboxes)
+    host.tracker.log_metrics.assert_not_called()
 
-    payload = host.tracker.log_metrics.call_args.args[0]
-    assert payload["operation"] == "sam_segment_prompts_batch"
-    assert payload["num_bboxes"] == len(bboxes)
-    assert payload["num_segments"] == 2
 
 
 async def test_sam_segment_with_prompts_batch_tracker_not_called_when_disabled(host, image_bytes, bboxes):
-    await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=bboxes, track_metrics=False)
+    await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=bboxes)
 
     host.tracker.log_metrics.assert_not_called()
 
 
-async def test_sam_segment_with_prompts_batch_num_bboxes_reflects_input_not_output(
-    host, image_bytes, bboxes
-):
-    """num_bboxes should count the input prompts, independent of how many
-    segments actually came back (some prompts can yield empty masks)."""
-    await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=bboxes)
-
-    payload = host.tracker.log_metrics.call_args.args[0]
-    assert payload["num_bboxes"] == 3
-    assert payload["num_segments"] == 2
-    assert payload["num_bboxes"] != payload["num_segments"]
+async def test_sam_segment_with_prompts_batch_num_bboxes_reflects_input_not_output(host, image_bytes, bboxes):
+    result = await host.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=bboxes)
+    assert len(bboxes) == 3
+    assert len(result["segments"]) == 2
+    assert len(bboxes) != len(result["segments"])
 
 
 async def test_sam_segment_with_prompts_batch_tracker_not_called_on_validation_error(
@@ -187,10 +171,6 @@ async def test_sam_segment_with_prompts_batch_tracker_not_called_on_validation_e
 
     host.tracker.log_metrics.assert_not_called()
 
-
-# ---------------------------------------------------------------------------
-# Error propagation
-# ---------------------------------------------------------------------------
 
 async def test_sam_segment_with_prompts_batch_propagates_mode_exception(host, image_bytes, bboxes):
     host.sam_lama_mode.segment_with_prompts_batch = AsyncMock(

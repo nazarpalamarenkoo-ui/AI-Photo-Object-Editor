@@ -4,7 +4,6 @@ from datetime import datetime
 
 from app.ml.modes.yolo_lama_mode import YoloLamaMode
 from app.ml.modes.sam_lama_mode import SAMLamaMode
-from app.ml.experiment_tracker import ExperimentTracker
 from app.ml.pipeline.validator import Validator
 from app.core.logging import get_logger, log_execution
 
@@ -14,7 +13,6 @@ logger = get_logger(__name__)
 class ReplacementMixin:
     yolo_lama_mode: YoloLamaMode
     sam_lama_mode: SAMLamaMode
-    tracker: ExperimentTracker
     validator: Validator
 
     async def replace_object(
@@ -27,7 +25,6 @@ class ReplacementMixin:
         use_edge_blending: bool = False,
         color_match_method: Literal["mean_std", "histogram", "color_transfer"] = "mean_std",
         scene_bboxes: Optional[List[Dict[str, int]]] = None,
-        track_metrics: bool = True,
         ldm_steps: int = 25,
         ldm_sampler: str = "plms",
         hd_strategy: str = "CROP",
@@ -44,7 +41,6 @@ class ReplacementMixin:
             use_edge_blending:         Apply edge blending (default: True)
             color_match_method:        'mean_std' | 'histogram' | 'color_transfer'
             scene_bboxes:              Other bboxes in the scene
-            track_metrics:             Track metrics to MLflow (default: True)
             ldm_steps:                 LaMa inference steps (default: 25)
             ldm_sampler:               LaMa sampler (default: 'plms')
             hd_strategy:               HD strategy (default: 'CROP')
@@ -85,14 +81,7 @@ class ReplacementMixin:
 
             result["timestamp"] = datetime.now().isoformat()
 
-            if track_metrics:
-                self.tracker.log_metrics({
-                    "operation": "replace_object",
-                    "processing_time": time.time() - start_time,
-                    "color_matching": use_color_matching,
-                    "edge_blending": use_edge_blending,
-                    "color_match_method": color_match_method,
-                })
+
 
         return result
 
@@ -109,7 +98,6 @@ class ReplacementMixin:
         ldm_steps: int = 25,
         ldm_sampler: str = "plms",
         hd_strategy: str = "CROP",
-        track_metrics: bool = True,
         replacement_is_cutout: bool = False,
     ) -> Dict:
         """
@@ -137,7 +125,6 @@ class ReplacementMixin:
             ldm_steps:                 LaMa inference steps (default: 25)
             ldm_sampler:               LaMa sampler (default: 'plms')
             hd_strategy:               HD strategy (default: 'CROP')
-            track_metrics:             Track metrics to MLflow (default: True)
             replacement_is_cutout:     True when replacement_image_bytes is
                                        an already-transparent RGBA asset from
                                        the asset library rather than an
@@ -183,14 +170,5 @@ class ReplacementMixin:
 
             result["timestamp"] = datetime.now().isoformat()
 
-            if track_metrics:
-                self.tracker.log_metrics({
-                    "operation": "sam_replace_object",
-                    "processing_time": time.time() - start_time,
-                    "color_matching": use_color_matching,
-                    "edge_blending": use_edge_blending,
-                    "color_match_method": color_match_method,
-                    "replacement_is_cutout": replacement_is_cutout,
-                })
 
         return result

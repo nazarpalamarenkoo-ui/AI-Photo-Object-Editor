@@ -3,7 +3,6 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 
 from app.ml.modes.sam_lama_mode import SAMLamaMode
-from app.ml.experiment_tracker import ExperimentTracker
 from app.ml.pipeline.validator import Validator
 from app.core.logging import get_logger, log_execution
 
@@ -12,7 +11,6 @@ logger = get_logger(__name__)
 
 class SegmentationMixin:
     sam_lama_mode: SAMLamaMode
-    tracker: ExperimentTracker
     validator: Validator
 
     async def sam_segment_objects(
@@ -20,7 +18,6 @@ class SegmentationMixin:
         image_bytes: bytes,
         min_area: int = 500,
         max_segments: int = 50,
-        track_metrics: bool = True,
     ) -> Dict:
         """
         Auto-segmentation of the entire image using SAM2 (no prompts).
@@ -29,8 +26,7 @@ class SegmentationMixin:
             image_bytes:    Input image bytes
             min_area:       Minimum segment area in pixels (noise filter, default: 500)
             max_segments:   Maximum number of segments in response (default: 50)
-            track_metrics:  Track metrics to MLflow (default: True)
-
+            
         Returns:
             Dict:
                 - segments:    List[Dict] — bbox, area, mask_bytes, mask_id, bbox_id,
@@ -57,13 +53,6 @@ class SegmentationMixin:
 
             result["timestamp"] = datetime.now().isoformat()
 
-            if track_metrics:
-                self.tracker.log_metrics({
-                    "operation": "sam_segment_auto",
-                    "num_segments": len(result["segments"]),
-                    "processing_time": time.time() - start_time,
-                    "min_area": min_area,
-                })
 
         return result
 
@@ -73,7 +62,6 @@ class SegmentationMixin:
         point_coords: Optional[List[Tuple[int, int]]] = None,
         point_labels: Optional[List[int]] = None,
         bbox: Optional[Dict[str, int]] = None,
-        track_metrics: bool = True,
         multimask_output: Optional[bool] = None
     ) -> Dict:
         """
@@ -86,7 +74,6 @@ class SegmentationMixin:
             point_coords:   List of points [(x, y), ...]
             point_labels:   1 = foreground, 0 = background for each point
             bbox:           {'x1','y1','x2','y2'} — used as a spatial prompt
-            track_metrics:  Track metrics to MLflow (default: True)
 
         Returns:
             Dict:
@@ -127,14 +114,6 @@ class SegmentationMixin:
 
             result["timestamp"] = datetime.now().isoformat()
 
-            if track_metrics:
-                self.tracker.log_metrics({
-                    "operation": "sam_segment_prompt",
-                    "num_segments": len(result["segments"]),
-                    "processing_time": time.time() - start_time,
-                    "has_points": point_coords is not None,
-                    "has_bbox": bbox is not None,
-                })
 
         return result
 
@@ -142,7 +121,6 @@ class SegmentationMixin:
         self,
         image_bytes: bytes,
         bboxes: List[Dict[str, int]],
-        track_metrics: bool = True,
     ) -> Dict:
         """
         Batched box-prompt segmentation using SAM2 — one image-encoder
@@ -150,8 +128,7 @@ class SegmentationMixin:
 
         Args:
             image_bytes:    Input image bytes
-            bboxes:         List of {'x1','y1','x2','y2'} SAM2 box prompts
-            track_metrics:  Track metrics to MLflow (default: True)
+            bboxes:         List of {'x1','y1','x2','y2'} SAM2 box prompt
 
         Returns:
             Dict:
@@ -187,13 +164,6 @@ class SegmentationMixin:
 
             result["timestamp"] = datetime.now().isoformat()
 
-            if track_metrics:
-                self.tracker.log_metrics({
-                    "operation": "sam_segment_prompts_batch",
-                    "num_bboxes": len(bboxes),
-                    "num_segments": len(result["segments"]),
-                    "processing_time": time.time() - start_time,
-                })
 
         return result
 
@@ -204,7 +174,6 @@ class SegmentationMixin:
         smooth: bool = True,
         smoothing_factor: float = 0.0,
         feather_px: int = 0,
-        track_metrics: bool = True,
     ) -> Dict:
         """
         Exact segmentation by polygon points (lasso), without SAM2 —
@@ -241,11 +210,5 @@ class SegmentationMixin:
 
             result["timestamp"] = datetime.now().isoformat()
 
-            if track_metrics:
-                self.tracker.log_metrics({
-                    "operation": "sam_segment_polygon",
-                    "num_points": len(points),
-                    "processing_time": time.time() - start_time,
-                })
 
         return result

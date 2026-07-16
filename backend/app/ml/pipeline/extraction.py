@@ -3,7 +3,6 @@ from typing import Dict, Literal, Optional, Tuple
 from datetime import datetime
 
 from app.ml.modes.sam_lama_mode import SAMLamaMode
-from app.ml.experiment_tracker import ExperimentTracker
 from app.ml.pipeline.validator import Validator
 from app.core.logging import get_logger, log_execution
 
@@ -12,7 +11,6 @@ logger = get_logger(__name__)
 
 class ExtractionMixin:
     sam_lama_mode: SAMLamaMode
-    tracker: ExperimentTracker
     validator: Validator
 
     async def sam_extract_object(
@@ -22,7 +20,6 @@ class ExtractionMixin:
         bbox: Dict[str, int],
         padding_pixels: int = 8,
         output_format: str = "PNG",
-        track_metrics: bool = True,
     ) -> Dict:
         """
         Extract an object as an RGBA image using a SAM mask.
@@ -35,7 +32,6 @@ class ExtractionMixin:
             bbox:            Segment bbox {'x1','y1','x2','y2'}
             padding_pixels:  Padding around bbox when cropping (default: 8)
             output_format:   Output format: 'PNG' or 'WEBP' (default: 'PNG')
-            track_metrics:   Track metrics to MLflow (default: True)
 
         Returns:
             Dict:
@@ -71,13 +67,6 @@ class ExtractionMixin:
 
             result["timestamp"] = datetime.now().isoformat()
 
-            if track_metrics:
-                self.tracker.log_metrics({
-                    "operation": "sam_extract_object",
-                    "processing_time": time.time() - start_time,
-                    "area_pixels": result.get("area_pixels", 0),
-                    "padding_pixels": padding_pixels,
-                })
 
         return result
 
@@ -90,7 +79,6 @@ class ExtractionMixin:
         use_color_matching: bool = False,
         use_edge_blending: bool = False,
         color_match_method: Literal["mean_std", "histogram", "color_transfer"] = "color_transfer",
-        track_metrics: bool = True,
     ) -> Dict:
         """
         Paste a previously extracted RGBA object into a target image.
@@ -107,7 +95,6 @@ class ExtractionMixin:
             use_color_matching:  Apply color correction (default: True)
             use_edge_blending:   Smooth alpha boundaries (default: True)
             color_match_method:  'mean_std' | 'histogram' | 'color_transfer'
-            track_metrics:       Track metrics to MLflow (default: True)
 
         Returns:
             Dict:
@@ -144,13 +131,5 @@ class ExtractionMixin:
 
             result["timestamp"] = datetime.now().isoformat()
 
-            if track_metrics:
-                self.tracker.log_metrics({
-                    "operation": "sam_paste_extracted_object",
-                    "processing_time": time.time() - start_time,
-                    "scale": scale,
-                    "color_matching": use_color_matching,
-                    "edge_blending": use_edge_blending,
-                })
 
         return result

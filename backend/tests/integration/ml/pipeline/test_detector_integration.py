@@ -65,26 +65,8 @@ class TestDetectObjects:
         assert call_kwargs["conf_threshold"] == 0.8
         assert call_kwargs["classes"] == ["car"]
 
-    async def test_computes_average_confidence(self, detector, image_bytes, tracker):
-        await detector.detect_objects(image_bytes=image_bytes)
-
-        call_kwargs = tracker.log_detection_metrics.call_args.kwargs
-        assert call_kwargs["avg_confidence"] == pytest.approx((0.9 + 0.7) / 2)
-        assert call_kwargs["num_detections"] == 2
-
-    async def test_avg_confidence_none_when_no_detections(self, detector, image_bytes, yolo_lama_mode, tracker):
-        yolo_lama_mode.detect_objects = AsyncMock(return_value={
-            "detections": [], "image_size": (640, 480), "metrics": {"inference_time": 0.1},
-        })
-
-        await detector.detect_objects(image_bytes=image_bytes)
-
-        call_kwargs = tracker.log_detection_metrics.call_args.kwargs
-        assert call_kwargs["avg_confidence"] is None
-        assert call_kwargs["num_detections"] == 0
-
     async def test_track_metrics_false_skips_tracker(self, detector, image_bytes, tracker):
-        await detector.detect_objects(image_bytes=image_bytes, track_metrics=False)
+        await detector.detect_objects(image_bytes=image_bytes)
         tracker.log_detection_metrics.assert_not_called()
 
     async def test_no_metrics_key_skips_tracker(self, detector, image_bytes, yolo_lama_mode, tracker):

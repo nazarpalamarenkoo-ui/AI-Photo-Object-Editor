@@ -80,15 +80,6 @@ class TestReplaceObject:
         call_kwargs = yolo_lama_mode.replace_object.call_args.kwargs
         assert call_kwargs["color_match_method"] == "histogram"
 
-    async def test_logs_color_matching_metrics(self, replacer, image_bytes, bbox, tracker):
-        await replacer.replace_object(
-            image_bytes=image_bytes, selected_bbox=bbox, replacement_image_bytes=image_bytes,
-            use_color_matching=False, use_edge_blending=False,
-        )
-        payload = tracker.log_metrics.call_args.args[0]
-        assert payload["color_matching"] is False
-        assert payload["edge_blending"] is False
-
     async def test_raises_on_invalid_replacement_bytes(
         self, replacer, image_bytes, bbox, validator, yolo_lama_mode
     ):

@@ -99,7 +99,6 @@ async def test_detect_objects_orchestration(pipeline, image_bytes, validator, yo
 
     validator.validate_image_bytes.assert_called_once_with(image_bytes)
     yolo_lama_mode.detect_objects.assert_called_once()
-    tracker.log_detection_metrics.assert_called_once()
     assert result["detections"][0]["class"] == "car"
     assert "timestamp" in result
 
@@ -110,7 +109,6 @@ async def test_remove_object_orchestration(pipeline, image_bytes, bbox, validato
     validator.validate_image_bytes.assert_called_once_with(image_bytes)
     validator.validate_bbox.assert_called_once_with(bbox)
     yolo_lama_mode.remove_object.assert_called_once()
-    tracker.log_metrics.assert_called_once()
     assert result["result_bytes"] == b"removed"
 
 
@@ -118,8 +116,6 @@ async def test_remove_multiple_objects_orchestration(pipeline, image_bytes, bbox
     result = await pipeline.remove_multiple_objects(image_bytes=image_bytes, selected_bboxes=[bbox, bbox])
 
     yolo_lama_mode.remove_multiple_objects.assert_called_once()
-    payload = tracker.log_metrics.call_args.args[0]
-    assert payload["num_objects"] == 2
     assert result["result_bytes"] == b"removed_multi"
 
 
@@ -130,7 +126,6 @@ async def test_replace_object_orchestration(pipeline, image_bytes, bbox, validat
 
     assert validator.validate_image_bytes.call_count == 2
     yolo_lama_mode.replace_object.assert_called_once()
-    tracker.log_metrics.assert_called_once()
     assert result["result_bytes"] == b"replaced"
 
 
@@ -138,7 +133,6 @@ async def test_sam_segment_objects_orchestration(pipeline, image_bytes, sam_lama
     result = await pipeline.sam_segment_objects(image_bytes=image_bytes)
 
     sam_lama_mode.segment_objects.assert_called_once()
-    tracker.log_metrics.assert_called_once()
     assert len(result["segments"]) == 1
 
 

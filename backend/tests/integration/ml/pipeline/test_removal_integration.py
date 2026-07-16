@@ -84,7 +84,7 @@ class TestRemoveObject:
         assert call_kwargs["hd_strategy"] == "RESIZE"
 
     async def test_track_metrics_false_skips_tracker(self, remover, image_bytes, bbox, tracker):
-        await remover.remove_object(image_bytes=image_bytes, selected_bbox=bbox, track_metrics=False)
+        await remover.remove_object(image_bytes=image_bytes, selected_bbox=bbox)
         tracker.log_metrics.assert_not_called()
 
     async def test_raises_on_invalid_bbox(self, remover, image_bytes, bbox, validator, yolo_lama_mode):
@@ -123,13 +123,6 @@ class TestRemoveMultipleObjects:
             await remover.remove_multiple_objects(image_bytes=image_bytes, selected_bboxes=[bbox, bad_bbox])
 
         yolo_lama_mode.remove_multiple_objects.assert_not_called()
-
-    async def test_logs_num_objects_metric(self, remover, image_bytes, bbox, tracker):
-        await remover.remove_multiple_objects(image_bytes=image_bytes, selected_bboxes=[bbox, bbox, bbox])
-
-        payload = tracker.log_metrics.call_args.args[0]
-        assert payload["num_objects"] == 3
-        assert payload["operation"] == "remove_multiple_objects"
 
     async def test_propagates_mode_exception(self, remover, image_bytes, bbox, yolo_lama_mode, tracker):
         yolo_lama_mode.remove_multiple_objects = AsyncMock(side_effect=RuntimeError("batch failed"))

@@ -137,20 +137,9 @@ class TestSamSegmentWithPromptsBatch:
         validator.validate_bbox.assert_not_called()
         sam_lama_mode.segment_with_prompts_batch.assert_not_called()
 
-    async def test_logs_num_bboxes_and_num_segments_metrics(
-        self, segmenter, image_bytes, bboxes, tracker
-    ):
-        await segmenter.sam_segment_with_prompts_batch(image_bytes=image_bytes, bboxes=bboxes)
-
-        payload = tracker.log_metrics.call_args.args[0]
-        assert payload["operation"] == "sam_segment_prompts_batch"
-        assert payload["num_bboxes"] == len(bboxes)
-        assert payload["num_segments"] == 2
-
     async def test_track_metrics_false_skips_tracker(self, segmenter, image_bytes, bboxes, tracker):
         await segmenter.sam_segment_with_prompts_batch(
-            image_bytes=image_bytes, bboxes=bboxes, track_metrics=False
-        )
+            image_bytes=image_bytes, bboxes=bboxes)
         tracker.log_metrics.assert_not_called()
 
     async def test_propagates_mode_exception(self, segmenter, image_bytes, bboxes, sam_lama_mode, tracker):
@@ -176,6 +165,4 @@ class TestSamSegmentWithPromptsBatch:
         sam_lama_mode.segment_with_prompts_batch.assert_called_once_with(
             image_bytes=image_bytes, bboxes=single,
         )
-        payload = tracker.log_metrics.call_args.args[0]
-        assert payload["num_bboxes"] == 1
         assert "timestamp" in result

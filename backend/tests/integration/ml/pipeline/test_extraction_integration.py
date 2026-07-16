@@ -85,24 +85,6 @@ class TestSamExtractObject:
         call_kwargs = sam_lama_mode.extract_object.call_args.kwargs
         assert call_kwargs["output_format"] == "WEBP"
 
-    async def test_logs_area_pixels_metric(self, extractor, image_bytes, mask_bytes, bbox, tracker):
-        await extractor.sam_extract_object(image_bytes=image_bytes, mask_bytes=mask_bytes, bbox=bbox)
-        payload = tracker.log_metrics.call_args.args[0]
-        assert payload["area_pixels"] == 25
-
-    async def test_area_pixels_defaults_to_zero_when_missing(
-        self, extractor, image_bytes, mask_bytes, bbox, sam_lama_mode, tracker
-    ):
-        sam_lama_mode.extract_object = AsyncMock(return_value={
-            "extracted_bytes": b"extracted", "cropped_bbox": bbox,
-            "original_size": (640, 480), "object_size": (5, 5),
-        })
-
-        await extractor.sam_extract_object(image_bytes=image_bytes, mask_bytes=mask_bytes, bbox=bbox)
-
-        payload = tracker.log_metrics.call_args.args[0]
-        assert payload["area_pixels"] == 0
-
     async def test_raises_on_invalid_mask(self, extractor, image_bytes, mask_bytes, bbox, validator, sam_lama_mode):
         validator.validate_mask_bytes.side_effect = ValueError("Invalid mask bytes")
 
@@ -151,16 +133,6 @@ class TestSamPasteExtractedObject:
         )
         call_kwargs = sam_lama_mode.paste_extracted_object.call_args.kwargs
         assert call_kwargs["color_match_method"] == "histogram"
-
-    async def test_logs_scale_and_matching_flags(self, extractor, image_bytes, bbox, tracker):
-        await extractor.sam_paste_extracted_object(
-            image_bytes=image_bytes, extracted_bytes=image_bytes, target_bbox=bbox,
-            scale=1.5, use_color_matching=False, use_edge_blending=False,
-        )
-        payload = tracker.log_metrics.call_args.args[0]
-        assert payload["scale"] == 1.5
-        assert payload["color_matching"] is False
-        assert payload["edge_blending"] is False
 
     async def test_propagates_mode_exception(self, extractor, image_bytes, bbox, sam_lama_mode, tracker):
         sam_lama_mode.paste_extracted_object = AsyncMock(side_effect=RuntimeError("paste crashed"))

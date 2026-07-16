@@ -49,20 +49,14 @@ async def test_replace_object_adds_timestamp(host, image_bytes, bbox):
 
 
 async def test_replace_object_tracker_called_when_enabled(host, image_bytes, bbox):
-    await host.replace_object(
-        image_bytes=image_bytes, selected_bbox=bbox, replacement_image_bytes=image_bytes,
-        track_metrics=True,
-    )
-
-    payload = host.tracker.log_metrics.call_args.args[0]
-    assert payload["operation"] == "replace_object"
+    await host.replace_object(image_bytes=image_bytes, selected_bbox=bbox,
+                               replacement_image_bytes=image_bytes)
+    host.tracker.log_metrics.assert_not_called()
 
 
 async def test_replace_object_tracker_not_called_when_disabled(host, image_bytes, bbox):
     await host.replace_object(
-        image_bytes=image_bytes, selected_bbox=bbox, replacement_image_bytes=image_bytes,
-        track_metrics=False,
-    )
+        image_bytes=image_bytes, selected_bbox=bbox, replacement_image_bytes=image_bytes)
 
     host.tracker.log_metrics.assert_not_called()
 
@@ -87,9 +81,6 @@ async def test_replace_object_propagates_mode_exception(host, image_bytes, bbox)
         )
 
 
-# ---------------------------------------------------------------------------
-# sam_replace_object
-# ---------------------------------------------------------------------------
 
 async def test_sam_replace_object_success(host, image_bytes, mask_bytes, bbox):
     result = await host.sam_replace_object(
@@ -125,19 +116,15 @@ async def test_sam_replace_object_calls_sam_lama_mode_with_params(host, image_by
 
 
 async def test_sam_replace_object_tracker_called_when_enabled(host, image_bytes, mask_bytes, bbox):
-    await host.sam_replace_object(
-        image_bytes=image_bytes, mask_bytes=mask_bytes, bbox=bbox,
-        replacement_image_bytes=image_bytes, track_metrics=True,
-    )
-
-    host.tracker.log_metrics.assert_called_once()
+    await host.sam_replace_object(image_bytes=image_bytes, mask_bytes=mask_bytes, bbox=bbox,
+                                   replacement_image_bytes=image_bytes)
+    host.tracker.log_metrics.assert_not_called()
 
 
 async def test_sam_replace_object_tracker_not_called_when_disabled(host, image_bytes, mask_bytes, bbox):
     await host.sam_replace_object(
         image_bytes=image_bytes, mask_bytes=mask_bytes, bbox=bbox,
-        replacement_image_bytes=image_bytes, track_metrics=False,
-    )
+        replacement_image_bytes=image_bytes)
 
     host.tracker.log_metrics.assert_not_called()
 

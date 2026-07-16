@@ -43,15 +43,12 @@ async def test_remove_object_adds_timestamp(host, image_bytes, bbox):
 
 
 async def test_remove_object_tracker_called_when_enabled(host, image_bytes, bbox):
-    await host.remove_object(image_bytes=image_bytes, selected_bbox=bbox, track_metrics=True)
-
-    host.tracker.log_metrics.assert_called_once()
-    payload = host.tracker.log_metrics.call_args.args[0]
-    assert payload["operation"] == "remove_object"
+    await host.remove_object(image_bytes=image_bytes, selected_bbox=bbox)
+    host.tracker.log_metrics.assert_not_called() 
 
 
 async def test_remove_object_tracker_not_called_when_disabled(host, image_bytes, bbox):
-    await host.remove_object(image_bytes=image_bytes, selected_bbox=bbox, track_metrics=False)
+    await host.remove_object(image_bytes=image_bytes, selected_bbox=bbox)
 
     host.tracker.log_metrics.assert_not_called()
 
@@ -71,10 +68,6 @@ async def test_remove_object_propagates_mode_exception(host, image_bytes, bbox):
     with pytest.raises(RuntimeError, match="lama failed"):
         await host.remove_object(image_bytes=image_bytes, selected_bbox=bbox)
 
-
-# ---------------------------------------------------------------------------
-# remove_multiple_objects
-# ---------------------------------------------------------------------------
 
 async def test_remove_multiple_objects_success(host, image_bytes, bbox):
     result = await host.remove_multiple_objects(image_bytes=image_bytes, selected_bboxes=[bbox])
@@ -106,16 +99,12 @@ async def test_remove_multiple_objects_invalid_bbox_in_list_raises(host, image_b
 
 
 async def test_remove_multiple_objects_tracker_called_with_num_objects(host, image_bytes, bbox):
-    bboxes = [bbox, bbox]
-
-    await host.remove_multiple_objects(image_bytes=image_bytes, selected_bboxes=bboxes, track_metrics=True)
-
-    payload = host.tracker.log_metrics.call_args.args[0]
-    assert payload["num_objects"] == 2
+    await host.remove_multiple_objects(image_bytes=image_bytes, selected_bboxes=[bbox, bbox])
+    host.tracker.log_metrics.assert_not_called()
 
 
 async def test_remove_multiple_objects_tracker_not_called_when_disabled(host, image_bytes, bbox):
-    await host.remove_multiple_objects(image_bytes=image_bytes, selected_bboxes=[bbox], track_metrics=False)
+    await host.remove_multiple_objects(image_bytes=image_bytes, selected_bboxes=[bbox])
 
     host.tracker.log_metrics.assert_not_called()
 
@@ -126,10 +115,6 @@ async def test_remove_multiple_objects_propagates_mode_exception(host, image_byt
     with pytest.raises(RuntimeError, match="batch failed"):
         await host.remove_multiple_objects(image_bytes=image_bytes, selected_bboxes=[bbox])
 
-
-# ---------------------------------------------------------------------------
-# sam_remove_object
-# ---------------------------------------------------------------------------
 
 async def test_sam_remove_object_success(host, image_bytes, mask_bytes):
     result = await host.sam_remove_object(image_bytes=image_bytes, mask_bytes=mask_bytes)
@@ -159,13 +144,12 @@ async def test_sam_remove_object_calls_sam_lama_mode(host, image_bytes, mask_byt
 
 
 async def test_sam_remove_object_tracker_called_when_enabled(host, image_bytes, mask_bytes):
-    await host.sam_remove_object(image_bytes=image_bytes, mask_bytes=mask_bytes, track_metrics=True)
-
-    host.tracker.log_metrics.assert_called_once()
+    await host.sam_remove_object(image_bytes=image_bytes, mask_bytes=mask_bytes)
+    host.tracker.log_metrics.assert_not_called()
 
 
 async def test_sam_remove_object_tracker_not_called_when_disabled(host, image_bytes, mask_bytes):
-    await host.sam_remove_object(image_bytes=image_bytes, mask_bytes=mask_bytes, track_metrics=False)
+    await host.sam_remove_object(image_bytes=image_bytes, mask_bytes=mask_bytes)
 
     host.tracker.log_metrics.assert_not_called()
 
