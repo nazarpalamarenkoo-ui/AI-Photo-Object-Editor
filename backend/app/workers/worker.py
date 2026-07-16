@@ -19,10 +19,11 @@ from app.services.ml.segmentation_service import SegmentationService
 from app.services.ml.assets_service import AssetService
 
 from app.core.logging import configure_logging, get_logger, log_job
- 
-configure_logging()
-logger = get_logger("arq.worker")
+from app.core.tracing import setup_tracing, trace_job
 
+configure_logging()
+setup_tracing("image-editor-worker")
+logger = get_logger("arq.worker")
 
 
 @asynccontextmanager
@@ -55,7 +56,9 @@ async def _build_ml_deps(db):
         await redis_history.close()
         await redis_assets.close()
 
+
 @log_job(queue="segmentation")
+@trace_job()
 async def segment_objects_task(
     ctx, image_id: int, user_id: int, min_area: int = 500, max_segments: int = 50
 ) -> dict:
@@ -67,7 +70,9 @@ async def segment_objects_task(
                 min_area=min_area, max_segments=max_segments,
             )
 
+
 @log_job(queue="segmentation")
+@trace_job()
 async def segment_with_prompt_task(
     ctx,
     image_id: int,
@@ -86,7 +91,9 @@ async def segment_with_prompt_task(
                 bbox=bbox, multimask_output=multimask_output,
             )
 
+
 @log_job(queue="segmentation")
+@trace_job()
 async def segment_by_polygon_task(
     ctx,
     image_id: int,
@@ -104,8 +111,10 @@ async def segment_by_polygon_task(
                 smooth=smooth, smoothing_factor=smoothing_factor,
                 feather_px=feather_px,
             )
-            
+
+
 @log_job(queue="segmentation")
+@trace_job()
 async def segment_hybrid_task(
     ctx,
     image_id: int,
@@ -127,8 +136,10 @@ async def segment_hybrid_task(
                 fallback_max_segments=fallback_max_segments,
                 overlap_iou_thresh=overlap_iou_thresh,
             )
-            
-@log_job(queue="segmentation")            
+
+
+@log_job(queue="segmentation")
+@trace_job()
 async def sam_remove_object_task(
     ctx,
     image_id: int,
@@ -151,7 +162,9 @@ async def sam_remove_object_task(
                 hd_strategy=hd_strategy,
             )
 
+
 @log_job(queue="segmentation")
+@trace_job()
 async def sam_replace_object_task(
     ctx,
     image_id: int,
@@ -182,7 +195,9 @@ async def sam_replace_object_task(
                 replacement_is_cutout=replacement_is_cutout,
             )
 
+
 @log_job(queue="inpainting")
+@trace_job()
 async def remove_object_task(
     ctx,
     image_id: int,
@@ -207,6 +222,7 @@ async def remove_object_task(
 
 
 @log_job(queue="inpainting")
+@trace_job()
 async def remove_multiple_objects_task(
     ctx,
     image_id: int,
@@ -229,7 +245,9 @@ async def remove_multiple_objects_task(
                 hd_strategy=hd_strategy,
             )
 
+
 @log_job(queue="inpainting")
+@trace_job()
 async def replace_object_task(
     ctx,
     image_id: int,
@@ -258,7 +276,9 @@ async def replace_object_task(
                 hd_strategy=hd_strategy,
             )
 
+
 @log_job(queue="segmentation")
+@trace_job()
 async def sam_extract_object_task(
     ctx,
     image_id: int,

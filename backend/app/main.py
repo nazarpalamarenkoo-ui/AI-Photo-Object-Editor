@@ -4,8 +4,13 @@ from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.logging import configure_logging, get_logger, RequestLoggingMiddleware
+from app.core.tracing import setup_tracing
 
 configure_logging()
+setup_tracing("image-editor-api")
+
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.db.db_connect import engine, Base
 from app.api.auth.routes import router as auth_router
@@ -32,6 +37,10 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan
 )
+
+FastAPIInstrumentor.instrument_app(app)
+
+Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
 app.add_middleware(
     CORSMiddleware,

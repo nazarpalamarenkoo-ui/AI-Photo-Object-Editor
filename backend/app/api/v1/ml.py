@@ -42,6 +42,7 @@ from app.storage.redis.redis_storage import RedisStorage
 from app.storage.redis.redis_history import RedisHistory
 from app.storage.redis.redis_assets import RedisAssetsStorage
 from app.core.logging import get_logger
+from app.core.tracing import inject_trace_context
 
 logger = get_logger(__name__)
 
@@ -166,6 +167,7 @@ async def remove_object_async(
         ldm_steps=body.ldm.ldm_steps,
         ldm_sampler=body.ldm.ldm_sampler,
         hd_strategy=body.ldm.hd_strategy,
+        _trace_carrier=inject_trace_context(),
     )
     logger.info("ml_job_enqueued", task="remove_object_task", job_id=job.job_id)
     return {"job_id": job.job_id}
@@ -211,6 +213,7 @@ async def remove_multiple_objects_async(
         ldm_steps=body.ldm.ldm_steps,
         ldm_sampler=body.ldm.ldm_sampler,
         hd_strategy=body.ldm.hd_strategy,
+        _trace_carrier=inject_trace_context(),
     )
     logger.info("ml_job_enqueued", task="remove_multiple_objects_task", job_id=job.job_id)
     return {"job_id": job.job_id}
@@ -268,6 +271,7 @@ async def replace_object_async(
         ldm_steps=body.ldm.ldm_steps,
         ldm_sampler=body.ldm.ldm_sampler,
         hd_strategy=body.ldm.hd_strategy,
+        _trace_carrier=inject_trace_context(),
     )
     logger.info("ml_job_enqueued", task="replace_object_task", job_id=job.job_id)
     return {"job_id": job.job_id}
@@ -392,6 +396,7 @@ async def segment_objects_async(
         user_id=current_user.id,
         min_area=body.min_area,
         max_segments=body.max_segments,
+        _trace_carrier=inject_trace_context(),
     )
     logger.info("ml_job_enqueued", task="segment_objects_task", job_id=job.job_id)
     return {"job_id": job.job_id}
@@ -435,6 +440,7 @@ async def segment_with_prompt_async(
         point_labels=body.point_labels,
         bbox=bbox_dict,
         multimask_output=body.multimask_output,
+        _trace_carrier=inject_trace_context(),
     )
     logger.info("ml_job_enqueued", task="segment_with_prompt_task", job_id=job.job_id)
     return {"job_id": job.job_id}
@@ -476,6 +482,7 @@ async def segment_by_polygon_async(
         smooth=body.smooth,
         smoothing_factor=body.smoothing_factor,
         feather_px=body.feather_px,
+        _trace_carrier=inject_trace_context(),
     )
     logger.info("ml_job_enqueued", task="segment_by_polygon_task", job_id=job.job_id)
     return {"job_id": job.job_id}
@@ -518,6 +525,7 @@ async def segment_hybrid_async(
         fallback_min_area=body.fallback_min_area,
         fallback_max_segments=body.fallback_max_segments,
         overlap_iou_thresh=body.overlap_iou_thresh,
+        _trace_carrier=inject_trace_context(),
     )
     logger.info("ml_job_enqueued", task="segment_hybrid_task", job_id=job.job_id)
     return {"job_id": job.job_id}
@@ -564,6 +572,7 @@ async def sam_remove_object_async(
         ldm_steps=body.ldm.ldm_steps,
         ldm_sampler=body.ldm.ldm_sampler,
         hd_strategy=body.ldm.hd_strategy,
+        _trace_carrier=inject_trace_context(),
     )
     logger.info("ml_job_enqueued", task="sam_remove_object_task", job_id=job.job_id)
     return {"job_id": job.job_id}
@@ -652,6 +661,7 @@ async def sam_replace_object_async(
         ldm_sampler=body.ldm.ldm_sampler,
         hd_strategy=body.ldm.hd_strategy,
         replacement_is_cutout=replacement_is_cutout,
+        _trace_carrier=inject_trace_context(),
     )
     logger.info("ml_job_enqueued", task="sam_replace_object_task", job_id=job.job_id)
     return {"job_id": job.job_id}
@@ -695,6 +705,7 @@ async def extract_object_async(
         padding_pixels=body.padding_pixels,
         label=body.label,
         persist_to_s3=body.persist_to_s3,
+        _trace_carrier=inject_trace_context(),
     )
     logger.info("ml_job_enqueued", task="sam_extract_object_task", job_id=job.job_id)
     return {"job_id": job.job_id}
