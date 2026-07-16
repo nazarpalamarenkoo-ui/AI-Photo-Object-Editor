@@ -23,11 +23,11 @@ class InpaintMode(str, Enum):
 class LaMaInpainter:
     """
     LaMa-based image inpainter.
-    
+
     Provides:
         1. Object removal (inpaint with background generation)
         2. Object replacement (paste replacement into bbox)
-    
+
     Handles:
         1. LaMa model inference
         2. Mask creation from bbox
@@ -42,7 +42,7 @@ class LaMaInpainter:
     ):
         """
         Initialize LaMa Inpainter.
-        
+
         Args:
             device: Device to use ('cuda' or 'cpu', default: 'cuda')
             tracker: ExperimentTracker for MLflow (default: auto-created)
@@ -57,7 +57,7 @@ class LaMaInpainter:
             logger.info("lama_model_loading", model="lama", device=device)
             self.model_manager = ModelManager(
                 name='lama',
-                device=self.device # type: ignore
+                device=self.device  # type: ignore
             )
             self.default_config = Config(
                 ldm_steps=25,
@@ -75,7 +75,7 @@ class LaMaInpainter:
                 f"lama-cleaner not installed or incompatible: {e}. "
                 "Set ML_ENABLED=false to run without ML."
             )
-    
+
     async def inpaint(
         self,
         image_bytes: bytes,
@@ -90,12 +90,12 @@ class LaMaInpainter:
     ) -> Dict:
         """
         Run inpainting on image.
-        
+
         Pipeline:
             1. Run inpainting (REMOVE or REPLACE mode)
             2. Calculate metrics
             3. Track metrics to MLflow (optional)
-        
+
         Args:
             1. image_bytes: Input image bytes
             2. mask_bytes: Mask bytes (white = inpaint area, default: None)
@@ -103,13 +103,13 @@ class LaMaInpainter:
             4. mode: Inpaint mode - REMOVE or REPLACE (default: REMOVE)
             5. replacement_image_bytes: Replacement image bytes (required for REPLACE mode)
             6. track_metrics: Track metrics to MLflow (default: True)
-        
+
         Returns:
             Dict {
                 - result_bytes: Processed image bytes (JPEG)
                 - metrics: Dict - processing metrics
             }
-        
+
         Raises:
             ValueError: If neither mask_bytes nor bbox provided
             ValueError: If REPLACE mode and no replacement_image_bytes
@@ -117,14 +117,14 @@ class LaMaInpainter:
         if not mask_bytes and not bbox:
             logger.warning("lama_inpaint_invalid_input", mode=mode.value, reason="missing mask_bytes/bbox")
             raise ValueError("Either mask_bytes or bbox must be provided")
-        
+
         if mode == InpaintMode.REPLACE and not replacement_image_bytes:
             logger.warning(
                 "lama_inpaint_invalid_input", mode=mode.value,
                 reason="missing replacement_image_bytes for REPLACE mode",
             )
             raise ValueError("replacement_image_bytes required for REPLACE mode")
-        
+
         from lama_cleaner.schema import Config, HDStrategy
         config = Config(
             ldm_steps=ldm_steps,
@@ -180,13 +180,13 @@ class LaMaInpainter:
 
         # Track metrics to MLflow
         if track_metrics:
-            await self._track_metrics(metrics)
-        
+            await self._track_metrics(metrics, ldm_steps, ldm_sampler, hd_strategy)
+
         return {
             'result_bytes': result_bytes,
             'metrics': metrics
         }
-    
+
     async def _inpaint_remove(
         self,
         image_bytes: bytes,
@@ -196,12 +196,12 @@ class LaMaInpainter:
     ) -> bytes:
         """
         Run REMOVE inpainting asynchronously.
-        
+
         Args:
             1. image_bytes: Input image bytes
             2. mask_bytes: Mask bytes (default: None)
             3. bbox: Bounding box to auto-create mask (default: None)
-        
+
         Returns: Result image bytes (JPEG)
         """
         result_bytes = await asyncio.to_thread(
@@ -212,30 +212,30 @@ class LaMaInpainter:
             config
         )
         return result_bytes
-    
+
     def _inpaint_remove_sync(
         self,
         image_bytes: bytes,
         mask_bytes: Optional[bytes] = None,
         bbox: Optional[Dict[str, int]] = None,
-        config = None
+        config=None
     ) -> bytes:
         """
         Run REMOVE inpainting synchronously (blocking).
-        
+
         Args:
             1. image_bytes: Input image bytes
             2. mask_bytes: Mask bytes (default: None)
             3. bbox: Bounding box to auto-create mask (default: None)
-        
+
         Returns: Result image bytes (JPEG)
-        
+
         Raises:
             ValueError: If neither mask_bytes nor bbox provided
         """
         img = Image.open(BytesIO(image_bytes)).convert('RGB')
         img_array = np.array(img)
-        
+
         # Create mask from bytes or bbox
         if mask_bytes:
             mask = Image.open(BytesIO(mask_bytes)).convert('L')
@@ -247,14 +247,14 @@ class LaMaInpainter:
             )
         else:
             raise ValueError("Either mask_bytes or bbox must be provided")
-        
+
         # Run LaMa inpainting (generates background)
         result_array = self.model_manager(
             image=img_array,
             mask=mask_array,
             config=config or self.default_config
         )
-        
+
         if result_array.dtype != np.uint8:
             result_array = result_array.clip(0, 255).astype(np.uint8)
 
@@ -264,26 +264,26 @@ class LaMaInpainter:
         # Convert result to bytes
         result_buffer = BytesIO()
         result_img.save(result_buffer, format='JPEG', quality=95)
-        
+
         return result_buffer.getvalue()
-    
+
     async def _inpaint_replace(
         self,
         image_bytes: bytes,
         mask_bytes: Optional[bytes],
         bbox: Optional[Dict[str, int]],
         replacement_image_bytes: bytes,
-        config = None
+        config=None
     ) -> bytes:
         """
         Run REPLACE inpainting asynchronously.
-        
+
         Args:
             1. image_bytes: Input image bytes
             2. mask_bytes: Mask bytes (default: None)
             3. bbox: Bounding box for replacement area
             4. replacement_image_bytes: Replacement object image bytes
-        
+
         Returns: Result image bytes (JPEG)
         """
         result_bytes = await asyncio.to_thread(
@@ -295,7 +295,7 @@ class LaMaInpainter:
             config
         )
         return result_bytes
-    
+
     def _inpaint_replace_sync(
         self,
         image_bytes: bytes,
@@ -306,20 +306,20 @@ class LaMaInpainter:
     ) -> bytes:
         """
         Run REPLACE inpainting synchronously (blocking).
-        
+
         Pipeline:
             1. Get bbox from mask if not provided
             2. Resize replacement to bbox size
             3. Paste replacement into bbox region
-        
+
         Args:
             1. image_bytes: Input image bytes
             2. mask_bytes: Mask bytes (used to extract bbox if bbox not provided)
             3. bbox: Bounding box for replacement area (default: None)
             4. replacement_image_bytes: Replacement object image bytes
-        
+
         Returns: Result image bytes (JPEG)
-        
+
         Raises:
             ValueError: If neither bbox nor mask_bytes provided
         """
@@ -351,7 +351,7 @@ class LaMaInpainter:
         result_img.save(buffer, format='JPEG', quality=95)
 
         return buffer.getvalue()
-    
+
     def create_remove_mask(
         self,
         image_shape,
@@ -391,9 +391,9 @@ class LaMaInpainter:
         SAFETY_MARGIN = 3
 
         # Default: expand freely up to expand_pixels on each side
-        exp_left  = expand_pixels
+        exp_left = expand_pixels
         exp_right = expand_pixels
-        exp_top   = expand_pixels
+        exp_top = expand_pixels
         exp_bottom = expand_pixels
 
         if other_bboxes:
@@ -470,32 +470,32 @@ class LaMaInpainter:
         mask[y1:y2, x1:x2] = 255
 
         return mask
-    
+
     def _get_bbox_from_mask(self, mask_array: np.ndarray) -> Dict[str, int]:
         """
         Extract bounding box from binary mask.
-        
+
         Args:
         mask_array: np.ndarray mask (uint8)
-        
+
         Returns:
             Dict {'x1', 'y1', 'x2', 'y2'} - tight bbox around white pixels
-        
+
         Raises:
             ValueError: If mask is empty (no white pixels)
         """
         white_pixels = np.where(mask_array > 128)
-        
+
         if len(white_pixels[0]) == 0:
             raise ValueError("Empty mask")
-        
+
         y1 = int(np.min(white_pixels[0]))
         y2 = int(np.max(white_pixels[0]))
         x1 = int(np.min(white_pixels[1]))
         x2 = int(np.max(white_pixels[1]))
-        
+
         return {'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2}
-    
+
     async def _calculate_metrics(
         self,
         image_bytes: bytes,
@@ -506,14 +506,14 @@ class LaMaInpainter:
     ) -> Dict:
         """
         Calculate inpainting metrics asynchronously.
-        
+
         Args:
             1. image_bytes: Input image bytes (for size calculation)
             2. mask_bytes: Mask bytes (for pixel count, default: None)
             3. bbox: Bounding box (for pixel count if no mask, default: None)
             4. processing_time_ms: Processing time in milliseconds
             5. mode: Inpaint mode (REMOVE or REPLACE)
-            
+
         Returns:
             Dict {
                 - processing_time_ms: float - Processing time in ms
@@ -526,7 +526,7 @@ class LaMaInpainter:
             # Get image dimensions
             img = Image.open(BytesIO(image_bytes))
             image_size = img.size  # (width, height)
-            
+
             # Calculate mask size in pixels
             if bbox:
                 mask_size_pixels = (bbox['x2'] - bbox['x1']) * (bbox['y2'] - bbox['y1'])
@@ -536,33 +536,58 @@ class LaMaInpainter:
                 mask_size_pixels = int(np.sum(mask_array > 128))
             else:
                 mask_size_pixels = 0
-            
+
             return {
                 'processing_time_ms': processing_time_ms,
+                'processing_time_s': processing_time_ms / 1000,
                 'mask_size_pixels': mask_size_pixels,
                 'image_size': image_size,
                 'mode': mode.value
             }
-        
+
         metrics = await asyncio.to_thread(calc_sync)
         return metrics
-    
-    async def _track_metrics(self, metrics: Dict) -> None:
+
+    async def _track_metrics(
+        self,
+        metrics: Dict,
+        ldm_steps: int,
+        ldm_sampler: str,
+        hd_strategy: str,
+    ) -> None:
         """
-        Track inpainting metrics to MLflow asynchronously.
-        
+        Track a single inpaint() call to MLflow: one run, with both the
+        input params (mode/ldm_steps/ldm_sampler/hd_strategy/device) and
+        the measured metrics (processing_time_ms/mask_size_pixels/image
+        dimensions).
+
         Args:
         metrics: Dict with inpainting metrics (from _calculate_metrics)
         """
         def log_sync():
-            self.tracker.log_inpaint_metrics(
-                processing_time_ms=metrics['processing_time_ms'],
-                mask_size_pixels=metrics['mask_size_pixels'],
-                image_size=metrics['image_size'],
-                model_name=f"lama_{metrics['mode']}"
+            mode = metrics['mode']
+            self.tracker.log_run(
+                run_name=f"inpaint_{mode}",
+                params={
+                    "model": "lama",
+                    "device": self.device,
+                    "mode": mode,
+                    "ldm_steps": ldm_steps,
+                    "ldm_sampler": ldm_sampler,
+                    "hd_strategy": hd_strategy,
+                },
+                metrics={
+                    "processing_time_ms": metrics['processing_time_ms'],
+                    "processing_time_s": metrics['processing_time_ms'] / 1000,
+                    "mask_size_pixels": metrics['mask_size_pixels'],
+                    "image_width": metrics['image_size'][0],
+                    "image_height": metrics['image_size'][1],
+                },
+                tags={"inpaint_model": f"lama_{mode}", "operation": "inpaint"},
             )
-        
+
         await asyncio.to_thread(log_sync)
+
 
 import threading
 _inpainter_instance = None
@@ -573,11 +598,11 @@ def get_inpainter(
 ) -> LaMaInpainter:
     """
     Singleton getter for LaMaInpainter.
-    
+
     Args:
         1. device: Device to use ('cuda' or 'cpu', default: 'cuda')
         2. tracker: ExperimentTracker for MLflow (default: auto-created)
-    
+
     Returns: LaMaInpainter instance
     """
     global _inpainter_instance

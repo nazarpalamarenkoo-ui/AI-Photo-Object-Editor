@@ -129,18 +129,9 @@ async def test_detect_success(detector, mock_tracker):
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_detect_with_tracking(detector, mock_tracker):
-    """Test detection with metrics tracking"""
-    result = await detector.detect(
-        image_path='fake_path.jpg',
-        track_metrics=True
-    )
-    
-    # Verify tracker was called
-    mock_tracker.log_detection_metrics.assert_called_once()
-    
+    result = await detector.detect(image_path='fake_path.jpg', track_metrics=True)
+    mock_tracker.log_run.assert_called_once()
     assert 'detections' in result
-    assert 'metrics' in result
-
 
 @pytest.mark.unit
 @pytest.mark.asyncio

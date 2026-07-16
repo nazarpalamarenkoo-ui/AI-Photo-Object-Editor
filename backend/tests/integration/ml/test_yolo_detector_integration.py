@@ -2,16 +2,23 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 from io import BytesIO
 from PIL import Image
+import mlflow
 
 from app.ml.detector import YOLODetector, get_detector
 from app.ml.experiment_tracker import ExperimentTracker
 
 
+@pytest.fixture(autouse=True)
+def _no_mlflow_network(monkeypatch, tmp_path):
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", f"file://{tmp_path}/mlruns")
+    import mlflow
+    monkeypatch.setattr(mlflow, "active_run", lambda: None)
+    monkeypatch.setattr(mlflow, "end_run", lambda *a, **kw: None)
+    monkeypatch.setattr(mlflow, "log_metric", MagicMock())
+    yield
+
+
 def _make_box(x1, y1, x2, y2, conf, cls_id):
-    """
-    Build a mock box matching real ultralytics per-box iteration API.
-    _detect_sync iterates: for box in boxes → box.xyxy[0], box.conf[0], box.cls[0]
-    """
     box = MagicMock()
     box.xyxy = [MagicMock()]
     box.xyxy[0].cpu().numpy.return_value = [x1, y1, x2, y2]
@@ -42,10 +49,15 @@ def detector():
         mock_model.side_effect = None
         mock_model.predict.return_value = [
             _make_result([(100, 100, 200, 200, 0.95, 0)])
-        ]       
+        ]
         mock_yolo.return_value = mock_model
 
-        detector = YOLODetector()
+        # мокаємо трекер повністю - жодних реальних HTTP/файлових викликів mlflow
+        mock_tracker = MagicMock()
+        mock_tracker.log_run = MagicMock()
+        mock_tracker.log_detection_metrics = MagicMock()
+
+        detector = YOLODetector(tracker=mock_tracker)
         yield detector
 
 

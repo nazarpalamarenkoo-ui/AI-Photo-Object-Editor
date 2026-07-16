@@ -107,9 +107,6 @@ async def test_batch_segment_keys_match_single_prompt_shape(
 async def test_batch_is_consistent_with_individual_segment_with_prompt_calls(
     real_segmentor, two_squares_image_bytes
 ):
-    """Sanity-check that batching multiple box prompts through a single
-    encoder pass finds objects roughly consistent with running each box
-    through segment_with_prompt individually (same area ballpark)."""
     bbox = {"x1": 15, "y1": 15, "x2": 105, "y2": 105}
 
     batch_result = await real_segmentor.segment_with_prompts_batch(
@@ -137,9 +134,9 @@ async def test_batch_tracks_metrics_end_to_end(
         two_squares_image_bytes, bboxes, track_metrics=True
     )
 
-    tracker.log_metrics.assert_called_once()
-    payload = tracker.log_metrics.call_args.args[0]
-    assert payload["sam2_num_segments"] >= 1
+    tracker.log_run.assert_called_once()
+    _, kwargs = tracker.log_run.call_args
+    assert kwargs["metrics"]["num_segments"] >= 1
 
 
 async def test_batch_empty_bboxes_returns_no_segments_end_to_end(

@@ -77,9 +77,6 @@ async def test_batch_forwards_correct_box_per_prompt_in_order(
         assert np.array_equal(call.kwargs["box"], expected)
 
 
-# ---------------------------------------------------------------------------
-# Output content
-# ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_batch_includes_prompt_bbox_reference_matching_input(
@@ -191,9 +188,6 @@ async def test_batch_bbox_derived_from_mask_not_from_prompt_bbox(
     assert seg["prompt_bbox"] == bboxes[0]
 
 
-# ---------------------------------------------------------------------------
-# Edge cases
-# ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_batch_empty_bboxes_list_returns_empty_segments(
@@ -233,15 +227,11 @@ async def test_batch_results_are_independent_across_calls(segmentor, image_bytes
     assert len(second["segments"]) == 2
 
 
-# ---------------------------------------------------------------------------
-# Metrics / tracking
-# ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_batch_tracks_metrics_by_default(segmentor, image_bytes, tracker):
     await segmentor.segment_with_prompts_batch(image_bytes, _bboxes(2))
-
-    tracker.log_metrics.assert_called_once()
+    tracker.log_run.assert_called_once()
 
 
 @pytest.mark.asyncio

@@ -3,23 +3,34 @@ from unittest.mock import patch, MagicMock, AsyncMock
 from io import BytesIO
 from PIL import Image
 import numpy as np
+import mlflow
 
 from app.ml.inpainter import LaMaInpainter, InpaintMode
 
 
+@pytest.fixture(autouse=True)
+def _no_mlflow_network(monkeypatch, tmp_path):
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", f"file://{tmp_path}/mlruns")
+    import mlflow
+    monkeypatch.setattr(mlflow, "active_run", lambda: None)
+    monkeypatch.setattr(mlflow, "end_run", lambda *a, **kw: None)
+    yield
+
+
 @pytest.fixture
 def inpainter():
-    with patch('app.ml.model_manager.ModelManager') as mock_mm:
+    with patch('lama_cleaner.model_manager.ModelManager') as mock_mm:
         mock_manager = MagicMock()
         mock_mm.return_value = mock_manager
 
-        mock_model = MagicMock()
-        mock_manager.load_model.return_value = mock_model
-
         fake_result = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
-        mock_model.return_value = fake_result
+        mock_manager.return_value = fake_result
 
-        inpainter = LaMaInpainter()
+        mock_tracker = MagicMock()
+        mock_tracker.log_run = MagicMock()
+        mock_tracker.log_inpaint_metrics = MagicMock()
+
+        inpainter = LaMaInpainter(tracker=mock_tracker)
 
         yield inpainter
 
@@ -50,8 +61,6 @@ def test_replacement_bytes():
     img.save(buffer, format='JPEG')
     return buffer.getvalue()
 
-
-# --- існуючі тести ---
 
 @pytest.mark.integration
 @pytest.mark.ml
@@ -150,7 +159,7 @@ async def test_calculate_metrics(inpainter, test_image_bytes, test_mask_bytes):
     assert 'processing_time_ms' in metrics
     assert 'mask_size_pixels' in metrics
     assert 'image_size' in metrics
-    assert metrics['processing_time_ms'] > 0
+    assert metrics['processing_time_ms'] > 0.0
 
 
 @pytest.mark.integration

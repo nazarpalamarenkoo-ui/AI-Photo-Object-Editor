@@ -14,22 +14,26 @@ logger = get_logger(__name__)
 
 
 class SAM2Segmentor:
-    
+
     """
     SAM 2 Segmentor
-    
+
     Wrapper around Meta SAM2 for instance segmentation.
     Supports:
         1. Automatic segmentation (everything mode — no prompts required)
         2. Point/bounding-box prompt segmentation
         3. Async interface + MLflow tracking
     """
-    
+
     def __init__(
         self,
         model_path: str = 'weights/sam2.1_hiera_s.pt',
         device: str = 'cpu',
-        tracker: Optional[ExperimentTracker] = None
+        tracker: Optional[ExperimentTracker] = None,
+        points_per_side: int = 16,
+        pred_iou_thresh: float = 0.88,
+        stability_score_thresh: float = 0.92,
+        min_mask_region_area: int = 150,
     ):
         try:
             from sam2.build_sam import build_sam2
@@ -40,36 +44,41 @@ class SAM2Segmentor:
             self.device = device
             self.tracker = tracker or get_tracker()
 
+            self.points_per_side = points_per_side
+            self.pred_iou_thresh = pred_iou_thresh
+            self.stability_score_thresh = stability_score_thresh
+            self.min_mask_region_area = min_mask_region_area
+
             logger.info("sam2_model_loading", model=model_path, device=device)
             self.segmentor = build_sam2(
             "configs/sam2.1/sam2.1_hiera_s.yaml",
             model_path,
             device=device)
-            
+
             # Predictor for point/bbox prompts
             self.predictor = SAM2ImagePredictor(self.segmentor)
-            
+
             # Auto mask generator — without prompts
             self.auto_generator = SAM2AutomaticMaskGenerator(
-                model = self.segmentor,
-                points_per_side = 32,
-                pred_iou_thresh = 0.88,
-                stability_score_thresh = 0.92,
-                min_mask_region_area = 100,
+                model=self.segmentor,
+                points_per_side=self.points_per_side,
+                pred_iou_thresh=self.pred_iou_thresh,
+                stability_score_thresh=self.stability_score_thresh,
+                min_mask_region_area=self.min_mask_region_area,
             )
             logger.info("sam2_model_loaded", model=model_path, device=device)
-            
+
         except ImportError as e:
             logger.error("sam2_model_load_failed", model=model_path, device=device, exc_info=e)
             raise RuntimeError(
                 f"sam2 not installed: {e}. Please install the SAM2 package")
-            
+
     async def segment_auto(
         self,
         image_bytes: bytes,
         track_metrics: bool = True
     ) -> Dict:
-        
+
         """
         Automatic segmentation of the entire image (without prompts).
 
@@ -106,10 +115,20 @@ class SAM2Segmentor:
             )
 
         if track_metrics:
-            await self._track_metrics(metrics)
+            await self._track_metrics(
+                run_name="sam2_segment_auto",
+                metrics=metrics,
+                extra_params={
+                    "points_per_side": self.points_per_side,
+                    "pred_iou_thresh": self.pred_iou_thresh,
+                    "stability_score_thresh": self.stability_score_thresh,
+                    "min_mask_region_area": self.min_mask_region_area,
+                },
+                tags={"operation": "sam2_segment_auto"},
+            )
 
         return {"segments": segments, "metrics": metrics}
-    
+
     def _segment_auto_sync(self, image_bytes: bytes) -> List[Dict]:
         img = Image.open(BytesIO(image_bytes)).convert("RGB")
         img_array = np.array(img)
@@ -142,7 +161,7 @@ class SAM2Segmentor:
         # Sort segments by area (largest first)
         segments.sort(key=lambda s: s["area"], reverse=True)
         return segments
-    
+
     async def segment_with_prompt(
         self,
         image_bytes: bytes,
@@ -152,7 +171,7 @@ class SAM2Segmentor:
         track_metrics: bool = True,
         multimask_output: Optional[bool] = None,
     ) -> Dict:
-        
+
         """
         Prompt-based segmentation (points or bounding box).
 
@@ -193,10 +212,20 @@ class SAM2Segmentor:
             )
 
         if track_metrics:
-            await self._track_metrics(metrics)
+            await self._track_metrics(
+                run_name="sam2_segment_prompt",
+                metrics=metrics,
+                extra_params={
+                    "has_points": point_coords is not None,
+                    "num_points": len(point_coords) if point_coords else 0,
+                    "has_bbox": bbox is not None,
+                    "multimask_output": multimask_output,
+                },
+                tags={"operation": "sam2_segment_prompt"},
+            )
 
         return {"segments": segments, "metrics": metrics}
-    
+
     def _segment_prompt_sync(
         self,
         image_bytes: bytes,
@@ -251,7 +280,7 @@ class SAM2Segmentor:
 
         segments.sort(key=lambda s: s["stability_score"], reverse=True)
         return segments
-    
+
     async def segment_with_prompts_batch(
         self,
         image_bytes: bytes,
@@ -261,7 +290,7 @@ class SAM2Segmentor:
         """
         Batched box-prompt segmentation.
         Runs the SAM2 image encoder ONCE via set_image(), then a cheap
-        predictor.predict() call per bbox prompt. 
+        predictor.predict() call per bbox prompt.
 
         Args:
             image_bytes:   Input image
@@ -297,7 +326,12 @@ class SAM2Segmentor:
             )
 
         if track_metrics:
-            await self._track_metrics(metrics)
+            await self._track_metrics(
+                run_name="sam2_segment_prompts_batch",
+                metrics=metrics,
+                extra_params={"num_bboxes": len(bboxes)},
+                tags={"operation": "sam2_segment_prompts_batch"},
+            )
 
         return {"segments": segments, "metrics": metrics}
 
@@ -347,30 +381,59 @@ class SAM2Segmentor:
             })
 
         return segments
-    
+
     def _calculate_metrics(self, segments: List[Dict], inference_time_ms: float) -> Dict:
         if not segments:
             return {
                 "num_segments": 0,
                 "avg_stability": 0.0,
                 "inference_time_ms": inference_time_ms,
+                "inference_time_s": inference_time_ms / 1000,
             }
         avg_stability = sum(s["stability_score"] for s in segments) / len(segments)
         return {
             "num_segments": len(segments),
             "avg_stability": avg_stability,
             "inference_time_ms": inference_time_ms,
+            "inference_time_s": inference_time_ms / 1000,
             "total_area_px": sum(s["area"] for s in segments),
         }
 
-    async def _track_metrics(self, metrics: Dict) -> None:
+    async def _track_metrics(
+        self,
+        run_name: str,
+        metrics: Dict,
+        extra_params: Optional[Dict] = None,
+        tags: Optional[Dict] = None,
+    ) -> None:
+        """
+        Track a single segment_*() call to MLflow: one run, with both the
+        input params (model/device + call-specific config) and the
+        measured metrics (inference_time_ms/num_segments/avg_stability).
+        """
         def log_sync():
-            self.tracker.log_metrics({
-                "sam2_num_segments": metrics["num_segments"],
-                "sam2_avg_stability": metrics["avg_stability"],
-                "sam2_inference_ms": metrics["inference_time_ms"],
-            })
+            params = {
+                "model": self.model_path,
+                "device": self.device,
+            }
+            if extra_params:
+                params.update(extra_params)
+
+            self.tracker.log_run(
+                run_name=run_name,
+                params=params,
+                metrics={
+                    "num_segments": metrics["num_segments"],
+                    "avg_stability": metrics.get("avg_stability"),
+                    "inference_time_ms": metrics["inference_time_ms"],
+                    "inference_time_s": metrics["inference_time_ms"] / 1000,
+                    "total_area_px": metrics.get("total_area_px"),
+                },
+                tags=tags,
+            )
+
         await asyncio.to_thread(log_sync)
+
 
 import threading
 _segmentor_instance = None

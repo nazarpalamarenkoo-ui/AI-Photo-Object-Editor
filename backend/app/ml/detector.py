@@ -16,49 +16,49 @@ logger = get_logger(__name__)
 class YOLODetector:
     """
     YOLO Object Detector
-    
+
     Wrapper around Ultralytics YOLO for object detection.
     Provides async interface and MLflow tracking integration.
-    
+
     Features:
     1. Object detection with confidence thresholding
     2. Class filtering
     3. Async processing
     4. MLflow metrics tracking
     5. Automatic device management (CUDA/CPU)
-    
+
     Handles:
     1. Model loading and inference
     2. Result parsing (bbox, class, confidence)
     3. Metrics calculation
     4. MLflow tracking
     """
-    
+
     def __init__(
-        self, 
-        model_path: str = 'weights/yolov10m.pt', 
-        device: str = 'cpu', 
+        self,
+        model_path: str = 'weights/yolov10m.pt',
+        device: str = 'cpu',
         conf_threshold: float = 0.5,
         tracker: Optional[ExperimentTracker] = None
     ):
         """
         Initialize YOLO Detector.
-        
+
         Args:
             model_path: Path to YOLO model weights (default: 'yolov10n.pt')
             device: Device to use ('cuda' or 'cpu', default: 'cuda')
             conf_threshold: Default confidence threshold (default: 0.5)
             tracker: ExperimentTracker for MLflow (default: auto-created)
         """
-        
+
         try:
             from ultralytics import YOLO
- 
+
             self.model_path = model_path
             self.device = device
             self.conf_threshold = conf_threshold
             self.tracker = tracker or get_tracker()
- 
+
             logger.info("yolo_model_loading", model=model_path, device=device)
             self.model = YOLO(model_path)
             self.model.to(device)
@@ -68,14 +68,14 @@ class YOLODetector:
                 device=device,
                 num_classes=len(self.model.names),
             )
- 
+
         except ImportError as e:
             logger.error("yolo_model_load_failed", model=model_path, device=device, exc_info=e)
             raise RuntimeError(
                 f"ultralytics not installed: {e}. "
                 "Set ML_ENABLED=false to run without ML."
             )
-        
+
     async def detect(
         self,
         image_path: str,
@@ -85,13 +85,13 @@ class YOLODetector:
     ) -> Dict:
         """
         Detect objects in image using YOLO.
-        
+
         Args:
             image_path: Path to image file
             conf_threshold: Confidence threshold (0.0-1.0, default: uses instance default)
             classes: Optional list of class names to filter (e.g., ['car', 'person'])
             track_metrics: Track metrics to MLflow (default: True)
-        
+
         Returns:
             Dict:
                 - detections: List[Dict] - detected objects
@@ -102,7 +102,7 @@ class YOLODetector:
                         'class_id': int - COCO class ID
                     }
         """
-        
+
         conf = conf_threshold or self.conf_threshold
         start_time = time.time()
 
@@ -129,13 +129,13 @@ class YOLODetector:
             )
 
         if track_metrics:
-            await self._track_metrics(metrics, image_path)
-        
+            await self._track_metrics(metrics, conf, classes)
+
         return {
             'detections': detections,
             'metrics': metrics
         }
-    
+
     def _detect_sync(
         self,
         image_path: str,
@@ -149,15 +149,15 @@ class YOLODetector:
             device=self.device,
             verbose=False
         )
-        # Parse results        
+        # Parse results
         detections = []
-        
+
         for result in results:
             boxes = result.boxes
-            
+
             if boxes is None or len(boxes) == 0:
                 continue
-            
+
             for box in boxes:
                 # Get bbox coordinates
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
@@ -168,11 +168,11 @@ class YOLODetector:
 
                 if confidence < conf_threshold:
                     continue
-                
+
                 # Filter by class if specified
                 if classes and class_name not in classes:
                     continue
-                
+
                 detections.append({
                     'x1': int(x1),
                     'y1': int(y1),
@@ -184,61 +184,78 @@ class YOLODetector:
                 })
 
         return detections
-    
+
     def get_class_names(self) -> List[str]:
-        
+
         return list(self.model.names.values())
-   
+
     def _calculate_metrics(
         self,
         detections: List[Dict],
-        inference_time_ms: float            
+        inference_time_ms: float
     ) -> Dict:
-        
+
         if not detections:
             return {
                 'num_detections': 0,
                 'avg_confidence': 0.0,
                 'inference_time_ms': inference_time_ms,
+                'inference_time_s': inference_time_ms / 1000,
                 'classes_detected': []
             }
-            
+
         avg_confidence = sum(d['confidence'] for d in detections) / len(detections)
         classes_detected = list(set(d['detected_class'] for d in detections))
-        
+
         return {
             'num_detections': len(detections),
             'avg_confidence': avg_confidence,
             'inference_time_ms': inference_time_ms,
+            'inference_time_s': inference_time_ms / 1000,
             'classes_detected': classes_detected,
             'min_confidence': min(d['confidence'] for d in detections),
             'max_confidence': max(d['confidence'] for d in detections)
         }
-    
+
     async def _track_metrics(
         self,
         metrics: Dict,
-        image_path: Optional[str] = None
+        conf_threshold: float,
+        classes: Optional[List[str]] = None,
     ) -> None:
         """
-        Track detection metrics to MLflow asynchronously.
-        
+        Track a single detect() call to MLflow: one run, with both the
+        input params (model/device/conf_threshold/classes) and the
+        measured metrics (inference_time_ms/num_detections/avg_confidence).
+
         Args:
             metrics: Metrics dict with detection stats
-            image_path: Optional path to image (for tagging)
+            conf_threshold: The confidence threshold actually used for this call
+            classes: Optional class filter actually used for this call
         """
         def log_sync():
-            # Convert inference_time_ms to seconds for tracker
-            inference_time_sec = metrics['inference_time_ms'] / 1000.0
-            
-            self.tracker.log_detection_metrics(
-                num_detections=metrics['num_detections'],
-                avg_confidence=metrics['avg_confidence'],
-                inference_time=inference_time_sec,  # Expects seconds
-                model_name=self.model_path
+            model_name = Path(self.model_path).stem
+            self.tracker.log_run(
+                run_name=f"detect_{model_name}",
+                params={
+                    "model": self.model_path,
+                    "device": self.device,
+                    "conf_threshold": conf_threshold,
+                    "class_filter": ",".join(classes) if classes else "none",
+                },
+                metrics={
+                    "num_detections": metrics["num_detections"],
+                    "inference_time_ms": metrics["inference_time_ms"],
+                    "inference_time_s": metrics["inference_time_ms"] / 1000,
+                    "avg_confidence": metrics.get("avg_confidence"),
+                    "min_confidence": metrics.get("min_confidence"),
+                    "max_confidence": metrics.get("max_confidence"),
+                },
+                tags={"model_name": self.model_path, "operation": "detect"},
             )
-        
+
         await asyncio.to_thread(log_sync)
+
 
 import threading
 _detector_instance = None
