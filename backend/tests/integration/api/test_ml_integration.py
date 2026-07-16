@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, ANY
 from httpx import AsyncClient, ASGITransport
 from arq.jobs import JobStatus
 
@@ -1299,6 +1299,7 @@ async def test_remove_object_async_enqueues_job(db_session, sample_user, sample_
         ldm_steps=25,
         ldm_sampler='plms',
         hd_strategy='CROP',
+        _trace_carrier=ANY,
     )
 
 
@@ -1324,6 +1325,7 @@ async def test_remove_object_async_default_body(db_session, sample_user, sample_
         ldm_steps=25,
         ldm_sampler='plms',
         hd_strategy='CROP',
+        _trace_carrier=ANY,
     )
 
 
@@ -1351,6 +1353,7 @@ async def test_remove_multiple_objects_async_enqueues_job(db_session, sample_use
         ldm_steps=25,
         ldm_sampler='plms',
         hd_strategy='CROP',
+        _trace_carrier=ANY,
     )
 
 
@@ -1428,6 +1431,7 @@ async def test_segment_objects_async_enqueues_job(db_session, sample_user, sampl
         user_id=sample_user.id,
         min_area=200,
         max_segments=20,
+        _trace_carrier=ANY,
     )
 
 
@@ -1449,6 +1453,7 @@ async def test_segment_objects_async_default_body(db_session, sample_user, sampl
         user_id=sample_user.id,
         min_area=500,
         max_segments=50,
+        _trace_carrier=ANY,
     )
 
 
@@ -1474,6 +1479,7 @@ async def test_segment_with_prompt_async_enqueues_job(db_session, sample_user, s
         point_labels=[1],
         bbox=None,
         multimask_output=None,
+        _trace_carrier=ANY,
     )
 
 
@@ -1516,6 +1522,7 @@ async def test_segment_by_polygon_async_enqueues_job(db_session, sample_user, sa
         smooth=True,
         smoothing_factor=0.0,
         feather_px=0,
+        _trace_carrier=ANY,
     )
 
 
@@ -1564,6 +1571,7 @@ async def test_segment_hybrid_async_enqueues_job(db_session, sample_user, sample
         fallback_min_area=200,
         fallback_max_segments=20,
         overlap_iou_thresh=0.3,
+        _trace_carrier=ANY,
     )
 
 
@@ -1590,6 +1598,7 @@ async def test_sam_remove_object_async_enqueues_job(db_session, sample_user, sam
         ldm_steps=25,
         ldm_sampler='plms',
         hd_strategy='CROP',
+        _trace_carrier=ANY,
     )
 
 
@@ -1689,6 +1698,7 @@ async def test_extract_object_async_enqueues_job(db_session, sample_user, sample
         padding_pixels=20,
         label="my-object",
         persist_to_s3=True,
+        _trace_carrier=ANY,
     )
 
 
@@ -1712,6 +1722,7 @@ async def test_extract_object_async_default_body(db_session, sample_user, sample
         padding_pixels=8,
         label=None,
         persist_to_s3=False,
+        _trace_carrier=ANY,
     )
 
 

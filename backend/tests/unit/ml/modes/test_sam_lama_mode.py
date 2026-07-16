@@ -157,6 +157,7 @@ def mode(
 ):
     module = pytest.importorskip(MODULE_PATH)
     monkeypatch.setattr(module, "get_compositor", lambda: mock_compositor)
+    monkeypatch.setattr(module.DeviceManager, "get", staticmethod(lambda x: "cpu"))  # <-- додано
 
     return module.SAMLamaMode(
         segmentor=mock_segmentor,
@@ -825,10 +826,6 @@ async def test_alpha_to_mask_places_alpha_at_paste_bbox(mode, extracted_bytes):
     # Outside the bbox should remain zero
     assert arr[0:5, 0:5].max() == 0
 
-
-# ---------------------------------------------------------------------------
-# _resize_rgba_to_bbox
-# ---------------------------------------------------------------------------
 
 def test_resize_rgba_to_bbox_returns_target_size(mode):
     source = _rgba_png((20, 20))

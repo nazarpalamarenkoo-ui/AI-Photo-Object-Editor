@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import MagicMock, AsyncMock, patch, ANY
 from fastapi import HTTPException, UploadFile
 
 import app.api.v1.ml as ml_module
@@ -184,6 +184,7 @@ class TestRemoveObjectAsync:
             ldm_steps=25,
             ldm_sampler='plms',
             hd_strategy='CROP',
+            _trace_carrier=ANY,
         )
         assert result == {"job_id": "job-123"}
 
@@ -210,6 +211,7 @@ class TestRemoveObjectAsync:
             ldm_steps=40,
             ldm_sampler="ddim",
             hd_strategy="RESIZE",
+            _trace_carrier=ANY,
         )
 
 
@@ -233,6 +235,7 @@ class TestRemoveMultipleObjectsAsync:
             ldm_steps=25,
             ldm_sampler='plms',
             hd_strategy='CROP',
+            _trace_carrier=ANY,
         )
         assert result == {"job_id": "job-123"}
 
@@ -271,6 +274,7 @@ class TestReplaceObjectAsync:
             ldm_steps=25,
             ldm_sampler='plms',
             hd_strategy='CROP',
+            _trace_carrier=ANY,
         )
         assert result == {"job_id": "job-123"}
 
@@ -287,6 +291,7 @@ class TestSegmentObjectsAsync:
             user_id=1,
             min_area=500,
             max_segments=50,
+            _trace_carrier=ANY,
         )
         assert result == {"job_id": "job-123"}
 
@@ -301,6 +306,7 @@ class TestSegmentObjectsAsync:
             user_id=1,
             min_area=100,
             max_segments=10,
+            _trace_carrier=ANY,
         )
 
 
@@ -322,6 +328,7 @@ class TestSegmentWithPromptAsync:
             point_labels=[1],
             bbox=None,
             multimask_output=None,
+            _trace_carrier=ANY,
         )
         assert result == {"job_id": "job-123"}
 
@@ -360,6 +367,7 @@ class TestSegmentByPolygonAsync:
             smooth=False,
             smoothing_factor=0.2,
             feather_px=0,
+            _trace_carrier=ANY,
         )
         assert result == {"job_id": "job-123"}
 
@@ -389,6 +397,7 @@ class TestSegmentHybridAsync:
             fallback_min_area=200,
             fallback_max_segments=20,
             overlap_iou_thresh=0.3,
+            _trace_carrier=ANY,
         )
         assert result == {"job_id": "job-123"}
 
@@ -411,6 +420,7 @@ class TestSamRemoveObjectAsync:
             ldm_steps=25,
             ldm_sampler='plms',
             hd_strategy='CROP',
+            _trace_carrier=ANY,
         )
         assert result == {"job_id": "job-123"}
 
@@ -447,6 +457,7 @@ class TestSamReplaceObjectAsync:
             ldm_sampler='plms',
             hd_strategy='CROP',
             replacement_is_cutout=False,
+            _trace_carrier=ANY,
         )
         assert result == {"job_id": "job-123"}
 
@@ -525,6 +536,7 @@ class TestExtractObjectAsync:
             padding_pixels=8,
             label=None,
             persist_to_s3=False,
+            _trace_carrier=ANY,
         )
         assert result == {"job_id": "job-123"}
 
@@ -541,15 +553,13 @@ class TestExtractObjectAsync:
             padding_pixels=20,
             label="my-object",
             persist_to_s3=True,
+            _trace_carrier=ANY,
         )
-
-
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestGetJobStatus:
     def _patched_job(self, status, result_info=None):
-        """Патчить ml_module.Job так, щоб конструктор повертав мок з потрібним статусом."""
         job_instance = MagicMock()
         job_instance.status = AsyncMock(return_value=status)
         job_instance.result_info = AsyncMock(return_value=result_info)
