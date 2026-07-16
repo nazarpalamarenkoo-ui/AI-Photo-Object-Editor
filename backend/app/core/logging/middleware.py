@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import time
@@ -6,6 +5,7 @@ import time
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
+from starlette.routing import Match
 
 from app.core.logging.context import bind_request_context, clear_context, new_request_id
 from app.core.logging.logger import get_logger
@@ -15,9 +15,28 @@ logger = get_logger(__name__)
 REQUEST_ID_HEADER = "X-Request-ID"
 
 
+def _resolve_route_pattern(request: Request) -> str:
+    """
+    Resolves the registered route *pattern* (e.g. '/images/{image_id}/url')
+    instead of the raw path (e.g. '/images/153/url'). This keeps the
+    'endpoint' field low-cardinality — critical for LogQL aggregations
+    like `quantile_over_time(...) by (endpoint)` and Grafana dashboards,
+    where one series per distinct image_id would otherwise blow up the
+    legend and make percentile calculations meaningless (too few samples
+    per series).
+    """
+    for route in request.app.router.routes:
+        match, _ = route.matches(request.scope)
+        if match == Match.FULL:
+            return getattr(route, "path", request.url.path)
+    return request.url.path
+
+
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """
     - Reuses an inbound `X-Request-ID` or generates a fresh uuid4 otherwise.
+    - Resolves the FastAPI route *pattern* (not the raw path with IDs in it)
+      so 'endpoint' stays low-cardinality across logs and metrics.
     - Binds request_id / method / endpoint into contextvars so *every* log
       line emitted anywhere during this request — including deep inside
       services, repositories, and the ML pipeline — automatically carries
@@ -33,7 +52,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
         request_id = request.headers.get(REQUEST_ID_HEADER) or new_request_id()
-        endpoint = request.url.path
+        endpoint = _resolve_route_pattern(request)
         method = request.method
 
         bind_request_context(request_id=request_id, method=method, endpoint=endpoint)
@@ -43,6 +62,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         logger.info(
             "request_started",
             client_ip=request.client.host if request.client else None,
+            raw_path=request.url.path,
         )
 
         try:

@@ -19,6 +19,12 @@ def make_request(
     headers: list[tuple[bytes, bytes]] | None = None,
     client: tuple[str, int] | None = ("127.0.0.1", 12345),
 ) -> Request:
+    class _DummyRouter:
+        routes: list = []
+
+    class _DummyApp:
+        router = _DummyRouter()
+
     scope = {
         "type": "http",
         "method": method,
@@ -28,6 +34,7 @@ def make_request(
         "query_string": b"",
         "server": ("testserver", 80),
         "scheme": "http",
+        "app": _DummyApp(),
     }
     return Request(scope)
  
@@ -141,7 +148,7 @@ class TestLoggingBehavior:
         await middleware.dispatch(request, call_next)
  
         patched_collaborators["logger"].info.assert_any_call(
-            "request_started", client_ip="10.0.0.5"
+            "request_started", client_ip="10.0.0.5", raw_path="/foo"
         )
  
     @pytest.mark.asyncio
@@ -156,7 +163,7 @@ class TestLoggingBehavior:
         await middleware.dispatch(request, call_next)
  
         patched_collaborators["logger"].info.assert_any_call(
-            "request_started", client_ip=None
+            "request_started", client_ip=None, raw_path="/foo"
         )
  
     @pytest.mark.asyncio
@@ -251,4 +258,4 @@ class TestResponseHeader:
  
         with pytest.raises(RuntimeError):
             result = await middleware.dispatch(request, call_next)
-            assert result is None  # unreachable; dispatch raises instead
+            assert result is None
