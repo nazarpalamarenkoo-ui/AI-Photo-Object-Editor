@@ -76,6 +76,7 @@ export interface RegionItem {
   label: string
   confidence?: number
   points?: { x: number; y: number }[]
+  mask_url?: string
 }
 
 export interface DetectionStats {
@@ -141,6 +142,7 @@ export interface SegmentInfo {
   area: number
   stability_score: number | null
   source?: SegmentSource
+  mask_url?: string
 }
 
 export interface SegmentHybridParams {
