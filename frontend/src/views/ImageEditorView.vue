@@ -200,6 +200,7 @@ const regions = computed<RegionItem[]>(() =>
         bbox: s.bbox,
         label: `Object #${s.mask_id}`,
         points: polygonShapes.value[s.mask_id],
+        mask_url: s.mask_url,
       }))
 )
 
@@ -296,5 +297,5 @@ onMounted(() => {
 })
 </script>
 <style scoped>
-@import '@/styles/views/editorvue.css'
+@import '@/styles/views/editorvue.css';
 </style>
