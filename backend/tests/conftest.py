@@ -226,69 +226,61 @@ async def multiple_images(db_session, sample_user):
 
 
 @pytest.fixture
-def fake_sam2_env(monkeypatch):
-    build_sam2 = MagicMock(return_value=MagicMock(name="sam_model"))
+def fake_mobile_sam_env(monkeypatch):
+    """
+    Fakes the `mobile_sam` package so MobileSAMSegmentor can be built
+    without the real ViT-Tiny checkpoint or the mobile_sam dependency.
+    Yields handles to the mocked model/predictor/auto-generator so tests
+    can assert on how they were called.
+    """
+    model_instance = MagicMock(name="sam_model_instance")
+    model_instance.to.return_value = model_instance
+    model_instance.eval.return_value = model_instance
 
-    predictor_instance = MagicMock()
-    predictor_instance.predict.return_value = (
-        np.array([
-            np.pad(np.ones((4, 4), dtype=bool), ((0, 16), (0, 16))),
-            np.pad(np.ones((3, 3), dtype=bool), ((5, 12), (5, 12))),
-            np.zeros((20, 20), dtype=bool),
-        ]),
-        np.array([0.6, 0.9, 0.99]),
-        None,
+    sam_model_registry = {"vit_t": MagicMock(return_value=model_instance)}
+
+    predictor_instance = MagicMock(name="predictor_instance")
+    predictor_instance.set_image = MagicMock()
+    predictor_instance.predict = MagicMock(
+        return_value=(
+            np.array([np.ones((32, 32), dtype=bool)]),
+            np.array([0.95]),
+            None,
+        )
     )
+    SamPredictor = MagicMock(return_value=predictor_instance)
 
-    predictor_cls = MagicMock(return_value=predictor_instance)
+    auto_generator_instance = MagicMock(name="auto_generator_instance")
+    auto_generator_instance.generate = MagicMock(return_value=[])
+    SamAutomaticMaskGenerator = MagicMock(return_value=auto_generator_instance)
 
-    auto_gen_instance = MagicMock()
-    auto_gen_instance.generate.return_value = [
-        {
-            "segmentation": np.pad(np.ones((6, 6), dtype=np.uint8), ((0, 14), (0, 14))),
-            "bbox": [0, 0, 6, 6],
-            "area": 36,
-            "stability_score": 0.80,
-            "predicted_iou": 0.81,
-        },
-        {
-            "segmentation": np.pad(np.ones((3, 3), dtype=np.uint8), ((10, 7), (10, 7))),
-            "bbox": [10, 10, 3, 3],
-            "area": 9,
-            "stability_score": 0.95,
-            "predicted_iou": 0.96,
-        },
-    ]
+    fake_module = types.ModuleType("mobile_sam")
+    fake_module.sam_model_registry = sam_model_registry
+    fake_module.SamPredictor = SamPredictor
+    fake_module.SamAutomaticMaskGenerator = SamAutomaticMaskGenerator
 
-    auto_gen_cls = MagicMock(return_value=auto_gen_instance)
-
-    build_module = types.ModuleType("sam2.build_sam")
-    build_module.build_sam2 = build_sam2
-
-    predictor_module = types.ModuleType("sam2.sam2_image_predictor")
-    predictor_module.SAM2ImagePredictor = predictor_cls
-
-    auto_module = types.ModuleType("sam2.automatic_mask_generator")
-    auto_module.SAM2AutomaticMaskGenerator = auto_gen_cls
-
-    monkeypatch.setitem(sys.modules, "sam2.build_sam", build_module)
-    monkeypatch.setitem(sys.modules, "sam2.sam2_image_predictor", predictor_module)
-    monkeypatch.setitem(sys.modules, "sam2.automatic_mask_generator", auto_module)
+    monkeypatch.setitem(sys.modules, "mobile_sam", fake_module)
 
     yield {
-        "build_sam2": build_sam2,
-        "predictor_cls": predictor_cls,
+        "module": fake_module,
+        "sam_model_registry": sam_model_registry,
+        "model_instance": model_instance,
+        "SamPredictor": SamPredictor,
         "predictor_instance": predictor_instance,
-        "auto_gen_cls": auto_gen_cls,
-        "auto_gen_instance": auto_gen_instance,
+        "SamAutomaticMaskGenerator": SamAutomaticMaskGenerator,
+        "auto_generator_instance": auto_generator_instance,
     }
-    
-@pytest.fixture
-def segmentor(fake_sam2_env, tracker):
-    from app.ml.segmentor import SAM2Segmentor
 
-    return SAM2Segmentor(
-        model_path="weights/fake.pt",
+
+@pytest.fixture
+def segmentor(fake_mobile_sam_env, tracker):
+    from importlib import import_module
+
+    mod = import_module("app.ml.segmentor")
+
+    return mod.MobileSAMSegmentor(
+        model_path="fake_weights/mobile_sam.pt",
+        model_type="vit_t",
         device="cpu",
         tracker=tracker,
     )
