@@ -72,7 +72,9 @@ export const mlApi = {
       {
         expand_mask_pixels: expandMaskPixels,
         use_edge_blending: useEdgeBlending,
-        ldm,
+        ldm_steps: ldm.ldm_steps,
+        ldm_sampler: ldm.ldm_sampler,
+        hd_strategy: ldm.hd_strategy,
       }
     )
     return pollJob<MLResultResponse>(data.job_id, { onStatus })
@@ -91,7 +93,9 @@ export const mlApi = {
         bbox_ids: bboxIds,
         expand_mask_pixels: expandMaskPixels,
         use_edge_blending: useEdgeBlending,
-        ldm,
+        ldm_steps: ldm.ldm_steps,
+        ldm_sampler: ldm.ldm_sampler,
+        hd_strategy: ldm.hd_strategy,
       }
     )
     return pollJob<MLResultResponse>(data.job_id, { onStatus })
@@ -210,7 +214,9 @@ export const mlApi = {
       {
         expand_mask_pixels: expandMaskPixels,
         use_edge_blending: useEdgeBlending,
-        ldm,
+        ldm_steps: ldm.ldm_steps,
+        ldm_sampler: ldm.ldm_sampler,
+        hd_strategy: ldm.hd_strategy,
       }
     )
     return pollJob<MLResultResponse>(data.job_id, { onStatus })

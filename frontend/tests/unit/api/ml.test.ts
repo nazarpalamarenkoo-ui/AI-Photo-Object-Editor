@@ -188,7 +188,9 @@ describe('mlApi: removeObject', () => {
     expect(mockedClient.post).toHaveBeenCalledWith('/ml/images/1/remove/2/async', {
       expand_mask_pixels: 5,
       use_edge_blending: false,
-      ldm: qualityLdm,
+      ldm_steps: qualityLdm.ldm_steps,
+      ldm_sampler: qualityLdm.ldm_sampler,
+      hd_strategy: qualityLdm.hd_strategy,
     })
   })
 
@@ -200,7 +202,9 @@ describe('mlApi: removeObject', () => {
     expect(mockedClient.post).toHaveBeenCalledWith('/ml/images/1/remove/2/async', {
       expand_mask_pixels: 15,
       use_edge_blending: true,
-      ldm: fastLdm,
+      ldm_steps: fastLdm.ldm_steps,
+      ldm_sampler: fastLdm.ldm_sampler,
+      hd_strategy: fastLdm.hd_strategy,
     })
   })
 
@@ -245,7 +249,9 @@ describe('mlApi: removeMultipleObjects', () => {
       bbox_ids: [2, 3, 4],
       expand_mask_pixels: 5,
       use_edge_blending: false,
-      ldm: qualityLdm,
+      ldm_steps: qualityLdm.ldm_steps,
+      ldm_sampler: qualityLdm.ldm_sampler,
+      hd_strategy: qualityLdm.hd_strategy,
     })
   })
 
@@ -258,7 +264,9 @@ describe('mlApi: removeMultipleObjects', () => {
       bbox_ids: [2, 3],
       expand_mask_pixels: 10,
       use_edge_blending: true,
-      ldm: fastLdm,
+      ldm_steps: fastLdm.ldm_steps,
+      ldm_sampler: fastLdm.ldm_sampler,
+      hd_strategy: fastLdm.hd_strategy,
     })
   })
 
@@ -553,7 +561,9 @@ describe('mlApi: samRemoveObject', () => {
       {
         expand_mask_pixels: 12,
         use_edge_blending: false,
-        ldm: qualityLdm,
+        ldm_steps: qualityLdm.ldm_steps,
+        ldm_sampler: qualityLdm.ldm_sampler,
+        hd_strategy: qualityLdm.hd_strategy,
       }
     )
   })
@@ -566,7 +576,24 @@ describe('mlApi: samRemoveObject', () => {
     const [, body] = mockedClient.post.mock.calls[0]
     expect((body as any).expand_mask_pixels).toBe(20)
     expect((body as any).use_edge_blending).toBe(false)
-    expect((body as any).ldm).toEqual(fastLdm)
+    expect((body as any).ldm_steps).toBe(fastLdm.ldm_steps)
+    expect((body as any).ldm_sampler).toBe(fastLdm.ldm_sampler)
+    expect((body as any).hd_strategy).toBe(fastLdm.hd_strategy)
+    expect((body as any).ldm).toBeUndefined()
+  })
+
+  it('passes custom expandMaskPixels, useEdgeBlending and ldm', async () => {
+    mockJobSuccess('job-7', fakeMLResult)
+
+    await mlApi.samRemoveObject(1, 3, 20, false, fastLdm)
+
+    const [, body] = mockedClient.post.mock.calls[0]
+    expect((body as any).expand_mask_pixels).toBe(20)
+    expect((body as any).use_edge_blending).toBe(false)
+    expect((body as any).ldm_steps).toBe(fastLdm.ldm_steps)
+    expect((body as any).ldm_sampler).toBe(fastLdm.ldm_sampler)
+    expect((body as any).hd_strategy).toBe(fastLdm.hd_strategy)
+    expect((body as any).ldm).toBeUndefined()
   })
 
   it('polls the job and returns MLResultResponse', async () => {
