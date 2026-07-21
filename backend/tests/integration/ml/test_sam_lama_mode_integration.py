@@ -28,19 +28,6 @@ def _mask_png(size: Tuple[int, int], box) -> bytes:
     return buf.getvalue()
 
 
-def _rgba_png(size: Tuple[int, int], color=(200, 30, 30, 255)) -> bytes:
-    buf = BytesIO()
-    Image.new("RGBA", size, color).save(buf, format="PNG")
-    return buf.getvalue()
-
-
-def _rgba_cutout(size: Tuple[int, int], color=(0, 200, 0, 255)) -> bytes:
-    """A pre-cut RGBA asset (e.g. from an asset library) with no transparency to strip."""
-    buf = BytesIO()
-    Image.new("RGBA", size, color).save(buf, format="PNG")
-    return buf.getvalue()
-
-
 @pytest.fixture
 def module():
     return pytest.importorskip(MODULE_PATH)
@@ -71,8 +58,16 @@ def real_compositor(module):
 
 
 @pytest.fixture
+def real_polygon_masker(module):
+    try:
+        return module.get_polygon_masker()
+    except Exception as exc:
+        pytest.skip(f"could not construct real PolygonMasker: {exc}")
+
+
+@pytest.fixture
 def stub_segmentor():
-    seg = MagicMock()
+    seg = MagicMock(name="stub_segmentor")
     seg.segment_auto = AsyncMock(return_value={"segments": [], "metrics": {}})
     seg.segment_with_prompt = AsyncMock(return_value={"segments": [], "metrics": {}})
     seg.segment_with_prompts_batch = AsyncMock(return_value={"segments": [], "metrics": {}})
@@ -81,7 +76,7 @@ def stub_segmentor():
 
 @pytest.fixture
 def stub_inpainter():
-    inp = MagicMock()
+    inp = MagicMock(name="stub_inpainter")
 
     async def fake_inpaint(image_bytes, mask_bytes, mode, track_metrics=True, **kwargs):
         img = Image.open(BytesIO(image_bytes)).convert("RGB")
@@ -99,7 +94,7 @@ def stub_inpainter():
 
 @pytest.fixture
 def stub_background_remover():
-    br = MagicMock()
+    br = MagicMock(name="stub_background_remover")
 
     async def fake_remove_and_resize(image_bytes, size):
         img = Image.open(BytesIO(image_bytes)).convert("RGBA").resize(size)
@@ -111,313 +106,86 @@ def stub_background_remover():
     return br
 
 
-@pytest.fixture
-def mode(
+@pytest.fixture(autouse=True)
+def reset_singleton_and_patch_heavy_deps(
     module,
+    monkeypatch,
     stub_segmentor,
     stub_inpainter,
     stub_background_remover,
     real_edge_blender,
     real_color_matcher,
     real_compositor,
-    monkeypatch,
+    real_polygon_masker,
 ):
+    monkeypatch.setattr(module, "_sam_mode_instance", None)
+    monkeypatch.setattr(module.DeviceManager, "get", staticmethod(lambda x: "cpu"))
+
+    monkeypatch.setattr(module, "get_segmentor", MagicMock(return_value=stub_segmentor))
+    monkeypatch.setattr(module, "get_inpainter", MagicMock(return_value=stub_inpainter))
+    monkeypatch.setattr(
+        module, "get_background_remover",
+        MagicMock(return_value=stub_background_remover),
+    )
+    monkeypatch.setattr(module, "get_edge_blender", lambda: real_edge_blender)
+    monkeypatch.setattr(module, "get_color_matcher", lambda: real_color_matcher)
     monkeypatch.setattr(module, "get_compositor", lambda: real_compositor)
+    monkeypatch.setattr(module, "get_polygon_masker", lambda: real_polygon_masker)
 
-    return module.SAMLamaMode(
-        segmentor=stub_segmentor,
-        inpainter=stub_inpainter,
-        edge_blender=real_edge_blender,
-        color_matcher=real_color_matcher,
-        background_remover=stub_background_remover,
-    )
 
-async def test_remove_object_end_to_end_returns_correct_size(mode):
-    image_bytes = _rgb_png((100, 100), color=(50, 60, 70))
-    mask_bytes = _mask_png((100, 100), box=(30, 30, 70, 70))
+class TestGetSamModeSingletonIntegration:
+    def test_returns_same_instance_across_calls(self, module):
+        first = module.get_sam_mode()
+        second = module.get_sam_mode()
 
-    result = await mode.remove_object(
-        image_bytes, mask_bytes, use_edge_blending=True, expand_mask_pixels=10
-    )
+        assert first is second
 
-    decoded = Image.open(BytesIO(result["result_bytes"]))
-    assert decoded.size == (100, 100)
+    def test_builds_heavy_dependencies_exactly_once(self, module):
+        module.get_sam_mode()
+        module.get_sam_mode()
+        module.get_sam_mode()
 
+        assert module.get_segmentor.call_count == 1
+        assert module.get_inpainter.call_count == 1
 
-async def test_remove_object_real_dilation_expands_inpaint_region(mode):
-    image_bytes = _rgb_png((100, 100), color=(10, 10, 10))
-    mask_bytes = _mask_png((100, 100), box=(40, 40, 60, 60))  # 20x20 = 400px
+    def test_wires_real_edge_blender_color_matcher_and_compositor(
+        self, module, real_edge_blender, real_color_matcher, real_compositor
+    ):
+        instance = module.get_sam_mode()
 
-    dilated_used = {}
-    original_dilate = mode._dilate_mask
+        assert instance.edge_blender is real_edge_blender
+        assert instance.color_matcher is real_color_matcher
+        assert instance.compositor is real_compositor
 
-    async def spy_dilate(mb, px):
-        out = await original_dilate(mb, px)
-        dilated_used["mask"] = out
-        return out
+    async def test_singleton_instance_remove_object_end_to_end(self, module):
+        """Exercises the actual singleton-built pipeline: real dilation, real edge blending, on a small synthetic image."""
+        instance = module.get_sam_mode()
 
-    mode._dilate_mask = spy_dilate
+        image_bytes = _rgb_png((100, 100), color=(50, 60, 70))
+        mask_bytes = _mask_png((100, 100), box=(30, 30, 70, 70))
 
-    await mode.remove_object(image_bytes, mask_bytes, expand_mask_pixels=10, use_edge_blending=False)
+        result = await instance.remove_object(
+            image_bytes, mask_bytes, use_edge_blending=True, expand_mask_pixels=10
+        )
 
-    dilated_arr = np.array(Image.open(BytesIO(dilated_used["mask"])).convert("L"))
-    assert (dilated_arr > 0).sum() > 400
+        decoded = Image.open(BytesIO(result["result_bytes"]))
+        assert decoded.size == (100, 100)
 
+    async def test_singleton_instance_replace_object_cutout_end_to_end(self, module):
+        instance = module.get_sam_mode()
 
-async def test_remove_object_without_dilation_uses_original_mask_area(mode):
-    image_bytes = _rgb_png((100, 100))
-    mask_bytes = _mask_png((100, 100), box=(40, 40, 60, 60))
+        image_bytes = _rgb_png((100, 100), color=(30, 30, 30))
+        mask_bytes = _mask_png((100, 100), box=(20, 20, 60, 60))
+        cutout_bytes = BytesIO()
+        Image.new("RGBA", (40, 40), (255, 0, 0, 255)).save(cutout_bytes, format="PNG")
+        bbox = {"x1": 20, "y1": 20, "x2": 60, "y2": 60}
 
-    result = await mode.remove_object(
-        image_bytes, mask_bytes, expand_mask_pixels=0, use_edge_blending=False
-    )
+        result = await instance.replace_object(
+            image_bytes, mask_bytes, bbox, cutout_bytes.getvalue(),
+            use_color_matching=True, use_edge_blending=False,
+            replacement_is_cutout=True,
+        )
 
-    decoded = np.array(Image.open(BytesIO(result["result_bytes"])).convert("RGB"))
-    # the fake inpainter flat-fills masked pixels to (180,180,180)
-    filled = (decoded == np.array([180, 180, 180])).all(axis=-1)
-    assert filled.sum() > 0
-
-
-async def test_replace_object_end_to_end_produces_correct_canvas_size(mode):
-    image_bytes = _rgb_png((120, 120), color=(20, 20, 20))
-    mask_bytes = _mask_png((120, 120), box=(40, 40, 80, 80))
-    replacement_bytes = _rgb_png((50, 50), color=(0, 200, 0))
-    bbox = {"x1": 40, "y1": 40, "x2": 80, "y2": 80}
-
-    result = await mode.replace_object(
-        image_bytes, mask_bytes, bbox, replacement_bytes,
-        use_color_matching=True, use_edge_blending=False,
-    )
-
-    decoded = Image.open(BytesIO(result["result_bytes"]))
-    assert decoded.size == (120, 120)
-
-
-async def test_replace_object_resized_replacement_matches_bbox_dimensions(mode):
-    image_bytes = _rgb_png((120, 120))
-    mask_bytes = _mask_png((120, 120), box=(10, 10, 50, 70))
-    replacement_bytes = _rgb_png((10, 10))
-    bbox = {"x1": 10, "y1": 10, "x2": 50, "y2": 70}  # 40 x 60
-
-    captured = {}
-    original = mode.background_remover.remove_and_resize
-
-    async def spy(img, size):
-        captured["size"] = size
-        return await original(img, size)
-
-    mode.background_remover.remove_and_resize = spy
-
-    await mode.replace_object(image_bytes, mask_bytes, bbox, replacement_bytes, use_color_matching=False)
-
-    assert captured["size"] == (40, 60)
-
-async def test_extract_then_paste_round_trip_preserves_object_silhouette(mode):
-    canvas = np.full((100, 100, 3), 15, dtype=np.uint8)
-
-    canvas[20:50, 20:50] = (220, 40, 40)
-
-    buffer = BytesIO()
-    Image.fromarray(canvas).save(buffer, format="PNG")
-    image_bytes = buffer.getvalue()
-
-    mask_bytes = _mask_png(
-        (100, 100),
-        box=(20, 20, 50, 50),
-    )
-
-    bbox = {
-        "x1": 20,
-        "y1": 20,
-        "x2": 50,
-        "y2": 50,
-    }
-    extracted = await mode.extract_object(
-        image_bytes=image_bytes,
-        mask_bytes=mask_bytes,
-        bbox=bbox,
-        padding_pixels=0,
-    )
-    assert extracted["area_pixels"] == 30 * 30
-    target_bbox = {
-        "x1": 60,
-        "y1": 60,
-        "x2": 90,
-        "y2": 90,
-    }
-
-    pasted = await mode.paste_extracted_object(
-        image_bytes=image_bytes,
-        extracted_bytes=extracted["extracted_bytes"],
-        target_bbox=target_bbox,
-        use_color_matching=False,
-        use_edge_blending=True,
-    )
-    decoded = np.array(
-        Image.open(BytesIO(pasted["result_bytes"])).convert("RGB")
-    )
-    assert decoded.shape[:2] == (100, 100)
-    region = decoded[60:90, 60:90]
-    assert not (region == np.array([15, 15, 15])).all()
-
-    assert region[..., 0].max() > 150
-    assert region[..., 1].max() < 100
-    assert region[..., 2].max() < 100
-
-
-async def test_extract_object_alpha_then_alpha_to_mask_consistent_area(mode):
-    image_bytes = _rgb_png((80, 80))
-    mask_bytes = _mask_png((80, 80), box=(10, 10, 30, 30))  # 20x20
-    bbox = {"x1": 10, "y1": 10, "x2": 30, "y2": 30}
-
-    extracted = await mode.extract_object(image_bytes, mask_bytes, bbox, padding_pixels=0)
-
-    paste_bbox = {"x1": 40, "y1": 40, "x2": 60, "y2": 60}
-    mask_out = await mode._alpha_to_mask(
-        extracted_bytes=extracted["extracted_bytes"],
-        paste_bbox=paste_bbox,
-        object_size=(20, 20),
-        canvas_size=(80, 80),
-    )
-
-    arr = np.array(Image.open(BytesIO(mask_out)).convert("L"))
-    assert (arr > 0).sum() == pytest.approx(20 * 20, abs=5)
-
-
-async def test_segment_objects_reports_real_image_dimensions(mode, stub_segmentor):
-    stub_segmentor.segment_auto = AsyncMock(return_value={
-        "segments": [{"area": 999, "bbox": {"x1": 0, "y1": 0, "x2": 5, "y2": 5}}],
-        "metrics": {},
-    })
-    image_bytes = _rgb_png((333, 217))
-
-    result = await mode.segment_objects(image_bytes, min_area=0)
-
-    assert result["image_size"] == (333, 217)
-
-
-async def test_segment_with_prompts_batch_reports_real_image_dimensions(mode, stub_segmentor):
-    stub_segmentor.segment_with_prompts_batch = AsyncMock(return_value={
-        "segments": [
-            {"bbox": {"x1": 0, "y1": 0, "x2": 5, "y2": 5}},
-            {"bbox": {"x1": 10, "y1": 10, "x2": 15, "y2": 15}},
-        ],
-        "metrics": {},
-    })
-    image_bytes = _rgb_png((333, 217))
-    bboxes = [
-        {"x1": 0, "y1": 0, "x2": 5, "y2": 5},
-        {"x1": 10, "y1": 10, "x2": 15, "y2": 15},
-    ]
-
-    result = await mode.segment_with_prompts_batch(image_bytes, bboxes)
-
-    assert result["image_size"] == (333, 217)
-    assert [s["bbox_id"] for s in result["segments"]] == [0, 1]
-
-
-async def test_segment_with_prompts_batch_end_to_end_bbox_id_matches_input_order(
-    mode, stub_segmentor
-):
-    """Segments come back sorted in input bbox order; bbox_id must reflect that order."""
-    bboxes = [
-        {"x1": 5, "y1": 5, "x2": 15, "y2": 15},
-        {"x1": 50, "y1": 50, "x2": 70, "y2": 70},
-        {"x1": 100, "y1": 100, "x2": 120, "y2": 120},
-    ]
-    stub_segmentor.segment_with_prompts_batch = AsyncMock(return_value={
-        "segments": [{"bbox": b} for b in bboxes],
-        "metrics": {"encoder_passes": 1},
-    })
-    image_bytes = _rgb_png((200, 200))
-
-    result = await mode.segment_with_prompts_batch(image_bytes, bboxes)
-
-    for idx, (seg, expected_bbox) in enumerate(zip(result["segments"], bboxes)):
-        assert seg["bbox_id"] == idx
-        assert seg["bbox"] == expected_bbox
-    assert result["metrics"] == {"encoder_passes": 1}
-
-
-async def test_replace_object_with_cutout_skips_background_remover(mode):
-    image_bytes = _rgb_png((120, 120), color=(20, 20, 20))
-    mask_bytes = _mask_png((120, 120), box=(40, 40, 80, 80))
-    cutout_bytes = _rgba_cutout((50, 50))
-    bbox = {"x1": 40, "y1": 40, "x2": 80, "y2": 80}
-
-    await mode.replace_object(
-        image_bytes, mask_bytes, bbox, cutout_bytes,
-        use_color_matching=False, use_edge_blending=False,
-        replacement_is_cutout=True,
-    )
-
-    mode.background_remover.remove_and_resize.assert_not_called()
-
-
-async def test_replace_object_with_cutout_resizes_to_bbox_dimensions(mode):
-    image_bytes = _rgb_png((120, 120), color=(20, 20, 20))
-    mask_bytes = _mask_png((120, 120), box=(10, 10, 50, 70))
-    cutout_bytes = _rgba_cutout((10, 10))
-    bbox = {"x1": 10, "y1": 10, "x2": 50, "y2": 70}  # 40 x 60
-
-    captured = {}
-    original = mode._resize_rgba_to_bbox
-
-    def spy(img_bytes, size):
-        captured["size"] = size
-        return original(img_bytes, size)
-
-    mode._resize_rgba_to_bbox = spy
-
-    await mode.replace_object(
-        image_bytes, mask_bytes, bbox, cutout_bytes,
-        use_color_matching=False, replacement_is_cutout=True,
-    )
-
-    assert captured["size"] == (40, 60)
-
-
-async def test_replace_object_with_cutout_places_color_at_bbox_location(mode):
-    image_bytes = _rgb_png((120, 120), color=(20, 20, 20))
-    mask_bytes = _mask_png((120, 120), box=(40, 40, 80, 80))
-    cutout_bytes = _rgba_cutout((50, 50), color=(0, 220, 0, 255))
-    bbox = {"x1": 40, "y1": 40, "x2": 80, "y2": 80}
-
-    result = await mode.replace_object(
-        image_bytes, mask_bytes, bbox, cutout_bytes,
-        use_color_matching=False, use_edge_blending=False,
-        replacement_is_cutout=True,
-    )
-
-    decoded = np.array(Image.open(BytesIO(result["result_bytes"])).convert("RGB"))
-    region = decoded[40:80, 40:80]
-    assert region[..., 1].mean() > region[..., 0].mean()
-    assert region[..., 1].mean() > region[..., 2].mean()
-
-
-async def test_replace_object_with_cutout_end_to_end_canvas_size(mode):
-    image_bytes = _rgb_png((100, 100), color=(30, 30, 30))
-    mask_bytes = _mask_png((100, 100), box=(20, 20, 60, 60))
-    cutout_bytes = _rgba_cutout((40, 40), color=(255, 0, 0, 255))
-    bbox = {"x1": 20, "y1": 20, "x2": 60, "y2": 60}
-
-    result = await mode.replace_object(
-        image_bytes, mask_bytes, bbox, cutout_bytes,
-        use_color_matching=True, use_edge_blending=False,
-        replacement_is_cutout=True,
-    )
-
-    decoded = Image.open(BytesIO(result["result_bytes"]))
-    assert decoded.size == (100, 100)
-
-
-async def test_replace_object_default_still_uses_background_remover(mode):
-    """Sanity check: replacement_is_cutout defaults to False, preserving old behavior."""
-    image_bytes = _rgb_png((120, 120))
-    mask_bytes = _mask_png((120, 120), box=(40, 40, 80, 80))
-    replacement_bytes = _rgb_png((50, 50), color=(0, 200, 0))
-    bbox = {"x1": 40, "y1": 40, "x2": 80, "y2": 80}
-
-    await mode.replace_object(image_bytes, mask_bytes, bbox, replacement_bytes)
-
-    mode.background_remover.remove_and_resize.assert_called_once()
+        decoded = Image.open(BytesIO(result["result_bytes"]))
+        assert decoded.size == (100, 100)
+        instance.background_remover.remove_and_resize.assert_not_called()

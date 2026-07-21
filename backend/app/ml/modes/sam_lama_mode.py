@@ -2,11 +2,11 @@ import asyncio
 from typing import Optional, List, Dict, Tuple
 from io import BytesIO
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 
 from app.config.settings import settings
 from app.config.device_manager import DeviceManager
-from app.ml.segmentor import SAM2Segmentor, get_segmentor
+from app.ml.segmentor import MobileSAMSegmentor, get_segmentor
 from app.ml.inpainter import LaMaInpainter, InpaintMode, get_inpainter
 from app.ml.processors.edge_blender import EdgeBlender, get_edge_blender
 from app.ml.processors.color_matcher import ColorMatcher, get_color_matcher
@@ -34,7 +34,7 @@ class SAMLamaMode:
 
     def __init__(
         self,
-        segmentor: Optional[SAM2Segmentor] = None,
+        segmentor: Optional[MobileSAMSegmentor] = None,
         inpainter: Optional[LaMaInpainter] = None,
         edge_blender: Optional[EdgeBlender] = None,
         color_matcher: Optional[ColorMatcher] = None,
@@ -56,6 +56,7 @@ class SAMLamaMode:
         image_bytes: bytes,
         min_area: int = 500,
         max_segments: int = 50,
+        max_area_ratio: float = 0.85,
     ) -> Dict:
         """
         Auto-segmentation of the entire image without prompts.
@@ -72,20 +73,35 @@ class SAMLamaMode:
                 - image_size: (W, H)
         """
         img = Image.open(BytesIO(image_bytes))
+        W, H = img.size
+        image_area = W * H
 
         async with log_ml_operation(
             "sam_segment_auto",
-            model="sam2.1",
+            model="mobile_sam",
             device=str(self.device),
             image_size=img.size,
             min_area=min_area,
             max_segments=max_segments,
+            max_area_ratio=max_area_ratio,
         ) as op:
             result = await self.segmentor.segment_auto(image_bytes)
 
+            def _is_background(seg: Dict) -> bool:
+                bbox = seg["bbox"]
+                bbox_w = bbox["x2"] - bbox["x1"]
+                bbox_h = bbox["y2"] - bbox["y1"]
+                # discard if:
+                # (a) the mask covers almost the entire frame area, or
+                # (b) the bounding box spans almost the entire frame along both axes
+                return (
+                    seg["area"] / image_area > max_area_ratio
+                    or (bbox_w / W > 0.98 and bbox_h / H > 0.98)
+                )
+
             filtered = [
                 s for s in result["segments"]
-                if s["area"] >= min_area
+                if s["area"] >= min_area and not _is_background(s)
             ][:max_segments]
 
             for idx, seg in enumerate(filtered):
@@ -129,7 +145,7 @@ class SAMLamaMode:
 
         async with log_ml_operation(
             "sam_segment_prompt",
-            model="sam2.1",
+            model="mobile_sam",
             device=str(self.device),
             image_size=img.size,
             num_points=len(point_coords) if point_coords else 0,
@@ -161,7 +177,7 @@ class SAMLamaMode:
         bboxes: List[Dict[str, int]],
     ) -> Dict:
         """
-        Batched box-prompt segmentation — one SAM2 image-encoder pass,
+        Batched box-prompt segmentation — one MobileSAM image-encoder pass,
         N cheap decoder calls
 
         Args:
@@ -178,7 +194,7 @@ class SAMLamaMode:
 
         async with log_ml_operation(
             "sam_segment_batch",
-            model="sam2.1",
+            model="mobile_sam",
             device=str(self.device),
             image_size=img.size,
             num_bboxes=len(bboxes),
@@ -208,7 +224,7 @@ class SAMLamaMode:
         feather_px: int = 0,
     ) -> Dict:
         """
-        Exact segmentation by polygon points (lasso), without SAM2.
+        Exact segmentation by polygon points (lasso), without MobileSAM.
 
         Returns:
             Dict: segments (1 element: bbox, area, mask_bytes, mask_id=0,
@@ -509,24 +525,27 @@ class SAMLamaMode:
         padding_pixels: int,
         output_format: str,
     ) -> Dict:
-        img = Image.open(BytesIO(image_bytes)).convert("RGBA")
-        mask = Image.open(BytesIO(mask_bytes)).convert("L")
+        img = Image.open(BytesIO(image_bytes)).convert("RGB")   
+        mask = Image.open(BytesIO(mask_bytes)).convert("L")      
 
         W, H = img.size
-
         x1 = max(0, bbox["x1"] - padding_pixels)
         y1 = max(0, bbox["y1"] - padding_pixels)
         x2 = min(W, bbox["x2"] + padding_pixels)
         y2 = min(H, bbox["y2"] + padding_pixels)
 
-        img_crop = img.crop((x1, y1, x2, y2))
-        mask_crop = mask.crop((x1, y1, x2, y2))
+        img_crop = img.crop((x1, y1, x2, y2))     
+        mask_crop = mask.crop((x1, y1, x2, y2))   
 
-        r, g, b, _ = img_crop.split()
-        result_img = Image.merge("RGBA", (r, g, b, mask_crop))
+        mask_arr = np.array(mask_crop)
+        mask_arr = np.where(mask_arr > 128, 255, 0).astype(np.uint8)
+        alpha = Image.fromarray(mask_arr, mode="L")
 
-        alpha_array = np.array(mask_crop)
-        area_pixels = int((alpha_array > 128).sum())
+        result_img = Image.new("RGBA", img_crop.size)
+        result_img.paste(img_crop, (0, 0))  
+        result_img.putalpha(alpha)           
+
+        area_pixels = int((mask_arr > 128).sum())
 
         buf = BytesIO()
         result_img.save(buf, format=output_format)
