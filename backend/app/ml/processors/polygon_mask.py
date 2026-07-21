@@ -62,23 +62,27 @@ class PolygonMasker:
         num_smooth_points: int,
         feather_px: int,
     ) -> bytes:
+        
         if len(points) < 3:
             raise ValueError("Need at least 3 points to form a polygon")
 
         W, H = image_size
         pts = np.array(points, dtype=np.float32)
-
+        
+        MIN_POINTS_FOR_SMOOTHING = 8
+        
         # clip points to image bounds to avoid cv2.fillPoly errors
         pts[:, 0] = np.clip(pts[:, 0], 0, W - 1)
         pts[:, 1] = np.clip(pts[:, 1], 0, H - 1)
 
-        if smooth and len(pts) >= 4:
+        if smooth and len(pts) >= MIN_POINTS_FOR_SMOOTHING:
             pts_closed = np.vstack([pts, pts[0]])
-            # per=True makes the spline periodic (closed)
+            k = min(3, len(pts_closed) - 1)
             tck, _ = splprep(
                 [pts_closed[:, 0], pts_closed[:, 1]],
                 s=smoothing_factor,
                 per=True,
+                k=k,
             )
             u_new = np.linspace(0, 1, num_smooth_points)
             x_new, y_new = splev(u_new, tck)
