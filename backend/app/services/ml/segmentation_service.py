@@ -1,3 +1,4 @@
+import base64
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -7,9 +8,10 @@ from app.core.logging import get_logger, log_execution
 logger = get_logger(__name__)
 
 
+
 class SegmentationService(BaseMLService):
     """
-    Handles SAM 2.1 segmentation and SAM-based editing.
+    Handles MobileSAM segmentation and SAM-based editing.
 
     Workflow:
         Upload image
@@ -31,7 +33,7 @@ class SegmentationService(BaseMLService):
         max_segments: int = 50,
     ) -> Dict:
         """
-        Auto-segment all objects using SAM 2.1 (no prompts).
+        Auto-segment all objects using MobileSAM (no prompts).
 
         Args:
             image_id:     ID of image to process
@@ -74,10 +76,7 @@ class SegmentationService(BaseMLService):
                 ttl=7200,
             )
 
-            segments_for_response = [
-                {k: v for k, v in seg.items() if k != "mask_bytes"}
-                for seg in result["segments"]
-            ]
+            segments_for_response = _segments_for_response(result["segments"])
 
             logger.info(
                 "segments_cached",
@@ -102,14 +101,14 @@ class SegmentationService(BaseMLService):
         multimask_output: Optional[bool] = None
     ) -> Dict:
         """
-        Prompt-based SAM segmentation — points or bbox as input.
+        Prompt-based MobileSAM segmentation — points or bbox as input.
 
         Args:
             image_id:     ID of image to process
             user_id:      ID of requesting user
             point_coords: List of (x, y) points
             point_labels: 1=foreground, 0=background per point
-            bbox:         {'x1','y1','x2','y2'} as SAM prompt
+            bbox:         {'x1','y1','x2','y2'} as MobileSAM prompt
 
         Returns:
             Dict:
@@ -151,10 +150,7 @@ class SegmentationService(BaseMLService):
                 ttl=7200,
             )
 
-            segments_for_response = [
-                {k: v for k, v in seg.items() if k != "mask_bytes"}
-                for seg in result["segments"]
-            ]
+            segments_for_response = _segments_for_response(result["segments"])
 
             logger.info(
                 "segments_cached",
@@ -179,7 +175,7 @@ class SegmentationService(BaseMLService):
         feather_px: int = 0,
     ) -> Dict:
         """
-        Exact segmentation by polygon points (lasso), without SAM2.
+        Exact segmentation by polygon points (lasso), without MobileSAM.
 
         Returns:
             Dict: segments, metrics, image_size, timestamp
@@ -216,10 +212,7 @@ class SegmentationService(BaseMLService):
                 ttl=7200,
             )
 
-            segments_for_response = [
-                {k: v for k, v in seg.items() if k != "mask_bytes"}
-                for seg in result["segments"]
-            ]
+            segments_for_response = _segments_for_response(result["segments"])
 
             logger.info(
                 "segments_cached",
@@ -246,7 +239,7 @@ class SegmentationService(BaseMLService):
         hd_strategy: str = "CROP",
     ) -> Dict:
         """
-        Remove object selected by SAM mask_id using LaMa inpainting.
+        Remove object selected by MobileSAM mask_id using LaMa inpainting.
 
         Args:
             image_id:           ID of image to process
@@ -286,7 +279,6 @@ class SegmentationService(BaseMLService):
                 ldm_steps=ldm_steps,
                 ldm_sampler=ldm_sampler,
                 hd_strategy=hd_strategy,
-                track_metrics=True,
             )
 
             await self._save_current_state(image_id, result["result_bytes"])
@@ -322,7 +314,7 @@ class SegmentationService(BaseMLService):
         replacement_is_cutout: bool = False,
     ) -> Dict:
         """
-        Replace object selected by SAM mask_id with a provided image.
+        Replace object selected by MobileSAM mask_id with a provided image.
 
         Args:
             image_id:                 ID of image to process
@@ -379,7 +371,6 @@ class SegmentationService(BaseMLService):
                 ldm_steps=ldm_steps,
                 ldm_sampler=ldm_sampler,
                 hd_strategy=hd_strategy,
-                track_metrics=True,
                 replacement_is_cutout=replacement_is_cutout,
             )
 
@@ -412,7 +403,7 @@ class SegmentationService(BaseMLService):
     ) -> Dict:
         """
         Hybrid segmentation: YOLO finds common objects first (cheap, fast),
-        then each YOLO bbox is segmented with SAM2 as a prompt (cheap decoder
+        then each YOLO bbox is segmented with MobileSAM as a prompt (cheap decoder
         calls).
 
         Args:
@@ -420,13 +411,13 @@ class SegmentationService(BaseMLService):
             user_id:                ID of requesting user
             yolo_conf_threshold:    YOLO confidence threshold (default: 0.35)
             yolo_classes:           Optional YOLO class name filter
-            fallback_min_area:      Minimum area (px) for fallback SAM2 auto
-                                     segments (default: 800)
+            fallback_min_area:      Minimum area (px) for fallback MobileSAM auto
+                                    segments (default: 800)
             fallback_max_segments:  Max segments returned by the fallback
-                                     SAM2 auto pass (default: 50)
+                                    MobileSAM auto pass (default: 50)
             overlap_iou_thresh:     IoU threshold above which a fallback
-                                     segment is considered a duplicate of an
-                                     already-covered YOLO bbox (default: 0.5)
+                                    segment is considered a duplicate of an
+                                    already-covered YOLO bbox (default: 0.5)
 
         Returns:
             Dict:
@@ -453,7 +444,6 @@ class SegmentationService(BaseMLService):
                 image_bytes=image_bytes,
                 conf_threshold=yolo_conf_threshold,
                 classes=yolo_classes,
-                track_metrics=True,
             )
 
             yolo_bboxes = [
@@ -464,19 +454,18 @@ class SegmentationService(BaseMLService):
             all_segments: List[Dict] = []
             covered_bboxes: List[Dict] = []
 
-            #  2. SAM2 for all YOLO bboxes in a single encoder pass — see. SAM2Segmentor.segment_with_prompts_batch.
+            #  2. MobileSAM for all YOLO bboxes in a single encoder pass — see. MobileSAMSegmentor.segment_with_prompts_batch.
             if yolo_bboxes:
                 batch_result = await self.pipeline.sam_segment_with_prompts_batch(
                     image_bytes=image_bytes,
                     bboxes=yolo_bboxes,
-                    track_metrics=True,
                 )
                 for seg in batch_result["segments"]:
                     seg["source"] = "yolo"
                     all_segments.append(seg)
                     covered_bboxes.append(seg["bbox"])
 
-            # 3. Sparse SAM2 auto pass to catch whatever YOLO missed.
+            # 3. Sparse MobileSAM auto pass to catch whatever YOLO missed.
             fallback = await self.pipeline.sam_segment_objects(
                 image_bytes=image_bytes,
                 min_area=fallback_min_area,
@@ -497,10 +486,7 @@ class SegmentationService(BaseMLService):
                 ttl=7200,
             )
 
-            segments_for_response = [
-                {k: v for k, v in seg.items() if k != "mask_bytes"}
-                for seg in all_segments
-            ]
+            segments_for_response = _segments_for_response(all_segments)
 
             logger.info(
                 "hybrid_segments_cached",
@@ -534,3 +520,25 @@ class SegmentationService(BaseMLService):
         area_b = (b["x2"] - b["x1"]) * (b["y2"] - b["y1"])
         union = area_a + area_b - inter
         return inter / union if union > 0 else 0.0
+
+def _mask_to_data_url(mask_bytes: bytes) -> str:
+    """PNG mask bytes -> base64 data URL the frontend can drop straight
+    into an <image href="..."> / SVG <mask>, no separate fetch needed."""
+    b64 = base64.b64encode(mask_bytes).decode("ascii")
+    return f"data:image/png;base64,{b64}"
+
+
+def _segments_for_response(segments: List[Dict]) -> List[Dict]:
+    """
+    Strip the raw mask_bytes (binary, not JSON-safe) from each segment
+    before sending it to the client, but keep a `mask_url` data-URL in its
+    place so the frontend can render the real mask contour instead of
+    falling back to a bbox rectangle."""
+    result = []
+    for seg in segments:
+        mask_bytes = seg.get("mask_bytes")
+        seg_out = {k: v for k, v in seg.items() if k != "mask_bytes"}
+        if mask_bytes:
+            seg_out["mask_url"] = _mask_to_data_url(mask_bytes)
+        result.append(seg_out)
+    return result

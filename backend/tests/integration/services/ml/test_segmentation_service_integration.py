@@ -1,7 +1,11 @@
 import pytest
 from unittest.mock import AsyncMock
 
-from app.services.ml.segmentation_service import SegmentationService
+from app.services.ml.segmentation_service import (
+    SegmentationService,
+    _mask_to_data_url,
+    _segments_for_response,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -254,3 +258,99 @@ class TestSegmentHybrid:
         fallback_kwargs = mock_pipeline.sam_segment_objects.call_args.kwargs
         assert fallback_kwargs["min_area"] == 900
         assert fallback_kwargs["max_segments"] == 20
+
+
+class TestMaskToDataUrl:
+    def test_returns_correct_data_url_prefix(self):
+        result = _mask_to_data_url(b"fake-png-bytes")
+
+        assert result.startswith("data:image/png;base64,")
+
+    def test_base64_payload_matches_input_bytes(self):
+        import base64
+        raw = b"\x89PNG\r\n\x1a\nfake-mask-data"
+
+        result = _mask_to_data_url(raw)
+
+        b64_payload = result.split(",", 1)[1]
+        assert base64.b64decode(b64_payload) == raw
+
+    def test_empty_bytes_returns_empty_payload_url(self):
+        result = _mask_to_data_url(b"")
+
+        assert result == "data:image/png;base64,"
+
+    def test_different_inputs_produce_different_urls(self):
+        url1 = _mask_to_data_url(b"mask-one")
+        url2 = _mask_to_data_url(b"mask-two")
+
+        assert url1 != url2
+
+
+class TestSegmentsForResponse:
+    def test_strips_mask_bytes_key(self):
+        segments = [{"mask_id": 0, "bbox_id": 0, "mask_bytes": b"raw-bytes"}]
+
+        result = _segments_for_response(segments)
+
+        assert "mask_bytes" not in result[0]
+
+    def test_adds_mask_url_when_mask_bytes_present(self):
+        segments = [{"mask_id": 0, "mask_bytes": b"raw-bytes"}]
+
+        result = _segments_for_response(segments)
+
+        assert result[0]["mask_url"] == _mask_to_data_url(b"raw-bytes")
+
+    def test_no_mask_url_when_mask_bytes_key_missing(self):
+        segments = [{"mask_id": 0, "bbox_id": 0}]
+
+        result = _segments_for_response(segments)
+
+        assert "mask_url" not in result[0]
+
+    def test_no_mask_url_when_mask_bytes_is_empty_or_none(self):
+        segments = [
+            {"mask_id": 0, "mask_bytes": b""},
+            {"mask_id": 1, "mask_bytes": None},
+        ]
+
+        result = _segments_for_response(segments)
+
+        assert "mask_url" not in result[0]
+        assert "mask_url" not in result[1]
+
+    def test_preserves_other_fields(self):
+        segments = [{
+            "mask_id": 5,
+            "bbox_id": 5,
+            "bbox": {"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+            "area": 100,
+            "stability_score": 0.87,
+            "source": "yolo",
+            "mask_bytes": b"raw-bytes",
+        }]
+
+        result = _segments_for_response(segments)
+
+        assert result[0]["mask_id"] == 5
+        assert result[0]["bbox"] == {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
+        assert result[0]["source"] == "yolo"
+
+    def test_empty_list_returns_empty_list(self):
+        assert _segments_for_response([]) == []
+
+    def test_does_not_mutate_original_segments(self):
+        original = {"mask_id": 0, "mask_bytes": b"raw-bytes"}
+        segments = [original]
+
+        _segments_for_response(segments)
+
+        assert original["mask_bytes"] == b"raw-bytes"
+
+    def test_preserves_segment_order(self):
+        segments = [{"mask_id": i, "mask_bytes": b"x"} for i in range(5)]
+
+        result = _segments_for_response(segments)
+
+        assert [seg["mask_id"] for seg in result] == [0, 1, 2, 3, 4]
