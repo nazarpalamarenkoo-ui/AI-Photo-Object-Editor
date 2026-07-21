@@ -23,12 +23,13 @@ import { useSegmentation } from '@/composables/useSegmentation'
 
 const mockedMlApi = vi.mocked(mlApi, true)
 
-const makeSegment = (maskId: number, bboxId = maskId): SegmentInfo => ({
+const makeSegment = (maskId: number, bboxId = maskId, maskUrl?: string): SegmentInfo => ({
   mask_id: maskId,
   bbox_id: bboxId,
   bbox: { x1: 0, y1: 0, x2: 50, y2: 50 },
   area: 2500,
-  stability_score: 0.9
+  stability_score: 0.9,
+  mask_url: maskUrl
 })
 
 const makeSegmentResult = (segments: SegmentInfo[]) => ({
@@ -88,26 +89,41 @@ describe('useSegmentation: initial state', () => {
 })
 
 describe('useSegmentation: regions', () => {
-  it('maps segments to region items with generated labels', async () => {
-    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([makeSegment(1), makeSegment(2)]))
+  it('maps segments to region items with generated labels and mask_url', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([
+      makeSegment(1, 1, 'https://cdn.example.com/mask-1.png'),
+      makeSegment(2, 2, 'https://cdn.example.com/mask-2.png')
+    ]))
 
     const { handleSegment, regions } = useSegmentation(1, ref(''), ref([]))
     await handleSegment()
 
     expect(regions.value).toEqual([
-      { id: 1, bbox: { x1: 0, y1: 0, x2: 50, y2: 50 }, label: 'Object #1' },
-      { id: 2, bbox: { x1: 0, y1: 0, x2: 50, y2: 50 }, label: 'Object #2' }
+      { id: 1, bbox: { x1: 0, y1: 0, x2: 50, y2: 50 }, label: 'Object #1', mask_url: 'https://cdn.example.com/mask-1.png' },
+      { id: 2, bbox: { x1: 0, y1: 0, x2: 50, y2: 50 }, label: 'Object #2', mask_url: 'https://cdn.example.com/mask-2.png' }
     ])
   })
 
   it('updates reactively when segments change', async () => {
-    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([makeSegment(5)]))
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([
+      makeSegment(5, 5, 'https://cdn.example.com/mask-5.png')
+    ]))
 
     const { handleSegment, regions } = useSegmentation(1, ref(''), ref([]))
     await handleSegment()
 
     expect(regions.value).toHaveLength(1)
     expect(regions.value[0].label).toBe('Object #5')
+    expect(regions.value[0].mask_url).toBe('https://cdn.example.com/mask-5.png')
+  })
+
+  it('leaves mask_url undefined when the segment has none', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([makeSegment(1)]))
+
+    const { handleSegment, regions } = useSegmentation(1, ref(''), ref([]))
+    await handleSegment()
+
+    expect(regions.value[0].mask_url).toBeUndefined()
   })
 })
 

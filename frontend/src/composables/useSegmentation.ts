@@ -65,12 +65,13 @@ export function useSegmentation(
 }
 
   const regions = computed<RegionItem[]>(() =>
-    segments.value.map(s => ({
-      id: s.mask_id,
-      bbox: s.bbox,
-      label: `Object #${s.mask_id}`,
-    }))
-  )
+  segments.value.map(s => ({
+    id: s.mask_id,
+    bbox: s.bbox,
+    label: `Object #${s.mask_id}`,
+    mask_url: s.mask_url,
+  }))
+)
 
   async function handleSegment(minArea = 500, maxSegments = 50) {
     segmenting.value = true
