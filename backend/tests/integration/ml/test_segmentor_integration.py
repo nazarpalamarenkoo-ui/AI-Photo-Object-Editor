@@ -7,36 +7,38 @@ import pytest
 from PIL import Image as PILImage
 
 pytest.importorskip(
-    "sam2",
-    reason="sam2 package not installed; skipping integration tests",
+    "mobile_sam",
+    reason="mobile_sam package not installed; skipping integration tests",
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_WEIGHTS = PROJECT_ROOT / "weights" / "sam2.1_hiera_s.pt"
+DEFAULT_WEIGHTS = PROJECT_ROOT / "weights" / "mobile_sam.pt"
 
 WEIGHTS_PATH = Path(
     os.environ.get(
-        "SAM2_INTEGRATION_WEIGHTS",
+        "MOBILE_SAM_INTEGRATION_WEIGHTS",
         str(DEFAULT_WEIGHTS),
     )
 )
 
 if not WEIGHTS_PATH.exists():
     pytest.skip(
-        f"SAM2 weights not found at '{WEIGHTS_PATH}'. "
-        "Set SAM2_INTEGRATION_WEIGHTS or download the model.",
+        f"MobileSAM weights not found at '{WEIGHTS_PATH}'. "
+        "Set MOBILE_SAM_INTEGRATION_WEIGHTS or download the model.",
         allow_module_level=True,
     )
 
 
 @pytest.fixture
 def real_segmentor(tracker):
-    from app.ml.segmentor import SAM2Segmentor
+    from app.ml.segmentor import MobileSAMSegmentor
 
-    return SAM2Segmentor(
+    return MobileSAMSegmentor(
         model_path=str(WEIGHTS_PATH),
+        model_type="vit_t",
+        device="cpu",
         tracker=tracker,
     )
 
@@ -54,6 +56,10 @@ def two_squares_image_bytes():
 
     return buffer.getvalue()
 
+
+# --------------------------------------------------------------------------
+# segment_with_prompts_batch
+# --------------------------------------------------------------------------
 
 async def test_batch_recovers_each_of_two_distinct_squares(
     real_segmentor, two_squares_image_bytes
@@ -148,3 +154,102 @@ async def test_batch_empty_bboxes_returns_no_segments_end_to_end(
 
     assert result["segments"] == []
     assert result["metrics"]["num_segments"] == 0
+
+
+# --------------------------------------------------------------------------
+# segment_with_prompt (single point / single bbox)
+# --------------------------------------------------------------------------
+
+async def test_prompt_bbox_recovers_the_targeted_square(
+    real_segmentor, two_squares_image_bytes
+):
+    bbox = {"x1": 15, "y1": 15, "x2": 105, "y2": 105}
+
+    result = await real_segmentor.segment_with_prompt(
+        two_squares_image_bytes, bbox=bbox, track_metrics=False
+    )
+
+    assert len(result["segments"]) >= 1
+    top = result["segments"][0]
+    assert top["bbox"]["x1"] < bbox["x2"]
+    assert top["bbox"]["x2"] > bbox["x1"]
+    assert top["bbox"]["y1"] < bbox["y2"]
+    assert top["bbox"]["y2"] > bbox["y1"]
+    assert top["area"] > 0
+    assert isinstance(top["mask_bytes"], bytes)
+
+
+async def test_prompt_point_inside_square_recovers_an_object(
+    real_segmentor, two_squares_image_bytes
+):
+    # a point well inside the red top-left square
+    result = await real_segmentor.segment_with_prompt(
+        two_squares_image_bytes,
+        point_coords=[(60, 60)],
+        point_labels=[1],
+        track_metrics=False,
+    )
+
+    assert len(result["segments"]) >= 1
+    assert all(seg["area"] > 0 for seg in result["segments"])
+
+
+async def test_prompt_tracks_metrics_end_to_end(
+    real_segmentor, two_squares_image_bytes, tracker
+):
+    await real_segmentor.segment_with_prompt(
+        two_squares_image_bytes,
+        bbox={"x1": 15, "y1": 15, "x2": 105, "y2": 105},
+        track_metrics=True,
+    )
+
+    tracker.log_run.assert_called_once()
+    _, kwargs = tracker.log_run.call_args
+    assert kwargs["metrics"]["num_segments"] >= 1
+
+
+# --------------------------------------------------------------------------
+# segment_auto
+# --------------------------------------------------------------------------
+
+async def test_auto_finds_at_least_one_segment_on_real_image(
+    real_segmentor, two_squares_image_bytes
+):
+    result = await real_segmentor.segment_auto(
+        two_squares_image_bytes, track_metrics=False
+    )
+
+    assert len(result["segments"]) >= 1
+    for seg in result["segments"]:
+        for key in (
+            "mask_id",
+            "bbox",
+            "area",
+            "stability_score",
+            "predicted_iou",
+            "mask_bytes",
+        ):
+            assert key in seg
+        assert seg["area"] > 0
+        assert isinstance(seg["mask_bytes"], bytes)
+
+
+async def test_auto_segments_sorted_by_area_descending_on_real_image(
+    real_segmentor, two_squares_image_bytes
+):
+    result = await real_segmentor.segment_auto(
+        two_squares_image_bytes, track_metrics=False
+    )
+
+    areas = [seg["area"] for seg in result["segments"]]
+    assert areas == sorted(areas, reverse=True)
+
+
+async def test_auto_tracks_metrics_end_to_end(
+    real_segmentor, two_squares_image_bytes, tracker
+):
+    await real_segmentor.segment_auto(two_squares_image_bytes, track_metrics=True)
+
+    tracker.log_run.assert_called_once()
+    _, kwargs = tracker.log_run.call_args
+    assert kwargs["metrics"]["num_segments"] >= 1

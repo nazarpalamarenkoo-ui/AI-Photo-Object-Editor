@@ -13,12 +13,16 @@ from app.core.logging import get_logger, log_ml_operation
 logger = get_logger(__name__)
 
 
-class SAM2Segmentor:
-
+class MobileSAMSegmentor:
     """
-    SAM 2 Segmentor
+    MobileSAM Segmentor (drop-in replacement for the SAM wrapper).
 
-    Wrapper around Meta SAM2 for instance segmentation.
+    Uses the original SAM API (mobile_sam package) with a lightweight
+    ViT-Tiny image encoder instead of SAM's Hiera backbone. Kept the
+    class name / method signatures / segment dict shape unchanged so
+    nothing downstream (sam_lama_mode.py, segmentation.py, etc.) needs
+    to change.
+
     Supports:
         1. Automatic segmentation (everything mode — no prompts required)
         2. Point/bounding-box prompt segmentation
@@ -27,51 +31,69 @@ class SAM2Segmentor:
 
     def __init__(
         self,
-        model_path: str = 'weights/sam2.1_hiera_s.pt',
+        model_path: str = 'weights/mobile_sam.pt',
+        model_type: str = 'vit_t',
         device: str = 'cpu',
         tracker: Optional[ExperimentTracker] = None,
-        points_per_side: int = 16,
-        pred_iou_thresh: float = 0.88,
-        stability_score_thresh: float = 0.92,
-        min_mask_region_area: int = 150,
+        points_per_side: int = 32,
+        points_per_batch: int = 64,
+        pred_iou_thresh: float = 0.86,
+        stability_score_thresh: float = 0.90,
+        min_mask_region_area: int = 50,
+        crop_n_layers: int = 0,
+        crop_n_points_downscale_factor: int = 2,
+        crop_overlap_ratio: float = 512 / 1500,
+        box_nms_thresh: float = 0.7,
     ):
         try:
-            from sam2.build_sam import build_sam2
-            from sam2.sam2_image_predictor import SAM2ImagePredictor
-            from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+            from mobile_sam import sam_model_registry, SamPredictor, SamAutomaticMaskGenerator
 
             self.model_path = model_path
+            self.model_type = model_type
             self.device = device
             self.tracker = tracker or get_tracker()
 
             self.points_per_side = points_per_side
+            self.points_per_batch = points_per_batch
             self.pred_iou_thresh = pred_iou_thresh
             self.stability_score_thresh = stability_score_thresh
             self.min_mask_region_area = min_mask_region_area
+            self.crop_n_layers = crop_n_layers
+            self.crop_n_points_downscale_factor = crop_n_points_downscale_factor
+            self.crop_overlap_ratio = crop_overlap_ratio
+            self.box_nms_thresh = box_nms_thresh
 
-            logger.info("sam2_model_loading", model=model_path, device=device)
-            self.segmentor = build_sam2(
-            "configs/sam2.1/sam2.1_hiera_s.yaml",
-            model_path,
-            device=device)
+            logger.info("mobilesam_model_loading", model=model_path, device=device)
 
-            # Predictor for point/bbox prompts
-            self.predictor = SAM2ImagePredictor(self.segmentor)
+            # No separate yaml config here — MobileSAM builds straight
+            # from the registry + checkpoint.
+            self.segmentor = sam_model_registry[self.model_type](checkpoint=model_path)
+            self.segmentor.to(device=device)
+            self.segmentor.eval()
+
+            self.predictor = SamPredictor(self.segmentor)
 
             # Auto mask generator — without prompts
-            self.auto_generator = SAM2AutomaticMaskGenerator(
+            self.auto_generator = SamAutomaticMaskGenerator(
                 model=self.segmentor,
                 points_per_side=self.points_per_side,
+                points_per_batch = self.points_per_batch,
                 pred_iou_thresh=self.pred_iou_thresh,
                 stability_score_thresh=self.stability_score_thresh,
                 min_mask_region_area=self.min_mask_region_area,
+                crop_n_layers=self.crop_n_layers,
+                crop_n_points_downscale_factor=self.crop_n_points_downscale_factor,
+                crop_overlap_ratio=self.crop_overlap_ratio,
+                box_nms_thresh=self.box_nms_thresh,
             )
-            logger.info("sam2_model_loaded", model=model_path, device=device)
+            logger.info("mobilesam_model_loaded", model=model_path, device=device)
 
         except ImportError as e:
-            logger.error("sam2_model_load_failed", model=model_path, device=device, exc_info=e)
+            logger.error("mobilesam_model_load_failed", model=model_path, device=device, exc_info=e)
             raise RuntimeError(
-                f"sam2 not installed: {e}. Please install the SAM2 package")
+                f"mobile_sam not installed: {e}. Please install it with: "
+                f"pip install git+https://github.com/ChaoningZhang/MobileSAM.git"
+            )
 
     async def segment_auto(
         self,
@@ -97,7 +119,7 @@ class SAM2Segmentor:
         start_time = time.time()
 
         async with log_ml_operation(
-            "sam2_segment_auto",
+            "mobilesam_segment_auto",
             model=self.model_path,
             device=self.device,
             image_size_bytes=len(image_bytes),
@@ -116,15 +138,16 @@ class SAM2Segmentor:
 
         if track_metrics:
             await self._track_metrics(
-                run_name="sam2_segment_auto",
+                run_name="mobilesam_segment_auto",
                 metrics=metrics,
                 extra_params={
                     "points_per_side": self.points_per_side,
+                    "points_per_batch": self.points_per_batch,
                     "pred_iou_thresh": self.pred_iou_thresh,
                     "stability_score_thresh": self.stability_score_thresh,
                     "min_mask_region_area": self.min_mask_region_area,
                 },
-                tags={"operation": "sam2_segment_auto"},
+                tags={"operation": "mobilesam_segment_auto"},
             )
 
         return {"segments": segments, "metrics": metrics}
@@ -191,7 +214,7 @@ class SAM2Segmentor:
             multimask_output = not (bbox is not None or (point_coords and len(point_coords) > 1))
 
         async with log_ml_operation(
-            "sam2_segment_prompt",
+            "mobilesam_segment_prompt",
             model=self.model_path,
             device=self.device,
             has_points=point_coords is not None,
@@ -213,7 +236,7 @@ class SAM2Segmentor:
 
         if track_metrics:
             await self._track_metrics(
-                run_name="sam2_segment_prompt",
+                run_name="mobilesam_segment_prompt",
                 metrics=metrics,
                 extra_params={
                     "has_points": point_coords is not None,
@@ -221,7 +244,7 @@ class SAM2Segmentor:
                     "has_bbox": bbox is not None,
                     "multimask_output": multimask_output,
                 },
-                tags={"operation": "sam2_segment_prompt"},
+                tags={"operation": "mobilesam_segment_prompt"},
             )
 
         return {"segments": segments, "metrics": metrics}
@@ -289,13 +312,12 @@ class SAM2Segmentor:
     ) -> Dict:
         """
         Batched box-prompt segmentation.
-        Runs the SAM2 image encoder ONCE via set_image(), then a cheap
+        Runs the image encoder ONCE via set_image(), then a cheap
         predictor.predict() call per bbox prompt.
 
         Args:
             image_bytes:   Input image
-            bboxes:        List of {'x1','y1','x2','y2'} — one SAM2 box
-                           prompt per bbox
+            bboxes:        List of {'x1','y1','x2','y2'} — one box prompt
 
         Returns:
             Dict:
@@ -308,7 +330,7 @@ class SAM2Segmentor:
         start_time = time.time()
 
         async with log_ml_operation(
-            "sam2_segment_prompts_batch",
+            "mobilesam_segment_prompts_batch",
             model=self.model_path,
             device=self.device,
             num_bboxes=len(bboxes),
@@ -327,10 +349,10 @@ class SAM2Segmentor:
 
         if track_metrics:
             await self._track_metrics(
-                run_name="sam2_segment_prompts_batch",
+                run_name="mobilesam_segment_prompts_batch",
                 metrics=metrics,
                 extra_params={"num_bboxes": len(bboxes)},
-                tags={"operation": "sam2_segment_prompts_batch"},
+                tags={"operation": "mobilesam_segment_prompts_batch"},
             )
 
         return {"segments": segments, "metrics": metrics}
@@ -440,12 +462,12 @@ _segmentor_instance = None
 _segmentor_lock = threading.Lock()
 
 def get_segmentor(
-    model_path: str = "weights/sam2.1_hiera_s.pt",
+    model_path: str = "weights/mobile_sam.pt",
     tracker: Optional[ExperimentTracker] = None
-) -> SAM2Segmentor:
+) -> MobileSAMSegmentor:
     global _segmentor_instance
     if _segmentor_instance is None:
         with _segmentor_lock:
             if _segmentor_instance is None:
-                _segmentor_instance = SAM2Segmentor(device=DeviceManager.get(settings.SAM_DEVICE))
+                _segmentor_instance = MobileSAMSegmentor(device=DeviceManager.get(settings.SAM_DEVICE))
     return _segmentor_instance
