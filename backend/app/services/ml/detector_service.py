@@ -54,7 +54,6 @@ class DetectorService(BaseMLService):
                 image_bytes=image_bytes,
                 conf_threshold=conf_threshold,
                 classes=classes,
-                track_metrics=True,
             )
 
             detections = result["detections"]

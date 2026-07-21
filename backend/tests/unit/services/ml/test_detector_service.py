@@ -134,7 +134,6 @@ class TestDetectObjects:
         mock_pipeline.detect_objects.assert_awaited_once()
         _, kwargs = mock_pipeline.detect_objects.call_args
         assert kwargs["conf_threshold"] == 0.6
-        assert kwargs["track_metrics"] is True
 
         mock_detection_repo.delete_by_image.assert_awaited_once_with(1)
         mock_redis_storage.delete.assert_awaited_once_with("image:1:detections")

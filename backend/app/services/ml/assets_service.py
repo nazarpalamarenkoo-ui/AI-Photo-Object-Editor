@@ -29,12 +29,12 @@ class AssetService(BaseMLService):
         persist_to_s3: bool = False,
     ) -> Dict:
         """
-        Extract a SAM-segmented object from an image as an RGBA PNG cutout
+        Extract a MobileSAM-segmented object from an image as an RGBA PNG cutout
         and save it into the user's asset library (Redis, optionally S3).
 
         Args:
             image_id: ID of the source image the segment belongs to.
-            mask_id: ID of the SAM segment/mask to extract.
+            mask_id: ID of the MobileSAM segment/mask to extract.
             user_id: ID of the requesting user (used for authorization and
                 as the owner of the resulting asset).
             padding_pixels: Extra padding (in pixels) added around the
@@ -64,7 +64,6 @@ class AssetService(BaseMLService):
                 mask_bytes=segment["mask_bytes"],
                 bbox=segment["bbox"],
                 padding_pixels=padding_pixels,
-                track_metrics=True,
             )
 
             s3_url, presigned_url = None, None
@@ -267,7 +266,6 @@ class AssetService(BaseMLService):
                 use_color_matching=use_color_matching,
                 use_edge_blending=use_edge_blending,
                 color_match_method=color_match_method,
-                track_metrics=True,
             )
 
             await self._save_current_state(image_id, result["result_bytes"])
