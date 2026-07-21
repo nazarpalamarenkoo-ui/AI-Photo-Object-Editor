@@ -20,7 +20,7 @@ class SegmentationMixin:
         max_segments: int = 50,
     ) -> Dict:
         """
-        Auto-segmentation of the entire image using SAM2 (no prompts).
+        Auto-segmentation of the entire image using MobileSAM (no prompts).
 
         Args:
             image_bytes:    Input image bytes
@@ -65,7 +65,7 @@ class SegmentationMixin:
         multimask_output: Optional[bool] = None
     ) -> Dict:
         """
-        Prompt-based segmentation using SAM2 (points and/or bounding box).
+        Prompt-based segmentation using MobileSAM (points and/or bounding box).
 
         At least one of point_coords or bbox must be provided.
 
@@ -123,12 +123,12 @@ class SegmentationMixin:
         bboxes: List[Dict[str, int]],
     ) -> Dict:
         """
-        Batched box-prompt segmentation using SAM2 — one image-encoder
+        Batched box-prompt segmentation using MobileSAM — one image-encoder
         pass shared across all bboxes, one cheap decoder call each.
 
         Args:
             image_bytes:    Input image bytes
-            bboxes:         List of {'x1','y1','x2','y2'} SAM2 box prompt
+            bboxes:         List of {'x1','y1','x2','y2'} MobileSAM box prompt
 
         Returns:
             Dict:
@@ -176,7 +176,7 @@ class SegmentationMixin:
         feather_px: int = 0,
     ) -> Dict:
         """
-        Exact segmentation by polygon points (lasso), without SAM2 —
+        Exact segmentation by polygon points (lasso), without MobileSAM —
         the mask exactly repeats the user's polygon.
 
         Args:

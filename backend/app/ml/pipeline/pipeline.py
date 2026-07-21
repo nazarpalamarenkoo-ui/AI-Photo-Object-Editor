@@ -36,8 +36,8 @@ class MLPipeline(
     4. Multiple Object Removal (YOLO + LaMa + processors)
 
     SAM + Lama mode
-    5. Auto Segmentation (SAM2 — no prompts)
-    6. Prompted Segmentation (SAM2 — points / bbox)
+    5. Auto Segmentation (MobileSAM — no prompts)
+    6. Prompted Segmentation (MobileSAM — points / bbox)
     7. Object Removal (SAM mask → LaMa → EdgeBlend)
     8. Object Replacement (SAM mask → LaMa → composite → ColorMatch)
     9. Object Extraction (SAM mask → RGBA crop)

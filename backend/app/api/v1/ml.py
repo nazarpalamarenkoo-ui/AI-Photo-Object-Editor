@@ -453,7 +453,7 @@ async def segment_by_polygon(
     current_user: User = Depends(get_current_user),
     service: SegmentationService = Depends(get_segmentation),
 ):
-    """Exact segmentation by polygon points (lasso), without SAM2."""
+    """Exact segmentation by polygon points (lasso), without MobileSAM."""
     try:
         return await service.segment_by_polygon(
             image_id=image_id,
@@ -494,7 +494,7 @@ async def segment_hybrid(
     current_user: User = Depends(get_current_user),
     service: SegmentationService = Depends(get_segmentation),
 ):
-    """Hybrid YOLO + SAM2 segmentation: YOLO for common objects, sparse SAM2 auto for the rest."""
+    """Hybrid YOLO + MobileSAM segmentation: YOLO for common objects, sparse MobileSAM auto for the rest."""
     try:
         return await service.segment_hybrid(
             image_id=image_id,
