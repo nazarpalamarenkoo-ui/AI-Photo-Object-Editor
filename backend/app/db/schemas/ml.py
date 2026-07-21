@@ -150,6 +150,7 @@ class SegmentInfo(BaseModel):
     bbox: BboxSchema
     area: int
     stability_score: Optional[float] = None
+    mask_url: Optional[str] = None  # base64 PNG data URL of the raster mask
 
 
 class SegmentResponse(BaseModel):
@@ -200,4 +201,3 @@ class AssetResponse(BaseModel):
 
 class RenameAssetRequest(BaseModel):
     label: str
-    
