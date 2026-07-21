@@ -21,9 +21,36 @@
           @mouseup="onSvgMouseUp"
           @mouseleave="onSvgMouseUp"
         >
+          <defs>
+            <mask
+              v-for="r in regions"
+              :key="`mask-def-${r.id}`"
+              :id="`region-mask-${r.id}`"
+              maskUnits="userSpaceOnUse"
+              :x="0" :y="0" :width="naturalSize.w" :height="naturalSize.h"
+            >
+              <image
+                v-if="r.mask_url"
+                :href="r.mask_url"
+                x="0" y="0"
+                :width="naturalSize.w" :height="naturalSize.h"
+                preserveAspectRatio="none"
+              />
+            </mask>
+          </defs>
+
           <template v-for="r in regions" :key="r.id">
+            <rect
+              v-if="r.mask_url"
+              :x="0" :y="0"
+              :width="naturalSize.w" :height="naturalSize.h"
+              :mask="`url(#region-mask-${r.id})`"
+              :fill="regionColor(r.id)"
+              :class="['region-mask', { selected: selectedIds.includes(r.id) }]"
+              pointer-events="none"
+            />
             <polygon
-              v-if="r.points && r.points.length"
+              v-else-if="r.points && r.points.length"
               :points="r.points.map(p => `${p.x},${p.y}`).join(' ')"
               :class="['bbox-rect', { selected: selectedIds.includes(r.id) }]"
               @click.stop="promptMode === null && $emit('toggle-selection', r.id)"
@@ -35,6 +62,14 @@
               :height="r.bbox.y2 - r.bbox.y1"
               :class="['bbox-rect', { selected: selectedIds.includes(r.id) }]"
               @click.stop="promptMode === null && $emit('toggle-selection', r.id)"
+            />
+            <rect
+              v-if="r.mask_url"
+              :x="r.bbox.x1" :y="r.bbox.y1"
+              :width="r.bbox.x2 - r.bbox.x1"
+              :height="r.bbox.y2 - r.bbox.y1"
+              :class="['bbox-outline', { selected: selectedIds.includes(r.id) }]"
+              pointer-events="none"
             />
           </template>
 
@@ -126,7 +161,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import type { Image, RegionItem, EditingMode, Bbox, PromptPoint, PromptMode, PolygonPoint } from '@/types/Index'
 
 const props = withDefaults(defineProps<{
@@ -167,7 +202,81 @@ const emit = defineEmits<{
 const runLabel = computed(() => (props.mode === 'yolo' ? 'Run detection' : 'Run segmentation'))
 const runningLabel = computed(() => (props.mode === 'yolo' ? 'Detecting…' : 'Segmenting…'))
 
+const REGION_PALETTE = [
+  '#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231',
+  '#911eb4', '#46f0f0', '#f032e6', '#bcf60c', '#fabebe',
+  '#008080', '#e6beff', '#9a6324', '#800000', '#aaffc3',
+]
+function regionColor(id: number): string {
+  return REGION_PALETTE[((id % REGION_PALETTE.length) + REGION_PALETTE.length) % REGION_PALETTE.length]
+}
+
 const imageRef = ref<HTMLImageElement | null>(null)
+
+const maskCanvasCache = new Map<number, ImageData>()
+
+async function loadMaskImageData(r: RegionItem): Promise<ImageData | null> {
+  if (!r.mask_url) return null
+  if (maskCanvasCache.has(r.id)) return maskCanvasCache.get(r.id)!
+
+  const img = new Image()
+  img.crossOrigin = 'anonymous'
+  img.src = r.mask_url
+  try {
+    await new Promise<void>((res, rej) => {
+      img.onload = () => res()
+      img.onerror = () => rej(new Error(`failed to load mask for region ${r.id}`))
+    })
+  } catch (err) {
+    console.warn('[EditorCanvas] mask image failed to load (CORS?)', r.id, r.mask_url, err)
+    return null
+  }
+
+  const canvas = document.createElement('canvas')
+  canvas.width = props.naturalSize.w
+  canvas.height = props.naturalSize.h
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  ctx.drawImage(img, 0, 0, props.naturalSize.w, props.naturalSize.h)
+
+  let data: ImageData
+  try {
+    data = ctx.getImageData(0, 0, props.naturalSize.w, props.naturalSize.h)
+  } catch (err) {
+    console.warn('[EditorCanvas] canvas tainted reading mask (missing CORS header?)', r.id, r.mask_url, err)
+    return null
+  }
+  maskCanvasCache.set(r.id, data)
+  return data
+}
+
+watch(
+  () => props.regions,
+  (regions) => {
+    maskCanvasCache.clear()
+    regions.forEach(r => { if (r.mask_url) loadMaskImageData(r) })
+  },
+  { immediate: true, deep: false },
+)
+
+function hitTestMaskedRegion(px: number, py: number): number | null {
+  for (let i = props.regions.length - 1; i >= 0; i--) {
+    const r = props.regions[i]
+    if (!r.mask_url) continue
+    const data = maskCanvasCache.get(r.id)
+    if (!data) continue
+    if (px < 0 || py < 0 || px >= data.width || py >= data.height) continue
+    const idx = (py * data.width + px) * 4
+    const red = data.data[idx]
+    const green = data.data[idx + 1]
+    const blue = data.data[idx + 2]
+    const alpha = data.data[idx + 3]
+    const luminance = (0.2125 * red + 0.7154 * green + 0.0721 * blue) / 255
+    const visibility = luminance * (alpha / 255)
+    if (visibility > 0.15) return r.id
+  }
+  return null
+}
 
 function onLoad() {
   if (imageRef.value) {
@@ -196,11 +305,19 @@ function onSvgClick(e: MouseEvent) {
     emit('add-polygon-point', { x: p.x, y: p.y })
     return
   }
-  if (props.promptMode !== 'points') return
+  if (props.promptMode === 'points') {
+    const p = svgPoint(e)
+    if (!p) return
+    const label = e.altKey ? 0 : 1
+    emit('add-point', { x: p.x, y: p.y, label })
+    return
+  }
+  if (props.promptMode !== null) return
+
   const p = svgPoint(e)
   if (!p) return
-  const label = e.altKey ? 0 : 1
-  emit('add-point', { x: p.x, y: p.y, label })
+  const id = hitTestMaskedRegion(Math.floor(p.x), Math.floor(p.y))
+  if (id !== null) emit('toggle-selection', id)
 }
 
 function onSvgRightClick(e: MouseEvent) {
