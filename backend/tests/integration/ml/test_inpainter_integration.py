@@ -19,7 +19,7 @@ def _no_mlflow_network(monkeypatch, tmp_path):
 
 @pytest.fixture
 def inpainter():
-    with patch('lama_cleaner.model_manager.ModelManager') as mock_mm:
+    with patch('iopaint.model_manager.ModelManager') as mock_mm:
         mock_manager = MagicMock()
         mock_mm.return_value = mock_manager
 

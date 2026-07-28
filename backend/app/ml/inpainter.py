@@ -1,11 +1,10 @@
 import asyncio
 import time
-from typing import Dict, Optional, Literal
+from typing import Dict, Optional
 from enum import Enum
 import numpy as np
 from PIL import Image
 from io import BytesIO
-import cv2
 
 from app.config.settings import settings
 from app.config.device_manager import DeviceManager
@@ -22,17 +21,28 @@ class InpaintMode(str, Enum):
 
 class LaMaInpainter:
     """
-    LaMa-based image inpainter.
+    LaMa-based image inpainter (built on top of the `iopaint` package).
+
+    NOTE on iopaint API:
+        The config/request object in iopaint is called `InpaintRequest`
+        (NOT `Config` — that was the old `lama-cleaner` name, which iopaint
+        was renamed from). Importing `Config` from `iopaint.schema` will
+        raise an ImportError.
+
+        `iopaint`'s ModelManager expects the image passed in as RGB
+        (uint8 HxWxC) and returns a **BGR** array — this matches the
+        library's own reference usage:
+
+            img = cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB)
+            result = model_manager(img, mask, InpaintRequest(...))
+            result = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)  # actually undoes BGR
+
+        i.e. input RGB in, BGR out -> flip channels on the way out.
+        (This part of the original code was already correct.)
 
     Provides:
         1. Object removal (inpaint with background generation)
         2. Object replacement (paste replacement into bbox)
-
-    Handles:
-        1. LaMa model inference
-        2. Mask creation from bbox
-        3. Metrics calculation
-        4. MLflow tracking
     """
 
     def __init__(
@@ -44,12 +54,12 @@ class LaMaInpainter:
         Initialize LaMa Inpainter.
 
         Args:
-            device: Device to use ('cuda' or 'cpu', default: 'cuda')
+            device: Device to use ('cuda' or 'cpu', default: 'cpu')
             tracker: ExperimentTracker for MLflow (default: auto-created)
         """
         try:
-            from lama_cleaner.model_manager import ModelManager
-            from lama_cleaner.schema import Config, HDStrategy
+            from iopaint.model_manager import ModelManager
+            from iopaint.schema import InpaintRequest, HDStrategy
 
             self.device = device
             self.tracker = tracker or get_tracker()
@@ -59,7 +69,7 @@ class LaMaInpainter:
                 name='lama',
                 device=self.device  # type: ignore
             )
-            self.default_config = Config(
+            self.default_config = InpaintRequest(
                 ldm_steps=25,
                 ldm_sampler='plms',
                 hd_strategy=HDStrategy.CROP,
@@ -72,7 +82,7 @@ class LaMaInpainter:
         except ImportError as e:
             logger.error("lama_model_load_failed", model="lama", device=device, exc_info=e)
             raise RuntimeError(
-                f"lama-cleaner not installed or incompatible: {e}. "
+                f"iopaint not installed or incompatible: {e}. "
                 "Set ML_ENABLED=false to run without ML."
             )
 
@@ -125,8 +135,8 @@ class LaMaInpainter:
             )
             raise ValueError("replacement_image_bytes required for REPLACE mode")
 
-        from lama_cleaner.schema import Config, HDStrategy
-        config = Config(
+        from iopaint.schema import InpaintRequest, HDStrategy
+        config = InpaintRequest(
             ldm_steps=ldm_steps,
             ldm_sampler=ldm_sampler,
             hd_strategy=getattr(HDStrategy, hd_strategy),
@@ -248,20 +258,22 @@ class LaMaInpainter:
         else:
             raise ValueError("Either mask_bytes or bbox must be provided")
 
-        # Run LaMa inpainting (generates background)
+        # Run LaMa inpainting (generates background).
+        # iopaint's ModelManager.__call__ signature is (image, mask, config) -
+        # call positionally, matching iopaint's own reference usage, rather
+        # than relying on keyword-arg names that can differ across versions.
         result_array = self.model_manager(
-            image=img_array,
-            mask=mask_array,
-            config=config or self.default_config
+            img_array,
+            mask_array,
+            config or self.default_config
         )
 
         if result_array.dtype != np.uint8:
             result_array = result_array.clip(0, 255).astype(np.uint8)
 
+        # ModelManager returns BGR - flip back to RGB before saving with PIL
         result_array = result_array[:, :, ::-1]
-        # Convert result to bytes
         result_img = Image.fromarray(result_array)
-        # Convert result to bytes
         result_buffer = BytesIO()
         result_img.save(result_buffer, format='JPEG', quality=95)
 
@@ -305,7 +317,7 @@ class LaMaInpainter:
         config=None
     ) -> bytes:
         """
-        Run REPLACE inpainting synchronously (blocking).
+        Run REPLACE inpainting synchronously.
 
         Pipeline:
             1. Get bbox from mask if not provided
@@ -328,8 +340,12 @@ class LaMaInpainter:
 
         replacement_img = Image.open(BytesIO(replacement_image_bytes)).convert('RGB')
 
+        if not bbox and mask_bytes:
+            mask = Image.open(BytesIO(mask_bytes)).convert('L')
+            bbox = self._get_bbox_from_mask(np.array(mask))
+
         if not bbox:
-            raise ValueError("bbox required")
+            raise ValueError("bbox (or mask_bytes to derive one from) required")
 
         x1, y1, x2, y2 = bbox['x1'], bbox['y1'], bbox['x2'], bbox['y2']
 
@@ -600,8 +616,7 @@ def get_inpainter(
     Singleton getter for LaMaInpainter.
 
     Args:
-        1. device: Device to use ('cuda' or 'cpu', default: 'cuda')
-        2. tracker: ExperimentTracker for MLflow (default: auto-created)
+        tracker: ExperimentTracker for MLflow (default: auto-created)
 
     Returns: LaMaInpainter instance
     """

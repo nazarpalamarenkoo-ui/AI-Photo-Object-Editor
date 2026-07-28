@@ -1,22 +1,34 @@
-import pytest
-from unittest.mock import MagicMock, AsyncMock, patch, call
-import numpy as np
-from PIL import Image
-from io import BytesIO
 import sys
+from io import BytesIO
+
+import numpy as np
+import pytest
+from PIL import Image
+from unittest.mock import MagicMock, AsyncMock, patch
 
 with patch('app.ml.experiment_tracker.get_tracker'):
-    from app.ml.inpainter import LaMaInpainter, InpaintMode
+    from app.ml.inpainter import LaMaInpainter, InpaintMode, get_inpainter
 
-mock_lama = MagicMock()
-mock_lama.model_manager.ModelManager = MagicMock()
-mock_lama.schema.Config = MagicMock()
-mock_lama.schema.HDStrategy = MagicMock()
-sys.modules['lama_cleaner'] = mock_lama
-sys.modules['lama_cleaner.model_manager'] = mock_lama.model_manager
-sys.modules['lama_cleaner.schema'] = mock_lama.schema
 
-from app.ml.inpainter import LaMaInpainter, InpaintMode, get_inpainter
+@pytest.fixture(autouse=True)
+def mock_iopaint(monkeypatch):
+    """Fresh, test-scoped `iopaint` package mock. Reverted automatically
+    after the test by monkeypatch — never leaks into other test files."""
+    mock_model_manager_module = MagicMock()
+    mock_model_manager_module.ModelManager = MagicMock()
+
+    mock_schema_module = MagicMock()
+    mock_schema_module.InpaintRequest = MagicMock()
+    mock_schema_module.HDStrategy = MagicMock()
+
+    mock_pkg = MagicMock()
+    mock_pkg.model_manager = mock_model_manager_module
+    mock_pkg.schema = mock_schema_module
+
+    monkeypatch.setitem(sys.modules, 'iopaint', mock_pkg)
+    monkeypatch.setitem(sys.modules, 'iopaint.model_manager', mock_model_manager_module)
+    monkeypatch.setitem(sys.modules, 'iopaint.schema', mock_schema_module)
+    return mock_pkg
 
 
 def _make_image_bytes(width=640, height=480, color='white'):
@@ -47,11 +59,34 @@ def _make_inpainter():
 
 
 @pytest.mark.unit
-def test_inpainter_init():
+def test_inpainter_init(mock_iopaint):
     mock_tracker = MagicMock()
     inpainter = LaMaInpainter(tracker=mock_tracker)
     assert inpainter.tracker is mock_tracker
     assert inpainter.model_manager is not None
+    mock_iopaint.model_manager.ModelManager.assert_called_once_with(
+        name='lama', device=inpainter.device
+    )
+
+
+@pytest.mark.unit
+def test_inpainter_init_builds_default_config(mock_iopaint):
+    mock_tracker = MagicMock()
+    LaMaInpainter(tracker=mock_tracker)
+    mock_iopaint.schema.InpaintRequest.assert_called_once()
+    kwargs = mock_iopaint.schema.InpaintRequest.call_args.kwargs
+    assert kwargs['ldm_steps'] == 25
+    assert kwargs['ldm_sampler'] == 'plms'
+    assert kwargs['hd_strategy_crop_margin'] == 32
+    assert kwargs['hd_strategy_crop_trigger_size'] == 800
+    assert kwargs['hd_strategy_resize_limit'] == 2048
+
+
+@pytest.mark.unit
+def test_inpainter_init_raises_runtime_error_when_iopaint_missing():
+    with patch.dict(sys.modules, {'iopaint': None, 'iopaint.model_manager': None}):
+        with pytest.raises(RuntimeError, match="iopaint not installed"):
+            LaMaInpainter(tracker=MagicMock())
 
 
 @pytest.mark.unit
@@ -85,7 +120,6 @@ def test_get_bbox_from_empty_mask():
         inpainter._get_bbox_from_mask(mask)
 
 
-
 @pytest.mark.unit
 def test_create_mask_edge_cases():
     inpainter = LaMaInpainter.__new__(LaMaInpainter)
@@ -115,8 +149,8 @@ async def test_inpaint_passes_ldm_steps_to_config():
     with patch('app.ml.inpainter.LaMaInpainter._inpaint_remove', new_callable=AsyncMock) as mock_remove, \
          patch('app.ml.inpainter.LaMaInpainter._calculate_metrics', new_callable=AsyncMock) as mock_metrics, \
          patch('app.ml.inpainter.LaMaInpainter._track_metrics', new_callable=AsyncMock), \
-         patch('lama_cleaner.schema.Config', mock_config_cls), \
-         patch('lama_cleaner.schema.HDStrategy', mock_hd):
+         patch('iopaint.schema.InpaintRequest', mock_config_cls), \
+         patch('iopaint.schema.HDStrategy', mock_hd):
 
         mock_remove.return_value = _make_image_bytes()
         mock_metrics.return_value = {'processing_time_ms': 1.0, 'mask_size_pixels': 0, 'image_size': (640, 480), 'mode': 'remove'}
@@ -147,8 +181,8 @@ async def test_inpaint_passes_ldm_sampler_to_config():
     with patch('app.ml.inpainter.LaMaInpainter._inpaint_remove', new_callable=AsyncMock) as mock_remove, \
          patch('app.ml.inpainter.LaMaInpainter._calculate_metrics', new_callable=AsyncMock) as mock_metrics, \
          patch('app.ml.inpainter.LaMaInpainter._track_metrics', new_callable=AsyncMock), \
-         patch('lama_cleaner.schema.Config', mock_config_cls), \
-         patch('lama_cleaner.schema.HDStrategy', mock_hd):
+         patch('iopaint.schema.InpaintRequest', mock_config_cls), \
+         patch('iopaint.schema.HDStrategy', mock_hd):
 
         mock_remove.return_value = _make_image_bytes()
         mock_metrics.return_value = {'processing_time_ms': 1.0, 'mask_size_pixels': 0, 'image_size': (640, 480), 'mode': 'remove'}
@@ -179,8 +213,8 @@ async def test_inpaint_passes_hd_strategy_to_config():
     with patch('app.ml.inpainter.LaMaInpainter._inpaint_remove', new_callable=AsyncMock) as mock_remove, \
          patch('app.ml.inpainter.LaMaInpainter._calculate_metrics', new_callable=AsyncMock) as mock_metrics, \
          patch('app.ml.inpainter.LaMaInpainter._track_metrics', new_callable=AsyncMock), \
-         patch('lama_cleaner.schema.Config', mock_config_cls), \
-         patch('lama_cleaner.schema.HDStrategy', mock_hd):
+         patch('iopaint.schema.InpaintRequest', mock_config_cls), \
+         patch('iopaint.schema.HDStrategy', mock_hd):
 
         mock_remove.return_value = _make_image_bytes()
         mock_metrics.return_value = {'processing_time_ms': 1.0, 'mask_size_pixels': 0, 'image_size': (640, 480), 'mode': 'remove'}
@@ -211,8 +245,8 @@ async def test_inpaint_default_ldm_params():
     with patch('app.ml.inpainter.LaMaInpainter._inpaint_remove', new_callable=AsyncMock) as mock_remove, \
          patch('app.ml.inpainter.LaMaInpainter._calculate_metrics', new_callable=AsyncMock) as mock_metrics, \
          patch('app.ml.inpainter.LaMaInpainter._track_metrics', new_callable=AsyncMock), \
-         patch('lama_cleaner.schema.Config', mock_config_cls), \
-         patch('lama_cleaner.schema.HDStrategy', mock_hd):
+         patch('iopaint.schema.InpaintRequest', mock_config_cls), \
+         patch('iopaint.schema.HDStrategy', mock_hd):
 
         mock_remove.return_value = _make_image_bytes()
         mock_metrics.return_value = {'processing_time_ms': 1.0, 'mask_size_pixels': 0, 'image_size': (640, 480), 'mode': 'remove'}
@@ -241,8 +275,8 @@ async def test_inpaint_config_has_correct_fixed_params():
     with patch('app.ml.inpainter.LaMaInpainter._inpaint_remove', new_callable=AsyncMock) as mock_remove, \
          patch('app.ml.inpainter.LaMaInpainter._calculate_metrics', new_callable=AsyncMock) as mock_metrics, \
          patch('app.ml.inpainter.LaMaInpainter._track_metrics', new_callable=AsyncMock), \
-         patch('lama_cleaner.schema.Config', mock_config_cls), \
-         patch('lama_cleaner.schema.HDStrategy', mock_hd):
+         patch('iopaint.schema.InpaintRequest', mock_config_cls), \
+         patch('iopaint.schema.HDStrategy', mock_hd):
 
         mock_remove.return_value = _make_image_bytes()
         mock_metrics.return_value = {'processing_time_ms': 1.0, 'mask_size_pixels': 0, 'image_size': (640, 480), 'mode': 'remove'}
@@ -295,8 +329,8 @@ async def test_inpaint_remove_calls_inpaint_remove():
          patch('app.ml.inpainter.LaMaInpainter._inpaint_replace', new_callable=AsyncMock) as mock_replace, \
          patch('app.ml.inpainter.LaMaInpainter._calculate_metrics', new_callable=AsyncMock) as mock_metrics, \
          patch('app.ml.inpainter.LaMaInpainter._track_metrics', new_callable=AsyncMock), \
-         patch('lama_cleaner.schema.Config', mock_config_cls), \
-         patch('lama_cleaner.schema.HDStrategy', mock_hd):
+         patch('iopaint.schema.InpaintRequest', mock_config_cls), \
+         patch('iopaint.schema.HDStrategy', mock_hd):
 
         mock_remove.return_value = _make_image_bytes()
         mock_metrics.return_value = {'processing_time_ms': 1.0, 'mask_size_pixels': 0, 'image_size': (640, 480), 'mode': 'remove'}
@@ -324,8 +358,8 @@ async def test_inpaint_replace_calls_inpaint_replace():
          patch('app.ml.inpainter.LaMaInpainter._inpaint_replace', new_callable=AsyncMock) as mock_replace, \
          patch('app.ml.inpainter.LaMaInpainter._calculate_metrics', new_callable=AsyncMock) as mock_metrics, \
          patch('app.ml.inpainter.LaMaInpainter._track_metrics', new_callable=AsyncMock), \
-         patch('lama_cleaner.schema.Config', mock_config_cls), \
-         patch('lama_cleaner.schema.HDStrategy', mock_hd):
+         patch('iopaint.schema.InpaintRequest', mock_config_cls), \
+         patch('iopaint.schema.HDStrategy', mock_hd):
 
         mock_replace.return_value = _make_image_bytes()
         mock_metrics.return_value = {'processing_time_ms': 1.0, 'mask_size_pixels': 0, 'image_size': (640, 480), 'mode': 'replace'}
@@ -356,8 +390,8 @@ async def test_inpaint_config_passed_to_inpaint_remove():
     with patch('app.ml.inpainter.LaMaInpainter._inpaint_remove', new_callable=AsyncMock) as mock_remove, \
          patch('app.ml.inpainter.LaMaInpainter._calculate_metrics', new_callable=AsyncMock) as mock_metrics, \
          patch('app.ml.inpainter.LaMaInpainter._track_metrics', new_callable=AsyncMock), \
-         patch('lama_cleaner.schema.Config', mock_config_cls), \
-         patch('lama_cleaner.schema.HDStrategy', mock_hd):
+         patch('iopaint.schema.InpaintRequest', mock_config_cls), \
+         patch('iopaint.schema.HDStrategy', mock_hd):
 
         mock_remove.return_value = _make_image_bytes()
         mock_metrics.return_value = {'processing_time_ms': 1.0, 'mask_size_pixels': 0, 'image_size': (640, 480), 'mode': 'remove'}
@@ -441,6 +475,7 @@ def test_create_remove_mask_neighbor_no_overlap():
 
     np.testing.assert_array_equal(mask_with, mask_without)
 
+
 @pytest.mark.unit
 def test_create_replace_mask_exact_bbox():
     inpainter = LaMaInpainter.__new__(LaMaInpainter)
@@ -460,3 +495,14 @@ def test_create_replace_mask_shape():
     mask = inpainter.create_replace_mask((200, 300), bbox)
     assert mask.shape == (200, 300)
     assert mask.dtype == np.uint8
+
+
+@pytest.mark.unit
+def test_get_inpainter_returns_singleton(mock_iopaint):
+    import app.ml.inpainter as mod
+    mod._inpainter_instance = None
+    with patch('app.ml.inpainter.DeviceManager.get', return_value='cpu'):
+        i1 = get_inpainter(tracker=MagicMock())
+        i2 = get_inpainter(tracker=MagicMock())
+    assert i1 is i2
+    mod._inpainter_instance = None
