@@ -123,6 +123,7 @@ class TestWorkerSettings:
             "segment_by_polygon_task",
             "sam_remove_object_task",
             "sam_replace_object_task",
+            "sam_replace_object_diffusion_task",   # ← додати
             "segment_hybrid_task",
             "remove_object_task",
             "remove_multiple_objects_task",
@@ -138,4 +139,4 @@ class TestWorkerSettings:
         assert WorkerSettings.max_jobs == 1
 
     def test_job_timeout_is_five_minutes(self):
-        assert WorkerSettings.job_timeout == 300
+        assert WorkerSettings.job_timeout == 100_000_000

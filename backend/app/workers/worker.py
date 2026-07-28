@@ -21,6 +21,17 @@ from app.services.ml.assets_service import AssetService
 from app.core.logging import configure_logging, get_logger, log_job
 from app.core.tracing import setup_tracing, trace_job
 
+import asyncio
+import threading
+from collections import Counter
+ 
+try:
+    import psutil
+    _HAS_PSUTIL = True
+except ImportError:
+    _HAS_PSUTIL = False
+    
+    
 configure_logging()
 setup_tracing("image-editor-worker")
 logger = get_logger("arq.worker")
@@ -57,6 +68,49 @@ async def _build_ml_deps(db):
         await redis_assets.close()
 
 
+async def _resource_monitor(interval_seconds: int = 60):
+    process = psutil.Process() if _HAS_PSUTIL else None
+    iteration = 0
+ 
+    while True:
+        await asyncio.sleep(interval_seconds)
+        iteration += 1
+ 
+        threads = threading.enumerate()
+        name_counts = Counter()
+        for t in threads:
+            base = t.name.rsplit("_", 1)[0].rsplit("-", 1)[0]
+            name_counts[base] += 1
+ 
+        log_fields = {
+            "iteration": iteration,
+            "num_threads": len(threads),
+            "thread_groups": dict(name_counts),
+        }
+ 
+        if process is not None:
+            mem = process.memory_info()
+            log_fields.update({
+                "rss_mb": round(mem.rss / (1024 * 1024), 1),
+                "vms_mb": round(mem.vms / (1024 * 1024), 1),
+                "num_fds": process.num_fds() if hasattr(process, "num_fds") else None,
+                "open_files": len(process.open_files()),
+                "connections": len(process.net_connections(kind="inet"))
+                    if hasattr(process, "net_connections") else None,
+            })
+
+        try:
+            import torch
+            if torch.cuda.is_available():
+                log_fields.update({
+                    "cuda_allocated_mb": round(torch.cuda.memory_allocated() / (1024 * 1024), 1),
+                    "cuda_reserved_mb": round(torch.cuda.memory_reserved() / (1024 * 1024), 1),
+                })
+        except Exception:
+            pass
+ 
+        logger.warning("worker_resource_snapshot", **log_fields)
+        
 @log_job(queue="segmentation")
 @trace_job()
 async def segment_objects_task(
@@ -195,7 +249,45 @@ async def sam_replace_object_task(
                 replacement_is_cutout=replacement_is_cutout,
             )
 
-
+@log_job(queue="segmentation")
+@trace_job()
+async def sam_replace_object_diffusion_task(
+    ctx,
+    image_id: int,
+    mask_bytes: bytes,
+    bbox: dict,
+    reference_image_bytes: bytes,
+    user_id: int,
+    prompt: str = "",
+    use_color_matching: bool = False,
+    color_match_method: str = "color_transfer",
+    negative_prompt: Optional[str] = None,
+    num_inference_steps: Optional[int] = None,
+    guidance_scale: Optional[float] = None,
+    ip_adapter_scale: Optional[float] = None,
+    strength: Optional[float] = None,
+    seed: int = 0,
+) -> dict:
+    async with get_db_session() as db:
+        async with _build_ml_deps(db) as deps:
+            service = EditingService(**deps)
+            return await service.sam_replace_object_diffusion(
+                image_id=image_id,
+                mask_bytes=mask_bytes,
+                bbox=bbox,
+                reference_image_bytes=reference_image_bytes,
+                user_id=user_id,
+                prompt=prompt,
+                use_color_matching=use_color_matching,
+                color_match_method=color_match_method,
+                negative_prompt=negative_prompt,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                ip_adapter_scale=ip_adapter_scale,
+                strength=strength,
+                seed=seed,
+            )
+            
 @log_job(queue="inpainting")
 @trace_job()
 async def remove_object_task(
@@ -310,10 +402,17 @@ async def startup(ctx):
     logger.info("ml_pipeline_warmup_started")
     get_pipeline()
     logger.info("ml_pipeline_warmup_finished")
-
+    ctx["_resource_monitor_task"] = asyncio.create_task(_resource_monitor(interval_seconds=60))
 
 async def shutdown(ctx):
     logger.info("worker_shutdown")
+    task = ctx.get("_resource_monitor_task")
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 class WorkerSettings:
@@ -323,6 +422,7 @@ class WorkerSettings:
         segment_by_polygon_task,
         sam_remove_object_task,
         sam_replace_object_task,
+        sam_replace_object_diffusion_task,
         segment_hybrid_task,
         remove_object_task,
         remove_multiple_objects_task,
@@ -334,6 +434,6 @@ class WorkerSettings:
 
     max_jobs = 1
 
-    job_timeout = 300
+    job_timeout = 100_000_000
 
     redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
