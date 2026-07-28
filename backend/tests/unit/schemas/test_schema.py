@@ -12,6 +12,7 @@ from app.db.schemas.ml import (
     SegmentRequest,
     SegmentWithPromptRequest,
     SamRemoveRequest,
+    SamReplaceDiffusionRequest,
     SamReplaceRequest,
     ExtractRequest,
     PasteRequest,
@@ -590,3 +591,216 @@ class TestRenameAssetRequest:
     def test_missing_label_invalid(self):
         with pytest.raises(ValidationError):
             RenameAssetRequest()  # type: ignore
+            
+
+
+@pytest.mark.unit
+class TestSamReplaceDiffusionRequest:
+
+    def test_valid_minimal(self):
+        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=100, bbox_y2=100)
+        assert (req.bbox_x1, req.bbox_y1, req.bbox_x2, req.bbox_y2) == (0, 0, 100, 100)
+
+    def test_missing_bbox_field_invalid(self):
+        with pytest.raises(ValidationError):
+            SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=100)  # type: ignore
+
+    def test_bbox_wrong_type_invalid(self):
+        with pytest.raises(ValidationError):
+            SamReplaceDiffusionRequest(
+                bbox_x1="a", bbox_y1=0, bbox_x2=100, bbox_y2=100
+            )  # type: ignore
+
+    def test_bbox_negative_coords_allowed(self):
+        req = SamReplaceDiffusionRequest(bbox_x1=-10, bbox_y1=-20, bbox_x2=100, bbox_y2=200)
+        assert req.bbox_x1 == -10
+        assert req.bbox_y1 == -20
+
+    def test_bbox_property_returns_dict(self):
+        req = SamReplaceDiffusionRequest(bbox_x1=1, bbox_y1=2, bbox_x2=3, bbox_y2=4)
+        assert req.bbox == {"x1": 1, "y1": 2, "x2": 3, "y2": 4}
+
+    def test_bbox_property_reflects_updated_values(self):
+        req = SamReplaceDiffusionRequest(bbox_x1=1, bbox_y1=2, bbox_x2=3, bbox_y2=4)
+        req.bbox_x1 = 99
+        assert req.bbox["x1"] == 99
+
+
+    def test_prompt_default_empty_string(self):
+        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1)
+        assert req.prompt == ""
+
+    def test_prompt_custom_value(self):
+        req = SamReplaceDiffusionRequest(
+            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, prompt="a red car"
+        )
+        assert req.prompt == "a red car"
+
+    def test_negative_prompt_default_none(self):
+        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1)
+        assert req.negative_prompt is None
+
+    def test_negative_prompt_custom_value(self):
+        req = SamReplaceDiffusionRequest(
+            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, negative_prompt="blurry, low quality"
+        )
+        assert req.negative_prompt == "blurry, low quality"
+
+
+    def test_use_color_matching_default_false(self):
+        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1)
+        assert req.use_color_matching is False
+
+    def test_use_color_matching_true(self):
+        req = SamReplaceDiffusionRequest(
+            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, use_color_matching=True
+        )
+        assert req.use_color_matching is True
+
+    def test_color_match_method_default(self):
+        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1)
+        assert req.color_match_method == "color_transfer"
+
+    def test_color_match_method_is_plain_str_no_validation(self):
+        req = SamReplaceDiffusionRequest(
+            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, color_match_method="anything_goes"
+        )
+        assert req.color_match_method == "anything_goes"
+
+
+    def test_num_inference_steps_default_none(self):
+        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1)
+        assert req.num_inference_steps is None
+
+    def test_num_inference_steps_boundaries(self):
+        assert SamReplaceDiffusionRequest(
+            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, num_inference_steps=5
+        ).num_inference_steps == 5
+        assert SamReplaceDiffusionRequest(
+            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, num_inference_steps=100
+        ).num_inference_steps == 100
+
+    def test_num_inference_steps_below_min_invalid(self):
+        with pytest.raises(ValidationError):
+            SamReplaceDiffusionRequest(
+                bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, num_inference_steps=4
+            )
+
+    def test_num_inference_steps_above_max_invalid(self):
+        with pytest.raises(ValidationError):
+            SamReplaceDiffusionRequest(
+                bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, num_inference_steps=101
+            )
+
+
+    def test_guidance_scale_default_none(self):
+        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1)
+        assert req.guidance_scale is None
+
+    def test_guidance_scale_boundaries(self):
+        assert SamReplaceDiffusionRequest(
+            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, guidance_scale=0.0
+        ).guidance_scale == 0.0
+        assert SamReplaceDiffusionRequest(
+            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, guidance_scale=20.0
+        ).guidance_scale == 20.0
+
+    def test_guidance_scale_below_min_invalid(self):
+        with pytest.raises(ValidationError):
+            SamReplaceDiffusionRequest(
+                bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, guidance_scale=-0.1
+            )
+
+    def test_guidance_scale_above_max_invalid(self):
+        with pytest.raises(ValidationError):
+            SamReplaceDiffusionRequest(
+                bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, guidance_scale=20.1
+            )
+
+
+    def test_ip_adapter_scale_default_none(self):
+        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1)
+        assert req.ip_adapter_scale is None
+
+    def test_ip_adapter_scale_boundaries(self):
+        assert SamReplaceDiffusionRequest(
+            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, ip_adapter_scale=0.0
+        ).ip_adapter_scale == 0.0
+        assert SamReplaceDiffusionRequest(
+            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, ip_adapter_scale=1.0
+        ).ip_adapter_scale == 1.0
+
+    def test_ip_adapter_scale_above_max_invalid(self):
+        with pytest.raises(ValidationError):
+            SamReplaceDiffusionRequest(
+                bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, ip_adapter_scale=1.1
+            )
+
+    def test_ip_adapter_scale_below_min_invalid(self):
+        with pytest.raises(ValidationError):
+            SamReplaceDiffusionRequest(
+                bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, ip_adapter_scale=-0.1
+            )
+
+
+    def test_strength_default_none(self):
+        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1)
+        assert req.strength is None
+
+    def test_strength_boundaries(self):
+        assert SamReplaceDiffusionRequest(
+            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, strength=0.0
+        ).strength == 0.0
+        assert SamReplaceDiffusionRequest(
+            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, strength=1.0
+        ).strength == 1.0
+
+    def test_strength_above_max_invalid(self):
+        with pytest.raises(ValidationError):
+            SamReplaceDiffusionRequest(
+                bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, strength=1.5
+            )
+
+    def test_strength_below_min_invalid(self):
+        with pytest.raises(ValidationError):
+            SamReplaceDiffusionRequest(
+                bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, strength=-0.5
+            )
+
+
+    def test_seed_default_zero(self):
+        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1)
+        assert req.seed == 0
+
+    def test_seed_custom_value(self):
+        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, seed=12345)
+        assert req.seed == 12345
+
+    def test_seed_negative_allowed(self):
+        # plain int field, no ge/le constraint on seed itself
+        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, seed=-1)
+        assert req.seed == -1
+
+    def test_full_valid_request(self):
+        req = SamReplaceDiffusionRequest(
+            bbox_x1=10, bbox_y1=20, bbox_x2=110, bbox_y2=220,
+            prompt="a golden retriever",
+            negative_prompt="cartoon, sketch",
+            use_color_matching=True,
+            color_match_method="mean_std",
+            num_inference_steps=50,
+            guidance_scale=7.5,
+            ip_adapter_scale=0.6,
+            strength=0.8,
+            seed=42,
+        )
+        assert req.bbox == {"x1": 10, "y1": 20, "x2": 110, "y2": 220}
+        assert req.prompt == "a golden retriever"
+        assert req.negative_prompt == "cartoon, sketch"
+        assert req.use_color_matching is True
+        assert req.color_match_method == "mean_std"
+        assert req.num_inference_steps == 50
+        assert req.guidance_scale == 7.5
+        assert req.ip_adapter_scale == 0.6
+        assert req.strength == 0.8
+        assert req.seed == 42

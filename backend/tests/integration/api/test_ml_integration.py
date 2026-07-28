@@ -5,7 +5,16 @@ from arq.jobs import JobStatus
 
 from app.api.auth.auth import create_access_token
 from app.db.models.user import User
-import app.api.v1.ml as ml_module
+
+from app.api.v1.ml import router as ml_router
+from app.api.v1.ml.deps import (
+    get_detector,
+    get_editor,
+    get_segmentation,
+    get_asset,
+    get_arq_pool,
+)
+import app.api.v1.ml.jobs as ml_jobs_module
 
 
 def _default_mock_detector():
@@ -136,14 +145,6 @@ def _default_mock_pool():
 def _make_app(db_session, detector=None, editor=None, segmentation=None, asset=None, pool=None):
     """Build a FastAPI app with the ml router wired to mocked services."""
     from fastapi import FastAPI
-    from app.api.v1.ml import (
-        router as ml_router,
-        get_detector,
-        get_editor,
-        get_segmentation,
-        get_asset,
-        get_arq_pool,
-    )
     from app.db.db_connect import get_db
 
     app = FastAPI()
@@ -1730,7 +1731,10 @@ def _patched_job(status, result_info=None):
     job_instance = MagicMock()
     job_instance.status = AsyncMock(return_value=status)
     job_instance.result_info = AsyncMock(return_value=result_info)
-    return patch.object(ml_module, "Job", return_value=job_instance), job_instance
+    # Job is imported directly inside app.api.v1.ml.jobs, so that's the
+    # namespace we need to patch it in (patching arq.jobs.Job or the old
+    # app.api.v1.ml.Job would silently do nothing).
+    return patch.object(ml_jobs_module, "Job", return_value=job_instance), job_instance
 
 
 @pytest.mark.integration

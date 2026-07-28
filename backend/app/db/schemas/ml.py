@@ -97,7 +97,31 @@ class SamRemoveRequest(BaseModel):
             hd_strategy=self.hd_strategy,
         )
 
+class SamReplaceDiffusionRequest(BaseModel):
+    bbox_x1: int
+    bbox_y1: int
+    bbox_x2: int
+    bbox_y2: int
 
+    prompt: str = ""
+    negative_prompt: Optional[str] = None
+
+    use_color_matching: bool = False
+    color_match_method: str = 'color_transfer'
+
+    num_inference_steps: Optional[int] = Field(None, ge=5, le=100)
+    guidance_scale: Optional[float] = Field(None, ge=0.0, le=20.0)
+    ip_adapter_scale: Optional[float] = Field(None, ge=0.0, le=1.0)
+    strength: Optional[float] = Field(None, ge=0.0, le=1.0)
+    seed: int = 0
+
+    @property
+    def bbox(self) -> dict:
+        return {
+            "x1": self.bbox_x1, "y1": self.bbox_y1,
+            "x2": self.bbox_x2, "y2": self.bbox_y2,
+        }
+        
 class SamReplaceRequest(BaseModel):
     expand_mask_pixels: int = 8
     use_color_matching: bool = False
@@ -171,6 +195,7 @@ class SegmentHybridRequest(BaseModel):
     fallback_min_area: int = 800
     fallback_max_segments: int = 50
     overlap_iou_thresh: float = 0.5
+    
     
 class ExtractResponse(BaseModel):
     asset_id: str
