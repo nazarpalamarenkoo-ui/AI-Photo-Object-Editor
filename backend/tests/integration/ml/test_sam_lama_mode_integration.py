@@ -93,6 +93,37 @@ def stub_inpainter():
 
 
 @pytest.fixture
+def stub_diffusion_replacer():
+    """
+    Stand-in for DiffusionReplacer. The real one loads a full SD-inpaint +
+    IP-Adapter pipeline, so it must never be constructed in tests — every
+    place that can build a SAMLamaMode (get_sam_mode() singleton included)
+    needs get_diffusion_replacer patched to return this instead.
+    """
+    dr = MagicMock(name="stub_diffusion_replacer")
+
+    async def fake_replace(
+        image_bytes,
+        mask_bytes,
+        reference_image_bytes,
+        prompt="",
+        track_metrics=True,
+        **kwargs,
+    ):
+        img = Image.open(BytesIO(image_bytes)).convert("RGB")
+        mask = Image.open(BytesIO(mask_bytes)).convert("L")
+        arr = np.array(img)
+        mask_arr = np.array(mask)
+        arr[mask_arr > 0] = (200, 50, 50)
+        buf = BytesIO()
+        Image.fromarray(arr).save(buf, format="JPEG")
+        return {"result_bytes": buf.getvalue(), "metrics": {"fake_diffusion": True}}
+
+    dr.replace = AsyncMock(side_effect=fake_replace)
+    return dr
+
+
+@pytest.fixture
 def stub_background_remover():
     br = MagicMock(name="stub_background_remover")
 
@@ -112,6 +143,7 @@ def reset_singleton_and_patch_heavy_deps(
     monkeypatch,
     stub_segmentor,
     stub_inpainter,
+    stub_diffusion_replacer,
     stub_background_remover,
     real_edge_blender,
     real_color_matcher,
@@ -123,6 +155,10 @@ def reset_singleton_and_patch_heavy_deps(
 
     monkeypatch.setattr(module, "get_segmentor", MagicMock(return_value=stub_segmentor))
     monkeypatch.setattr(module, "get_inpainter", MagicMock(return_value=stub_inpainter))
+    monkeypatch.setattr(
+        module, "get_diffusion_replacer",
+        MagicMock(return_value=stub_diffusion_replacer),
+    )
     monkeypatch.setattr(
         module, "get_background_remover",
         MagicMock(return_value=stub_background_remover),
@@ -147,6 +183,7 @@ class TestGetSamModeSingletonIntegration:
 
         assert module.get_segmentor.call_count == 1
         assert module.get_inpainter.call_count == 1
+        assert module.get_diffusion_replacer.call_count == 1
 
     def test_wires_real_edge_blender_color_matcher_and_compositor(
         self, module, real_edge_blender, real_color_matcher, real_compositor
@@ -156,6 +193,11 @@ class TestGetSamModeSingletonIntegration:
         assert instance.edge_blender is real_edge_blender
         assert instance.color_matcher is real_color_matcher
         assert instance.compositor is real_compositor
+
+    def test_wires_stub_diffusion_replacer(self, module, stub_diffusion_replacer):
+        instance = module.get_sam_mode()
+
+        assert instance.diffusion_replacer is stub_diffusion_replacer
 
     async def test_singleton_instance_remove_object_end_to_end(self, module):
         """Exercises the actual singleton-built pipeline: real dilation, real edge blending, on a small synthetic image."""
@@ -189,3 +231,26 @@ class TestGetSamModeSingletonIntegration:
         decoded = Image.open(BytesIO(result["result_bytes"]))
         assert decoded.size == (100, 100)
         instance.background_remover.remove_and_resize.assert_not_called()
+
+    async def test_singleton_instance_replace_object_diffusion_end_to_end(self, module):
+        """
+        Exercises the diffusion replacement path through the real singleton
+        wiring (real color matcher, stubbed diffusion replacer so no actual
+        SD/IP-Adapter inference happens).
+        """
+        instance = module.get_sam_mode()
+
+        image_bytes = _rgb_png((100, 100), color=(10, 20, 30))
+        mask_bytes = _mask_png((100, 100), box=(25, 25, 75, 75))
+        reference_bytes = _rgb_png((50, 50), color=(200, 50, 50))
+        bbox = {"x1": 25, "y1": 25, "x2": 75, "y2": 75}
+
+        result = await instance.replace_object_diffusion(
+            image_bytes, mask_bytes, bbox, reference_bytes,
+            prompt="a red ball", use_color_matching=True,
+        )
+
+        decoded = Image.open(BytesIO(result["result_bytes"]))
+        assert decoded.size == (100, 100)
+        instance.diffusion_replacer.replace.assert_called_once()
+        assert result["metrics"] == {"fake_diffusion": True}

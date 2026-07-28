@@ -614,3 +614,200 @@ class TestResetCurrentState:
 
         with pytest.raises(RuntimeError, match="history error"):
             await service.reset_current_state(image_id=1)
+
+
+class TestSamReplaceObjectDiffusion:
+    """
+    Unit coverage for EditingService.sam_replace_object_diffusion on pure
+    mocks. Mirrors TestRemoveObject / TestReplaceObject, minus anything
+    involving detection_repo — this operation takes a client-supplied SAM
+    mask + bbox directly, there's no stored Detection to look up.
+    """
+
+    async def test_sam_replace_object_diffusion_success(
+        self, service, mock_image_repo, sample_image, mock_redis_history,
+        mock_pipeline, mock_redis_storage, mock_s3,
+    ):
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+        mock_redis_storage.get_cache_image = AsyncMock(return_value=b"image-bytes")
+        mock_pipeline.sam_replace_object_diffusion = AsyncMock(return_value={
+            "result_bytes": b"result", "metrics": {"diffusion_ms": 12.0}, "timestamp": "t",
+        })
+
+        result = await service.sam_replace_object_diffusion(
+            image_id=1, mask_bytes=b"mask", bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+            reference_image_bytes=b"reference", user_id=42,
+        )
+
+        mock_redis_history.push_undo_state.assert_awaited_once()
+        mock_pipeline.sam_replace_object_diffusion.assert_awaited_once()
+        mock_redis_storage.cache_image.assert_awaited_once()
+        mock_s3.upload_bytes.assert_awaited_once()
+
+        assert result["result_url"] == "s3://bucket/path.jpg"
+        assert result["metrics"] == {"diffusion_ms": 12.0}
+        assert result["timestamp"] == "t"
+
+    async def test_sam_replace_object_diffusion_image_not_found(self, service, mock_image_repo):
+        mock_image_repo.get_by_id = AsyncMock(return_value=None)
+
+        with pytest.raises(ValueError, match="not found"):
+            await service.sam_replace_object_diffusion(
+                image_id=1, mask_bytes=b"mask", bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+                reference_image_bytes=b"reference", user_id=42,
+            )
+
+    async def test_sam_replace_object_diffusion_unauthorized(
+        self, service, mock_image_repo, sample_image,
+    ):
+        sample_image.user_id = 999
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+
+        with pytest.raises(ValueError, match="Unauthorized"):
+            await service.sam_replace_object_diffusion(
+                image_id=1, mask_bytes=b"mask", bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+                reference_image_bytes=b"reference", user_id=42,
+            )
+
+    async def test_sam_replace_object_diffusion_passes_mask_bbox_and_reference_to_pipeline(
+        self, service, mock_image_repo, sample_image, mock_pipeline, mock_redis_storage,
+    ):
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+        mock_redis_storage.get_cache_image = AsyncMock(return_value=b"image-bytes")
+        mock_pipeline.sam_replace_object_diffusion = AsyncMock(return_value={
+            "result_bytes": b"r", "metrics": {}, "timestamp": "t",
+        })
+
+        bbox = {"x1": 5, "y1": 5, "x2": 25, "y2": 25}
+        await service.sam_replace_object_diffusion(
+            image_id=1, mask_bytes=b"mask-bytes", bbox=bbox,
+            reference_image_bytes=b"reference-bytes", user_id=42,
+        )
+
+        _, kwargs = mock_pipeline.sam_replace_object_diffusion.call_args
+        assert kwargs["image_bytes"] == b"image-bytes"
+        assert kwargs["mask_bytes"] == b"mask-bytes"
+        assert kwargs["bbox"] == bbox
+        assert kwargs["reference_image_bytes"] == b"reference-bytes"
+
+    async def test_sam_replace_object_diffusion_default_params_forwarded(
+        self, service, mock_image_repo, sample_image, mock_pipeline, mock_redis_storage,
+    ):
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+        mock_redis_storage.get_cache_image = AsyncMock(return_value=b"image-bytes")
+        mock_pipeline.sam_replace_object_diffusion = AsyncMock(return_value={
+            "result_bytes": b"r", "metrics": {}, "timestamp": "t",
+        })
+
+        await service.sam_replace_object_diffusion(
+            image_id=1, mask_bytes=b"mask", bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+            reference_image_bytes=b"reference", user_id=42,
+        )
+
+        _, kwargs = mock_pipeline.sam_replace_object_diffusion.call_args
+        assert kwargs["prompt"] == ""
+        assert kwargs["use_color_matching"] is False
+        assert kwargs["color_match_method"] == "color_transfer"
+        assert kwargs["negative_prompt"] is None
+        assert kwargs["num_inference_steps"] is None
+        assert kwargs["guidance_scale"] is None
+        assert kwargs["ip_adapter_scale"] is None
+        assert kwargs["strength"] is None
+        assert kwargs["seed"] == 0
+
+    async def test_sam_replace_object_diffusion_optional_params_forwarded(
+        self, service, mock_image_repo, sample_image, mock_pipeline, mock_redis_storage,
+    ):
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+        mock_redis_storage.get_cache_image = AsyncMock(return_value=b"image-bytes")
+        mock_pipeline.sam_replace_object_diffusion = AsyncMock(return_value={
+            "result_bytes": b"r", "metrics": {}, "timestamp": "t",
+        })
+
+        await service.sam_replace_object_diffusion(
+            image_id=1, mask_bytes=b"mask", bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+            reference_image_bytes=b"reference", user_id=42,
+            prompt="a wooden chair", use_color_matching=True,
+            color_match_method="mean_std", negative_prompt="blurry, low quality",
+            num_inference_steps=30, guidance_scale=7.5, ip_adapter_scale=0.6,
+            strength=0.9, seed=42,
+        )
+
+        _, kwargs = mock_pipeline.sam_replace_object_diffusion.call_args
+        assert kwargs["prompt"] == "a wooden chair"
+        assert kwargs["use_color_matching"] is True
+        assert kwargs["color_match_method"] == "mean_std"
+        assert kwargs["negative_prompt"] == "blurry, low quality"
+        assert kwargs["num_inference_steps"] == 30
+        assert kwargs["guidance_scale"] == 7.5
+        assert kwargs["ip_adapter_scale"] == 0.6
+        assert kwargs["strength"] == 0.9
+        assert kwargs["seed"] == 42
+
+    async def test_sam_replace_object_diffusion_pushes_undo_state_with_correct_label(
+        self, service, mock_image_repo, sample_image, mock_redis_history, mock_pipeline, mock_redis_storage,
+    ):
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+        mock_redis_storage.get_cache_image = AsyncMock(return_value=b"image-bytes")
+        mock_pipeline.sam_replace_object_diffusion = AsyncMock(return_value={
+            "result_bytes": b"r", "metrics": {}, "timestamp": "t",
+        })
+
+        await service.sam_replace_object_diffusion(
+            image_id=1, mask_bytes=b"mask", bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+            reference_image_bytes=b"reference", user_id=42,
+        )
+
+        call = mock_redis_history.push_undo_state.call_args
+        assert call.args[0] == 1
+        assert call.args[1] == b"image-bytes"
+        assert call.kwargs["label"] == "sam replace (diffusion)"
+
+    async def test_sam_replace_object_diffusion_pipeline_exception(
+        self, service, mock_image_repo, sample_image, mock_redis_history, mock_pipeline, mock_redis_storage,
+    ):
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+        mock_redis_storage.get_cache_image = AsyncMock(return_value=b"image-bytes")
+        mock_pipeline.sam_replace_object_diffusion = AsyncMock(side_effect=RuntimeError("diffusion failure"))
+
+        with pytest.raises(RuntimeError, match="diffusion failure"):
+            await service.sam_replace_object_diffusion(
+                image_id=1, mask_bytes=b"mask", bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+                reference_image_bytes=b"reference", user_id=42,
+            )
+
+        mock_redis_history.push_undo_state.assert_awaited_once()  # pushed before failure
+
+    async def test_sam_replace_object_diffusion_s3_exception(
+        self, service, mock_image_repo, sample_image, mock_pipeline, mock_redis_storage, mock_s3,
+    ):
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+        mock_redis_storage.get_cache_image = AsyncMock(return_value=b"image-bytes")
+        mock_pipeline.sam_replace_object_diffusion = AsyncMock(return_value={
+            "result_bytes": b"result", "metrics": {}, "timestamp": "t",
+        })
+        mock_s3.upload_bytes = AsyncMock(side_effect=IOError("s3 unreachable"))
+
+        with pytest.raises(IOError, match="s3 unreachable"):
+            await service.sam_replace_object_diffusion(
+                image_id=1, mask_bytes=b"mask", bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+                reference_image_bytes=b"reference", user_id=42,
+            )
+
+    async def test_sam_replace_object_diffusion_updates_current_state_in_redis(
+        self, service, mock_image_repo, sample_image, mock_pipeline, mock_redis_storage,
+    ):
+        mock_image_repo.get_by_id = AsyncMock(return_value=sample_image)
+        mock_redis_storage.get_cache_image = AsyncMock(return_value=b"image-bytes")
+        mock_pipeline.sam_replace_object_diffusion = AsyncMock(return_value={
+            "result_bytes": b"result", "metrics": {}, "timestamp": "t",
+        })
+
+        await service.sam_replace_object_diffusion(
+            image_id=1, mask_bytes=b"mask", bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+            reference_image_bytes=b"reference", user_id=42,
+        )
+
+        mock_redis_storage.cache_image.assert_awaited_once_with(
+            image_id=1, image_data=b"result", suffix="current_state", ttl=7200
+        )

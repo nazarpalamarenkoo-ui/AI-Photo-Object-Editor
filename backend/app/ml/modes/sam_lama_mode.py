@@ -8,6 +8,7 @@ from app.config.settings import settings
 from app.config.device_manager import DeviceManager
 from app.ml.segmentor import MobileSAMSegmentor, get_segmentor
 from app.ml.inpainter import LaMaInpainter, InpaintMode, get_inpainter
+from app.ml.diffuser_inpainter import DiffusionReplacer, get_diffusion_replacer
 from app.ml.processors.edge_blender import EdgeBlender, get_edge_blender
 from app.ml.processors.color_matcher import ColorMatcher, get_color_matcher
 from app.ml.processors.background_remover import BackgroundRemover, get_background_remover
@@ -28,14 +29,19 @@ class SAMLamaMode:
         2. segment_with_prompt      — point/bbox prompt segmentation
         3. remove_object            — SAM mask → LaMa remove → EdgeBlend
         4. replace_object            — SAM mask → LaMa remove → composite → ColorMatch
-        5. extract_object           — SAM mask → RGBA PNG crop
-        6. paste_extracted_object   — RGBA PNG → scale → composite → ColorMatch → EdgeBlend
+        5. replace_object_diffusion — SAM mask → SD-inpaint + IP-Adapter (reference-steered
+                                       generation) → ColorMatch. Alternative to replace_object()
+                                       for cases where the replacement should blend into scene
+                                       lighting/perspective instead of being a resized paste.
+        6. extract_object           — SAM mask → RGBA PNG crop
+        7. paste_extracted_object   — RGBA PNG → scale → composite → ColorMatch → EdgeBlend
     """
 
     def __init__(
         self,
         segmentor: Optional[MobileSAMSegmentor] = None,
         inpainter: Optional[LaMaInpainter] = None,
+        diffusion_replacer: Optional[DiffusionReplacer] = None,
         edge_blender: Optional[EdgeBlender] = None,
         color_matcher: Optional[ColorMatcher] = None,
         background_remover: Optional[BackgroundRemover] = None,
@@ -44,6 +50,7 @@ class SAMLamaMode:
         self.device = DeviceManager.get(settings.SAM_DEVICE)
         self.segmentor = segmentor or get_segmentor()
         self.inpainter = inpainter or get_inpainter()
+        self.diffusion_replacer = diffusion_replacer or get_diffusion_replacer()
         self.edge_blender = edge_blender or get_edge_blender()
         self.color_matcher = color_matcher or get_color_matcher()
         self.background_remover = background_remover or get_background_remover(rembg_available=True)
@@ -388,7 +395,7 @@ class SAMLamaMode:
             color_match_method:        Color matching method (default: 'color_transfer')
             expand_mask_pixels:        Mask expansion in pixels (default: 8)
             ldm_steps:                 Number of LaMa inference steps (default: 25)
-            ldm_sampler:               LaMa sampler (default: 'plms')
+            ldm_sampler:                LaMa sampler (default: 'plms')
             hd_strategy:               High-resolution processing strategy (default: 'CROP')
             replacement_is_cutout:     If True, skip rembg background removal
                                        and treat replacement_image_bytes as an
@@ -467,6 +474,89 @@ class SAMLamaMode:
         return {
             "result_bytes": result_bytes,
             "metrics": inpaint_result["metrics"],
+        }
+
+    async def replace_object_diffusion(
+        self,
+        image_bytes: bytes,
+        mask_bytes: bytes,
+        bbox: Dict[str, int],
+        reference_image_bytes: bytes,
+        prompt: str = "",
+        use_color_matching: bool = False,
+        color_match_method: str = "color_transfer",
+        negative_prompt: Optional[str] = None,
+        num_inference_steps: Optional[int] = None,
+        guidance_scale: Optional[float] = None,
+        ip_adapter_scale: Optional[float] = None,
+        strength: Optional[float] = None,
+        seed: int = 0,
+    ) -> Dict:
+        """
+        Object replacement using diffusion (SD-inpainting + IP-Adapter)
+        instead of LaMa+paste.
+
+        Pipeline:
+            1. DiffusionReplacer: crop around the mask with context padding,
+               hi-res generation steered by reference_image_bytes +
+               prompt, feathered composite back into the frame
+            2. Color matching against the original frame (optional)
+
+        Args:
+            image_bytes:            Input image
+            mask_bytes:             Binary mask from SAM (PNG, L mode)
+            bbox:                   Segment bounding box {'x1','y1','x2','y2'}
+                                     (used for color matching)
+            reference_image_bytes:  Reference image for IP-Adapter conditioning
+            prompt:                 Text prompt describing the desired result
+                                     (strongly recommended — falls back to a
+                                     generic quality prompt if empty)
+            use_color_matching:     Apply color correction (default: False)
+            color_match_method:     Color matching method (default: 'color_transfer')
+            negative_prompt, num_inference_steps, guidance_scale,
+            ip_adapter_scale, strength, seed: Diffusion generation overrides
+
+        Returns:
+            Dict:
+                - result_bytes: bytes — resulting JPEG image
+                - metrics:      Dict
+        """
+        async with log_ml_operation(
+            "diffusion_replace_object_sam",
+            model="sd_inpaint+ip_adapter",
+            device=str(self.device),
+            use_color_matching=use_color_matching,
+            color_match_method=color_match_method,
+        ) as op:
+            replace_result = await self.diffusion_replacer.replace(
+                image_bytes=image_bytes,
+                mask_bytes=mask_bytes,
+                reference_image_bytes=reference_image_bytes,
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                ip_adapter_scale=ip_adapter_scale,
+                strength=strength,
+                seed=seed,
+                track_metrics=True,
+            )
+
+            result_bytes = replace_result["result_bytes"]
+
+            if use_color_matching:
+                result_bytes = self.color_matcher.match_against_original(
+                    result_bytes=result_bytes,
+                    original_image_bytes=image_bytes,
+                    bbox=bbox,
+                    method=color_match_method,  # type: ignore
+                )
+
+            op.set_output(**replace_result["metrics"])
+
+        return {
+            "result_bytes": result_bytes,
+            "metrics": replace_result["metrics"],
         }
 
     async def extract_object(

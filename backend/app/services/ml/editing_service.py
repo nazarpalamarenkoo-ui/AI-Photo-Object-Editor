@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from app.db.models.image import Image
 from app.services.ml.base_ml_service import BaseMLService
@@ -194,6 +194,107 @@ class EditingService(BaseMLService):
             result_path = (
                 f"results/{user_id}/{image_id}/"
                 f"replace_{bbox_id}_{int(datetime.utcnow().timestamp())}.jpg"
+            )
+            result_url, presigned_url = await self._upload_result(
+                result["result_bytes"], result_path
+            )
+
+        return {
+            "result_url": result_url,
+            "presigned_url": presigned_url,
+            "metrics": result["metrics"],
+            "timestamp": result["timestamp"],
+        }
+
+    async def sam_replace_object_diffusion(
+        self,
+        image_id: int,
+        mask_bytes: bytes,
+        bbox: Dict[str, int],
+        reference_image_bytes: bytes,
+        user_id: int,
+        prompt: str = "",
+        use_color_matching: bool = False,
+        color_match_method: str = "color_transfer",
+        negative_prompt: Optional[str] = None,
+        num_inference_steps: Optional[int] = None,
+        guidance_scale: Optional[float] = None,
+        ip_adapter_scale: Optional[float] = None,
+        strength: Optional[float] = None,
+        seed: int = 0,
+    ) -> Dict:
+        """
+        Replace a SAM-segmented object using diffusion (SD-inpainting +
+        IP-Adapter) instead of LaMa + paste.
+
+        Unlike replace_object (YOLO bbox_id -> stored detection lookup),
+        this operates directly on a client-supplied SAM mask + bbox, since
+        SAM segments aren't persisted as detection records. The replacement
+        content is generated in-scene, conditioned on
+        reference_image_bytes via IP-Adapter (+ optional text prompt),
+        instead of being a flat cutout paste.
+
+        Args:
+            image_id:               ID of image to process
+            mask_bytes:             Binary mask from SAM (PNG, L mode)
+            bbox:                  Segment bbox {'x1','y1','x2','y2'} (used
+                                    for color matching)
+            reference_image_bytes: Reference/asset image for IP-Adapter
+                                    conditioning
+            user_id:               ID of requesting user
+            prompt:                Text prompt describing the desired result
+                                    (strongly recommended — falls back to a
+                                    generic quality prompt if empty)
+            use_color_matching:    Apply color correction (default: False)
+            color_match_method:    Color match method (default: 'color_transfer')
+            negative_prompt:       Overrides the configured default
+            num_inference_steps:  SD inference steps override
+            guidance_scale:        SD guidance scale override
+            ip_adapter_scale:      IP-Adapter conditioning strength override
+            strength:              SD inpainting strength override
+            seed:                  Generator seed (default: 0, deterministic)
+
+        Returns:
+            Dict: result_url, presigned_url, metrics, timestamp
+
+        Raises:
+            ValueError: If image not found or unauthorized.
+        """
+        with log_execution(
+            "service_sam_replace_object_diffusion",
+            logger=logger,
+            image_id=image_id,
+            use_color_matching=use_color_matching,
+            color_match_method=color_match_method,
+        ):
+            image = await self._get_image_authorized(image_id, user_id)
+
+            image_bytes = await self._get_current_image_bytes(image_id, image.storage_path)
+            await self.redis_history.push_undo_state(
+                image_id, image_bytes, label="sam replace (diffusion)"
+            )
+
+            result = await self.pipeline.sam_replace_object_diffusion(
+                image_bytes=image_bytes,
+                mask_bytes=mask_bytes,
+                bbox=bbox,
+                reference_image_bytes=reference_image_bytes,
+                prompt=prompt,
+                use_color_matching=use_color_matching,
+                color_match_method=color_match_method,
+                negative_prompt=negative_prompt,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                ip_adapter_scale=ip_adapter_scale,
+                strength=strength,
+                seed=seed,
+            )
+
+            await self._save_current_state(image_id, result["result_bytes"])
+
+            result_path = (
+                f"results/{user_id}/{image_id}/"
+                f"sam_replace_diffusion_{int(datetime.utcnow().timestamp())}.jpg"
             )
             result_url, presigned_url = await self._upload_result(
                 result["result_bytes"], result_path

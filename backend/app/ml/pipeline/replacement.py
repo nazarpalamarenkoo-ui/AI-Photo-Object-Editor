@@ -172,3 +172,85 @@ class ReplacementMixin:
 
 
         return result
+
+    async def sam_replace_object_diffusion(
+        self,
+        image_bytes: bytes,
+        mask_bytes: bytes,
+        bbox: Dict[str, int],
+        reference_image_bytes: bytes,
+        prompt: str = "",
+        use_color_matching: bool = False,
+        color_match_method: Literal["mean_std", "histogram", "color_transfer"] = "color_transfer",
+        negative_prompt: Optional[str] = None,
+        num_inference_steps: Optional[int] = None,
+        guidance_scale: Optional[float] = None,
+        ip_adapter_scale: Optional[float] = None,
+        strength: Optional[float] = None,
+        seed: int = 0,
+    ) -> Dict:
+        """
+        Replace object using a SAM mask + diffusion (SD-inpainting + IP-Adapter).
+        Pipeline:
+            DiffusionReplacer: crop around the mask with context padding →
+            hi-res SD-inpaint + IP-Adapter generation → feathered composite
+            back into the frame → ColorMatch (optional)
+
+        Args:
+            image_bytes:               Input image bytes
+            mask_bytes:                Binary mask from SAM (PNG, L mode)
+            bbox:                      Segment bbox {'x1','y1','x2','y2'}
+                                       (used for color matching)
+            reference_image_bytes:     Reference/asset image for IP-Adapter
+                                       conditioning
+            prompt:                    Text prompt describing the desired
+                                       result (strongly recommended — falls
+                                       back to a generic quality prompt if
+                                       empty)
+            use_color_matching:        Apply color correction (default: False)
+            color_match_method:        'mean_std' | 'histogram' | 'color_transfer'
+            negative_prompt:           Overrides the configured default
+            num_inference_steps:       SD inference steps override
+            guidance_scale:            SD guidance scale override
+            ip_adapter_scale:          IP-Adapter conditioning strength override
+            strength:                  SD inpainting strength override
+            seed:                      Generator seed (default: 0, deterministic)
+
+        Returns:
+            Dict:
+                - result_bytes:  bytes — JPEG
+                - metrics:       Dict
+                - timestamp:     str
+        """
+        start_time = time.time()
+
+        with log_execution(
+            "pipeline_sam_replace_object_diffusion",
+            logger=logger,
+            use_color_matching=use_color_matching,
+            color_match_method=color_match_method,
+        ):
+            self.validator.validate_image_bytes(image_bytes)
+            self.validator.validate_mask_bytes(mask_bytes)
+            self.validator.validate_bbox(bbox)
+            self.validator.validate_image_bytes(reference_image_bytes)
+
+            result = await self.sam_lama_mode.replace_object_diffusion(
+                image_bytes=image_bytes,
+                mask_bytes=mask_bytes,
+                bbox=bbox,
+                reference_image_bytes=reference_image_bytes,
+                prompt=prompt,
+                use_color_matching=use_color_matching,
+                color_match_method=color_match_method,
+                negative_prompt=negative_prompt,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                ip_adapter_scale=ip_adapter_scale,
+                strength=strength,
+                seed=seed,
+            )
+
+            result["timestamp"] = datetime.now().isoformat()
+
+        return result

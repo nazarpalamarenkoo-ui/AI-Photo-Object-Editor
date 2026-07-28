@@ -31,11 +31,6 @@ def _rgba_cutout(size: Tuple[int, int] = (20, 20), color=(0, 200, 0, 255)) -> by
     Image.new("RGBA", size, color).save(buf, format="PNG")
     return buf.getvalue()
 
-
-# --------------------------------------------------------------------------
-# get_sam_mode() module-level singleton
-# --------------------------------------------------------------------------
-
 class TestGetSamModeSingleton:
     @pytest.fixture
     def module(self):
@@ -50,6 +45,7 @@ class TestGetSamModeSingleton:
 
         self.fake_segmentor = MagicMock(name="fake_segmentor")
         self.fake_inpainter = MagicMock(name="fake_inpainter")
+        self.fake_diffusion_replacer = MagicMock(name="fake_diffusion_replacer")
         self.fake_edge_blender = MagicMock(name="fake_edge_blender")
         self.fake_color_matcher = MagicMock(name="fake_color_matcher")
         self.fake_bg_remover = MagicMock(name="fake_bg_remover")
@@ -58,9 +54,11 @@ class TestGetSamModeSingleton:
 
         self.get_segmentor_mock = MagicMock(return_value=self.fake_segmentor)
         self.get_inpainter_mock = MagicMock(return_value=self.fake_inpainter)
+        self.get_diffusion_replacer_mock = MagicMock(return_value=self.fake_diffusion_replacer)
 
         monkeypatch.setattr(module, "get_segmentor", self.get_segmentor_mock)
         monkeypatch.setattr(module, "get_inpainter", self.get_inpainter_mock)
+        monkeypatch.setattr(module, "get_diffusion_replacer", self.get_diffusion_replacer_mock)
         monkeypatch.setattr(module, "get_edge_blender", lambda: self.fake_edge_blender)
         monkeypatch.setattr(module, "get_color_matcher", lambda: self.fake_color_matcher)
         monkeypatch.setattr(
@@ -82,12 +80,14 @@ class TestGetSamModeSingleton:
 
         self.get_segmentor_mock.assert_called_once()
         self.get_inpainter_mock.assert_called_once()
+        self.get_diffusion_replacer_mock.assert_called_once()
 
     def test_instance_is_wired_with_the_expected_dependencies(self, module):
         instance = module.get_sam_mode()
 
         assert instance.segmentor is self.fake_segmentor
         assert instance.inpainter is self.fake_inpainter
+        assert instance.diffusion_replacer is self.fake_diffusion_replacer
         assert instance.edge_blender is self.fake_edge_blender
         assert instance.color_matcher is self.fake_color_matcher
         assert instance.background_remover is self.fake_bg_remover
@@ -104,12 +104,6 @@ class TestGetSamModeSingleton:
 
         assert first is not second
 
-
-# --------------------------------------------------------------------------
-# replace_object(..., replacement_is_cutout=True) — fast unit coverage
-# (the existing integration suite only exercises this path with real
-# edge-blending/color-matching; these mirror it on pure mocks.)
-# --------------------------------------------------------------------------
 
 @pytest.fixture
 def image_bytes():
@@ -138,6 +132,16 @@ def mock_inpainter(image_bytes):
         "metrics": {"inpaint_ms": 5.0},
     })
     return inp
+
+
+@pytest.fixture
+def mock_diffusion_replacer(image_bytes):
+    dr = MagicMock()
+    dr.replace = AsyncMock(return_value={
+        "result_bytes": image_bytes,
+        "metrics": {"diffusion_ms": 12.0},
+    })
+    return dr
 
 
 @pytest.fixture
@@ -179,6 +183,7 @@ def mode(
     monkeypatch,
     mock_segmentor,
     mock_inpainter,
+    mock_diffusion_replacer,
     mock_edge_blender,
     mock_color_matcher,
     mock_background_remover,
@@ -192,6 +197,7 @@ def mode(
     return module.SAMLamaMode(
         segmentor=mock_segmentor,
         inpainter=mock_inpainter,
+        diffusion_replacer=mock_diffusion_replacer,
         edge_blender=mock_edge_blender,
         color_matcher=mock_color_matcher,
         background_remover=mock_background_remover,
@@ -274,3 +280,82 @@ class TestReplaceObjectCutout:
         await mode.replace_object(image_bytes, mask_bytes, bbox, replacement_bytes)
 
         mode.background_remover.remove_and_resize.assert_called_once()
+
+
+class TestReplaceObjectDiffusion:
+    @pytest.mark.asyncio
+    async def test_calls_diffusion_replacer_with_expected_args(self, mode, image_bytes, mask_bytes):
+        reference_bytes = _rgb_png((30, 30), color=(0, 0, 200))
+        bbox = {"x1": 40, "y1": 40, "x2": 80, "y2": 80}
+
+        await mode.replace_object_diffusion(
+            image_bytes, mask_bytes, bbox, reference_bytes,
+            prompt="a blue vase", use_color_matching=False,
+        )
+
+        mode.diffusion_replacer.replace.assert_called_once()
+        call_kwargs = mode.diffusion_replacer.replace.call_args.kwargs
+        assert call_kwargs["image_bytes"] == image_bytes
+        assert call_kwargs["mask_bytes"] == mask_bytes
+        assert call_kwargs["reference_image_bytes"] == reference_bytes
+        assert call_kwargs["prompt"] == "a blue vase"
+        assert call_kwargs["track_metrics"] is True
+
+    @pytest.mark.asyncio
+    async def test_applies_color_matching_when_requested(self, mode, image_bytes, mask_bytes):
+        reference_bytes = _rgb_png((30, 30), color=(0, 0, 200))
+        bbox = {"x1": 40, "y1": 40, "x2": 80, "y2": 80}
+
+        await mode.replace_object_diffusion(
+            image_bytes, mask_bytes, bbox, reference_bytes,
+            use_color_matching=True,
+        )
+
+        mode.color_matcher.match_against_original.assert_called_once()
+        call_kwargs = mode.color_matcher.match_against_original.call_args.kwargs
+        assert call_kwargs["bbox"] == bbox
+
+    @pytest.mark.asyncio
+    async def test_skips_color_matching_by_default(self, mode, image_bytes, mask_bytes):
+        reference_bytes = _rgb_png((30, 30), color=(0, 0, 200))
+        bbox = {"x1": 40, "y1": 40, "x2": 80, "y2": 80}
+
+        await mode.replace_object_diffusion(
+            image_bytes, mask_bytes, bbox, reference_bytes,
+        )
+
+        mode.color_matcher.match_against_original.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_returns_metrics_from_diffusion_replacer(self, mode, image_bytes, mask_bytes):
+        reference_bytes = _rgb_png((30, 30), color=(0, 0, 200))
+        bbox = {"x1": 40, "y1": 40, "x2": 80, "y2": 80}
+
+        result = await mode.replace_object_diffusion(
+            image_bytes, mask_bytes, bbox, reference_bytes,
+        )
+
+        assert result["metrics"] == {"diffusion_ms": 12.0}
+
+    @pytest.mark.asyncio
+    async def test_forwards_generation_overrides(self, mode, image_bytes, mask_bytes):
+        reference_bytes = _rgb_png((30, 30), color=(0, 0, 200))
+        bbox = {"x1": 40, "y1": 40, "x2": 80, "y2": 80}
+
+        await mode.replace_object_diffusion(
+            image_bytes, mask_bytes, bbox, reference_bytes,
+            negative_prompt="blurry, low quality",
+            num_inference_steps=30,
+            guidance_scale=7.5,
+            ip_adapter_scale=0.6,
+            strength=0.9,
+            seed=42,
+        )
+
+        call_kwargs = mode.diffusion_replacer.replace.call_args.kwargs
+        assert call_kwargs["negative_prompt"] == "blurry, low quality"
+        assert call_kwargs["num_inference_steps"] == 30
+        assert call_kwargs["guidance_scale"] == 7.5
+        assert call_kwargs["ip_adapter_scale"] == 0.6
+        assert call_kwargs["strength"] == 0.9
+        assert call_kwargs["seed"] == 42

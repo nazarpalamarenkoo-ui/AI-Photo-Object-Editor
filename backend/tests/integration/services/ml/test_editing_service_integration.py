@@ -404,3 +404,189 @@ class TestResetCurrentState:
 
         mock_redis_cache.delete.assert_awaited_once_with(f"image:{sample_image.id}:current_state")
         mock_redis_history.clear_history.assert_awaited_once_with(sample_image.id)
+
+
+class TestSamReplaceObjectDiffusion:
+    """
+    Integration coverage for EditingService.sam_replace_object_diffusion.
+
+    Unlike remove_object/replace_object, this operation isn't keyed off a
+    stored Detection (bbox_id lookup) — the SAM mask and bbox come straight
+    from the client, so there's no "detection missing" failure mode to
+    cover, but everything else (auth, undo push, current-state cache,
+    upload, param forwarding) mirrors the other editing operations.
+    """
+
+    @pytest.mark.asyncio
+    async def test_success_uploads_and_returns_result(
+        self, editing_service, sample_image, sample_user, mock_redis_cache, mock_pipeline, mock_s3_storage
+    ):
+        mock_redis_cache.get_cache_image = AsyncMock(return_value=b"image-bytes")
+        mock_redis_cache.cache_image = AsyncMock()
+        mock_pipeline.sam_replace_object_diffusion = AsyncMock(return_value=_pipeline_result())
+        mock_s3_storage.upload_bytes = AsyncMock(return_value="s3://bucket/r.jpg")
+        mock_s3_storage.get_presigned_url = AsyncMock(return_value="https://url")
+
+        result = await editing_service.sam_replace_object_diffusion(
+            image_id=sample_image.id,
+            mask_bytes=b"mask-bytes",
+            bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+            reference_image_bytes=b"reference-bytes",
+            user_id=sample_user.id,
+        )
+
+        assert result["result_url"] == "s3://bucket/r.jpg"
+        assert result["presigned_url"] == "https://url"
+        assert "metrics" in result
+        assert "timestamp" in result
+
+    @pytest.mark.asyncio
+    async def test_raises_when_unauthorized(self, editing_service, sample_image, mock_redis_cache):
+        mock_redis_cache.get_cache_image = AsyncMock(return_value=b"image-bytes")
+
+        with pytest.raises(ValueError, match="Unauthorized"):
+            await editing_service.sam_replace_object_diffusion(
+                image_id=sample_image.id,
+                mask_bytes=b"mask-bytes",
+                bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+                reference_image_bytes=b"reference-bytes",
+                user_id=sample_image.user_id + 1,
+            )
+
+    @pytest.mark.asyncio
+    async def test_raises_when_image_not_found(self, editing_service, sample_user):
+        with pytest.raises(ValueError, match="not found"):
+            await editing_service.sam_replace_object_diffusion(
+                image_id=999999,
+                mask_bytes=b"mask-bytes",
+                bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+                reference_image_bytes=b"reference-bytes",
+                user_id=sample_user.id,
+            )
+
+    @pytest.mark.asyncio
+    async def test_passes_mask_bbox_and_reference_bytes_to_pipeline(
+        self, editing_service, sample_image, sample_user, mock_redis_cache, mock_pipeline, mock_s3_storage
+    ):
+        mock_redis_cache.get_cache_image = AsyncMock(return_value=b"image-bytes")
+        mock_redis_cache.cache_image = AsyncMock()
+        mock_pipeline.sam_replace_object_diffusion = AsyncMock(return_value=_pipeline_result())
+        mock_s3_storage.upload_bytes = AsyncMock(return_value="s3://bucket/r.jpg")
+        mock_s3_storage.get_presigned_url = AsyncMock(return_value="https://url")
+
+        bbox = {"x1": 5, "y1": 5, "x2": 25, "y2": 25}
+        await editing_service.sam_replace_object_diffusion(
+            image_id=sample_image.id,
+            mask_bytes=b"mask-bytes",
+            bbox=bbox,
+            reference_image_bytes=b"reference-bytes",
+            user_id=sample_user.id,
+        )
+
+        call_kwargs = mock_pipeline.sam_replace_object_diffusion.call_args.kwargs
+        assert call_kwargs["image_bytes"] == b"image-bytes"
+        assert call_kwargs["mask_bytes"] == b"mask-bytes"
+        assert call_kwargs["bbox"] == bbox
+        assert call_kwargs["reference_image_bytes"] == b"reference-bytes"
+
+    @pytest.mark.asyncio
+    async def test_forwards_diffusion_generation_params(
+        self, editing_service, sample_image, sample_user, mock_redis_cache, mock_pipeline, mock_s3_storage
+    ):
+        mock_redis_cache.get_cache_image = AsyncMock(return_value=b"image-bytes")
+        mock_redis_cache.cache_image = AsyncMock()
+        mock_pipeline.sam_replace_object_diffusion = AsyncMock(return_value=_pipeline_result())
+        mock_s3_storage.upload_bytes = AsyncMock(return_value="s3://bucket/r.jpg")
+        mock_s3_storage.get_presigned_url = AsyncMock(return_value="https://url")
+
+        await editing_service.sam_replace_object_diffusion(
+            image_id=sample_image.id,
+            mask_bytes=b"mask-bytes",
+            bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+            reference_image_bytes=b"reference-bytes",
+            user_id=sample_user.id,
+            prompt="a red chair",
+            use_color_matching=True,
+            color_match_method="histogram",
+            negative_prompt="blurry",
+            num_inference_steps=30,
+            guidance_scale=7.5,
+            ip_adapter_scale=0.6,
+            strength=0.9,
+            seed=42,
+        )
+
+        call_kwargs = mock_pipeline.sam_replace_object_diffusion.call_args.kwargs
+        assert call_kwargs["prompt"] == "a red chair"
+        assert call_kwargs["use_color_matching"] is True
+        assert call_kwargs["color_match_method"] == "histogram"
+        assert call_kwargs["negative_prompt"] == "blurry"
+        assert call_kwargs["num_inference_steps"] == 30
+        assert call_kwargs["guidance_scale"] == 7.5
+        assert call_kwargs["ip_adapter_scale"] == 0.6
+        assert call_kwargs["strength"] == 0.9
+        assert call_kwargs["seed"] == 42
+
+    @pytest.mark.asyncio
+    async def test_pushes_undo_state_before_editing(
+        self, editing_service, sample_image, sample_user, mock_redis_cache, mock_redis_history, mock_pipeline, mock_s3_storage
+    ):
+        mock_redis_cache.get_cache_image = AsyncMock(return_value=b"image-bytes")
+        mock_redis_cache.cache_image = AsyncMock()
+        mock_pipeline.sam_replace_object_diffusion = AsyncMock(return_value=_pipeline_result())
+        mock_s3_storage.upload_bytes = AsyncMock(return_value="s3://bucket/r.jpg")
+        mock_s3_storage.get_presigned_url = AsyncMock(return_value="https://url")
+
+        await editing_service.sam_replace_object_diffusion(
+            image_id=sample_image.id,
+            mask_bytes=b"mask-bytes",
+            bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+            reference_image_bytes=b"reference-bytes",
+            user_id=sample_user.id,
+        )
+
+        mock_redis_history.push_undo_state.assert_awaited_once()
+        call = mock_redis_history.push_undo_state.call_args
+        assert call.args[0] == sample_image.id
+        assert call.args[1] == b"image-bytes"
+        assert call.kwargs["label"] == "sam replace (diffusion)"
+
+    @pytest.mark.asyncio
+    async def test_updates_current_state_in_redis(
+        self, editing_service, sample_image, sample_user, mock_redis_cache, mock_pipeline, mock_s3_storage
+    ):
+        mock_redis_cache.get_cache_image = AsyncMock(return_value=b"image-bytes")
+        mock_redis_cache.cache_image = AsyncMock()
+        mock_pipeline.sam_replace_object_diffusion = AsyncMock(return_value=_pipeline_result())
+        mock_s3_storage.upload_bytes = AsyncMock(return_value="s3://bucket/r.jpg")
+        mock_s3_storage.get_presigned_url = AsyncMock(return_value="https://url")
+
+        await editing_service.sam_replace_object_diffusion(
+            image_id=sample_image.id,
+            mask_bytes=b"mask-bytes",
+            bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+            reference_image_bytes=b"reference-bytes",
+            user_id=sample_user.id,
+        )
+
+        mock_redis_cache.cache_image.assert_awaited_once_with(
+            image_id=sample_image.id, image_data=b"edited-bytes", suffix="current_state", ttl=7200
+        )
+
+    @pytest.mark.asyncio
+    async def test_pipeline_exception_propagates(
+        self, editing_service, sample_image, sample_user, mock_redis_cache, mock_redis_history, mock_pipeline
+    ):
+        mock_redis_cache.get_cache_image = AsyncMock(return_value=b"image-bytes")
+        mock_pipeline.sam_replace_object_diffusion = AsyncMock(side_effect=RuntimeError("diffusion failed"))
+
+        with pytest.raises(RuntimeError, match="diffusion failed"):
+            await editing_service.sam_replace_object_diffusion(
+                image_id=sample_image.id,
+                mask_bytes=b"mask-bytes",
+                bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+                reference_image_bytes=b"reference-bytes",
+                user_id=sample_user.id,
+            )
+
+        mock_redis_history.push_undo_state.assert_awaited_once()  # pushed before failure
