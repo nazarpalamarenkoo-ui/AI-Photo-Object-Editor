@@ -1,6 +1,6 @@
 import { ref, computed } from 'vue'
 import { mlApi, PRESETS } from '@/api/ml'
-import type { SegmentInfo, LdmConfig, Bbox, RegionItem, PromptPoint, PolygonPoint, PromptMode, SegmentHybridParams } from '@/types/Index'
+import type { SegmentInfo, LdmConfig, Bbox, RegionItem, PromptPoint, PolygonPoint, PromptMode, SegmentHybridParams, DiffusionReplaceOptions } from '@/types/Index'
 
 export function useSegmentation(
   imageId: number,
@@ -217,6 +217,53 @@ export function useSegmentation(
       mlError.value = e.response?.data?.detail ?? 'SAM replace with asset failed'
     }
   }
+  async function handleSamReplaceDiffusion(options: DiffusionReplaceOptions = {}) {
+    if (selectedMaskId.value === null || !replacementFile.value) return
+    const seg = segments.value.find(s => s.mask_id === selectedMaskId.value)
+    if (!seg?.mask_url) {
+      mlError.value = 'Mask preview unavailable, cannot run diffusion replace'
+      return
+    }
+    mlError.value = ''
+    try {
+      const result = await mlApi.samReplaceObjectDiffusion(imageId, seg.mask_url, seg.bbox, {
+        referenceFile: replacementFile.value,
+        ...options,
+      })
+      currentImageUrl.value = result.presigned_url
+      segments.value = segments.value.filter(s => s.mask_id !== selectedMaskId.value)
+      selectedMaskId.value = null
+      replacementFile.value = null
+      const h = await mlApi.getHistory(imageId)
+      history.value = h.history
+    } catch (e: any) {
+      mlError.value = e.response?.data?.detail ?? 'Diffusion replace failed'
+    }
+  }
+
+  async function handleSamReplaceWithAssetDiffusion(assetId: string, options: DiffusionReplaceOptions = {}) {
+    if (selectedMaskId.value === null || !assetId) return
+    const seg = segments.value.find(s => s.mask_id === selectedMaskId.value)
+    if (!seg?.mask_url) {
+      mlError.value = 'Mask preview unavailable, cannot run diffusion replace'
+      return
+    }
+    mlError.value = ''
+    try {
+      const result = await mlApi.samReplaceObjectDiffusion(imageId, seg.mask_url, seg.bbox, {
+        assetId,
+        ...options,
+      })
+      currentImageUrl.value = result.presigned_url
+      segments.value = segments.value.filter(s => s.mask_id !== selectedMaskId.value)
+      selectedMaskId.value = null
+      const h = await mlApi.getHistory(imageId)
+      history.value = h.history
+    } catch (e: any) {
+      mlError.value = e.response?.data?.detail ?? 'Diffusion replace with asset failed'
+    }
+  }
+
   function onReplacementSelect(event: Event) {
     const input = event.target as HTMLInputElement
     replacementFile.value = input.files?.[0] ?? null
@@ -234,6 +281,7 @@ export function useSegmentation(
     useEdgeBlending, replacementFile,
     handleSegment, handleSegmentHybrid, handleSegmentWithPrompt, handleSegmentByPolygon,
     toggleMaskSelection, handleSamRemove, handleSamReplace, handleSamReplaceWithAsset,
+    handleSamReplaceDiffusion, handleSamReplaceWithAssetDiffusion,
     onReplacementSelect, clearSegments,polygonShapes,
     promptMode, promptLabel, promptPoints, promptBbox, canRunPrompt,
     addPromptPoint, removeLastPromptPoint, setPromptBbox, clearPrompt, setPromptMode,

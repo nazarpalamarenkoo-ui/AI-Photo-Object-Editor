@@ -14,6 +14,7 @@ vi.mock('@/api/ml', () => ({
     samRemoveObject: vi.fn(),
     samReplaceObject: vi.fn(),
     samReplaceObjectWithAsset: vi.fn(),
+    samReplaceObjectDiffusion: vi.fn(),
     getHistory: vi.fn()
   }
 }))
@@ -1284,5 +1285,491 @@ describe('useSegmentation: clearSegments', () => {
 
     expect(promptPoints.value).toEqual([])
     expect(promptMode.value).toBeNull()
+  })
+})
+describe('useSegmentation: handleSamReplaceDiffusion', () => {
+  const makeFile = () => new File(['img'], 'reference.png', { type: 'image/png' })
+  const segWithMask = (maskId: number) =>
+    makeSegment(maskId, maskId, `https://cdn.example.com/mask-${maskId}.png`)
+
+  it('does nothing if no mask is selected', async () => {
+    const { replacementFile, handleSamReplaceDiffusion } = useSegmentation(9, ref(''), ref([]))
+    replacementFile.value = makeFile()
+
+    await handleSamReplaceDiffusion()
+
+    expect(mockedMlApi.samReplaceObjectDiffusion).not.toHaveBeenCalled()
+  })
+
+  it('does nothing if no replacementFile is set', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+
+    const { handleSegment, toggleMaskSelection, handleSamReplaceDiffusion } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+
+    await handleSamReplaceDiffusion()
+
+    expect(mockedMlApi.samReplaceObjectDiffusion).not.toHaveBeenCalled()
+  })
+
+  it('sets mlError and does not call the api when the selected segment has no mask_url', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([makeSegment(3)])) // no maskUrl
+
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, mlError } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+    replacementFile.value = makeFile()
+
+    await handleSamReplaceDiffusion()
+
+    expect(mlError.value).toBe('Mask preview unavailable, cannot run diffusion replace')
+    expect(mockedMlApi.samReplaceObjectDiffusion).not.toHaveBeenCalled()
+  })
+
+  it('calls samReplaceObjectDiffusion with the segment mask_url, bbox and referenceFile', async () => {
+    const file = makeFile()
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
+      makeMLResult('https://cdn.example.com/diffused.jpg')
+    )
+    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
+
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+    replacementFile.value = file
+
+    await handleSamReplaceDiffusion()
+
+    expect(mockedMlApi.samReplaceObjectDiffusion).toHaveBeenCalledWith(
+      9,
+      'https://cdn.example.com/mask-3.png',
+      { x1: 0, y1: 0, x2: 50, y2: 50 },
+      { referenceFile: file }
+    )
+  })
+
+  it('merges custom diffusion options into the call', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
+      makeMLResult('https://cdn.example.com/diffused.jpg')
+    )
+    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
+
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+    replacementFile.value = makeFile()
+
+    await handleSamReplaceDiffusion({ prompt: 'a red car', seed: 42 })
+
+    expect(mockedMlApi.samReplaceObjectDiffusion).toHaveBeenCalledWith(
+      9,
+      'https://cdn.example.com/mask-3.png',
+      { x1: 0, y1: 0, x2: 50, y2: 50 },
+      { referenceFile: expect.any(File), prompt: 'a red car', seed: 42 }
+    )
+  })
+
+  it('updates currentImageUrl from result.presigned_url', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
+      makeMLResult('https://cdn.example.com/diffused.jpg')
+    )
+    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
+
+    const currentImageUrl = ref('')
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion } =
+      useSegmentation(9, currentImageUrl, ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+    replacementFile.value = makeFile()
+
+    await handleSamReplaceDiffusion()
+
+    expect(currentImageUrl.value).toBe('https://cdn.example.com/diffused.jpg')
+  })
+
+  it('removes the replaced segment from segments', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(
+      makeSegmentResult([segWithMask(1), segWithMask(2)])
+    )
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
+      makeMLResult('https://cdn.example.com/diffused.jpg')
+    )
+    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
+
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, segments } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(1)
+    replacementFile.value = makeFile()
+
+    await handleSamReplaceDiffusion()
+
+    expect(segments.value).toHaveLength(1)
+    expect(segments.value[0].mask_id).toBe(2)
+  })
+
+  it('clears selectedMaskId and replacementFile after success', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
+      makeMLResult('https://cdn.example.com/diffused.jpg')
+    )
+    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
+
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, selectedMaskId } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+    replacementFile.value = makeFile()
+
+    await handleSamReplaceDiffusion()
+
+    expect(selectedMaskId.value).toBeNull()
+    expect(replacementFile.value).toBeNull()
+  })
+
+  it('updates history after replacement', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
+      makeMLResult('https://cdn.example.com/diffused.jpg')
+    )
+    mockedMlApi.getHistory.mockResolvedValue({ history: ['step1'] })
+
+    const history = ref<string[]>([])
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion } =
+      useSegmentation(9, ref(''), history)
+    await handleSegment()
+    toggleMaskSelection(3)
+    replacementFile.value = makeFile()
+
+    await handleSamReplaceDiffusion()
+
+    expect(mockedMlApi.getHistory).toHaveBeenCalledWith(9)
+    expect(history.value).toEqual(['step1'])
+  })
+
+  it('clears previous mlError before the call', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
+      makeMLResult('https://cdn.example.com/diffused.jpg')
+    )
+    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
+
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, mlError } =
+      useSegmentation(9, ref(''), ref([]))
+    mlError.value = 'stale error'
+    await handleSegment()
+    toggleMaskSelection(3)
+    replacementFile.value = makeFile()
+
+    await handleSamReplaceDiffusion()
+
+    expect(mlError.value).toBe('')
+  })
+
+  it('sets mlError when samReplaceObjectDiffusion fails', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockRejectedValue({
+      response: { data: { detail: 'Diffusion replace failed on server' } }
+    })
+
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, mlError } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+    replacementFile.value = makeFile()
+
+    await handleSamReplaceDiffusion()
+
+    expect(mlError.value).toBe('Diffusion replace failed on server')
+  })
+
+  it('falls back to default error message when server gives none', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockRejectedValue(new Error('fail'))
+
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, mlError } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+    replacementFile.value = makeFile()
+
+    await handleSamReplaceDiffusion()
+
+    expect(mlError.value).toBe('Diffusion replace failed')
+  })
+
+  it('keeps selectedMaskId and replacementFile when samReplaceObjectDiffusion fails', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockRejectedValue(new Error('fail'))
+
+    const file = makeFile()
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, selectedMaskId } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+    replacementFile.value = file
+
+    await handleSamReplaceDiffusion()
+
+    expect(selectedMaskId.value).toBe(3)
+    expect(replacementFile.value).toBe(file)
+  })
+
+  it('does not remove the segment from segments on failure', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockRejectedValue(new Error('fail'))
+
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, segments } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+    replacementFile.value = makeFile()
+
+    await handleSamReplaceDiffusion()
+
+    expect(segments.value).toHaveLength(1)
+  })
+})
+
+describe('useSegmentation: handleSamReplaceWithAssetDiffusion', () => {
+  const segWithMask = (maskId: number) =>
+    makeSegment(maskId, maskId, `https://cdn.example.com/mask-${maskId}.png`)
+
+  it('does nothing if no mask is selected', async () => {
+    const { handleSamReplaceWithAssetDiffusion } = useSegmentation(9, ref(''), ref([]))
+
+    await handleSamReplaceWithAssetDiffusion('asset-1')
+
+    expect(mockedMlApi.samReplaceObjectDiffusion).not.toHaveBeenCalled()
+  })
+
+  it('does nothing if assetId is empty', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+
+    await handleSamReplaceWithAssetDiffusion('')
+
+    expect(mockedMlApi.samReplaceObjectDiffusion).not.toHaveBeenCalled()
+  })
+
+  it('sets mlError and does not call the api when the selected segment has no mask_url', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([makeSegment(3)])) // no maskUrl
+
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, mlError } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+
+    await handleSamReplaceWithAssetDiffusion('asset-1')
+
+    expect(mlError.value).toBe('Mask preview unavailable, cannot run diffusion replace')
+    expect(mockedMlApi.samReplaceObjectDiffusion).not.toHaveBeenCalled()
+  })
+
+  it('calls samReplaceObjectDiffusion with the segment mask_url, bbox and assetId', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
+      makeMLResult('https://cdn.example.com/diffused-asset.jpg')
+    )
+    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
+
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+
+    await handleSamReplaceWithAssetDiffusion('asset-1')
+
+    expect(mockedMlApi.samReplaceObjectDiffusion).toHaveBeenCalledWith(
+      9,
+      'https://cdn.example.com/mask-3.png',
+      { x1: 0, y1: 0, x2: 50, y2: 50 },
+      { assetId: 'asset-1' }
+    )
+  })
+
+  it('merges custom diffusion options into the call', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
+      makeMLResult('https://cdn.example.com/diffused-asset.jpg')
+    )
+    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
+
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+
+    await handleSamReplaceWithAssetDiffusion('asset-1', { guidanceScale: 7.5 })
+
+    expect(mockedMlApi.samReplaceObjectDiffusion).toHaveBeenCalledWith(
+      9,
+      'https://cdn.example.com/mask-3.png',
+      { x1: 0, y1: 0, x2: 50, y2: 50 },
+      { assetId: 'asset-1', guidanceScale: 7.5 }
+    )
+  })
+
+  it('updates currentImageUrl after replacement', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
+      makeMLResult('https://cdn.example.com/diffused-asset.jpg')
+    )
+    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
+
+    const currentImageUrl = ref('')
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion } =
+      useSegmentation(9, currentImageUrl, ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+
+    await handleSamReplaceWithAssetDiffusion('asset-1')
+
+    expect(currentImageUrl.value).toBe('https://cdn.example.com/diffused-asset.jpg')
+  })
+
+  it('removes the replaced segment from segments', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(
+      makeSegmentResult([segWithMask(1), segWithMask(2)])
+    )
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
+      makeMLResult('https://cdn.example.com/diffused-asset.jpg')
+    )
+    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
+
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, segments } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(1)
+
+    await handleSamReplaceWithAssetDiffusion('asset-1')
+
+    expect(segments.value).toHaveLength(1)
+    expect(segments.value[0].mask_id).toBe(2)
+  })
+
+  it('clears selectedMaskId after success', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
+      makeMLResult('https://cdn.example.com/diffused-asset.jpg')
+    )
+    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
+
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, selectedMaskId } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+
+    await handleSamReplaceWithAssetDiffusion('asset-1')
+
+    expect(selectedMaskId.value).toBeNull()
+  })
+
+  it('does not touch replacementFile (asset flow is independent of file upload)', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
+      makeMLResult('https://cdn.example.com/diffused-asset.jpg')
+    )
+    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
+
+    const file = new File(['img'], 'unrelated.png', { type: 'image/png' })
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceWithAssetDiffusion } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+    replacementFile.value = file
+
+    await handleSamReplaceWithAssetDiffusion('asset-1')
+
+    expect(replacementFile.value).toBe(file)
+  })
+
+  it('updates history after replacement', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
+      makeMLResult('https://cdn.example.com/diffused-asset.jpg')
+    )
+    mockedMlApi.getHistory.mockResolvedValue({ history: ['step1'] })
+
+    const history = ref<string[]>([])
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion } =
+      useSegmentation(9, ref(''), history)
+    await handleSegment()
+    toggleMaskSelection(3)
+
+    await handleSamReplaceWithAssetDiffusion('asset-1')
+
+    expect(mockedMlApi.getHistory).toHaveBeenCalledWith(9)
+    expect(history.value).toEqual(['step1'])
+  })
+
+  it('sets mlError when samReplaceObjectDiffusion fails', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockRejectedValue({
+      response: { data: { detail: 'Diffusion replace with asset failed on server' } }
+    })
+
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, mlError } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+
+    await handleSamReplaceWithAssetDiffusion('asset-1')
+
+    expect(mlError.value).toBe('Diffusion replace with asset failed on server')
+  })
+
+  it('falls back to default error message when server gives none', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockRejectedValue(new Error('fail'))
+
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, mlError } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+
+    await handleSamReplaceWithAssetDiffusion('asset-1')
+
+    expect(mlError.value).toBe('Diffusion replace with asset failed')
+  })
+
+  it('keeps selectedMaskId when samReplaceObjectDiffusion fails', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockRejectedValue(new Error('fail'))
+
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, selectedMaskId } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+
+    await handleSamReplaceWithAssetDiffusion('asset-1')
+
+    expect(selectedMaskId.value).toBe(3)
+  })
+
+  it('does not remove the segment from segments on failure', async () => {
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockRejectedValue(new Error('fail'))
+
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, segments } =
+      useSegmentation(9, ref(''), ref([]))
+    await handleSegment()
+    toggleMaskSelection(3)
+
+    await handleSamReplaceWithAssetDiffusion('asset-1')
+
+    expect(segments.value).toHaveLength(1)
   })
 })
