@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     YOLO_DEVICE: str = "cpu"
     SAM_DEVICE: str = "cuda"
     LAMA_DEVICE: str = "cuda"
-
+    DIFFUSION_DEVICE: str = 'cuda'
     # App
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
