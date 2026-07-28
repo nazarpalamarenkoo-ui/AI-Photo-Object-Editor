@@ -781,7 +781,240 @@ describe('mlApi: samReplaceObject', () => {
     await expect(mlApi.samReplaceObject(1, 3, fakeFile)).rejects.toThrow(MLJobError)
   })
 })
+describe('mlApi: samReplaceObjectDiffusion', () => {
+  const fakeBbox: Bbox = { x1: 10, y1: 20, x2: 110, y2: 220 }
+  const fakeReferenceFile = new File(['ref'], 'reference.png', { type: 'image/png' })
 
+  function makeMaskDataUrl(content: string, mime = 'image/png') {
+    return `data:${mime};base64,${btoa(content)}`
+  }
+
+  async function blobToText(blob: Blob): Promise<string> {
+    const buf = await blob.arrayBuffer()
+    return new TextDecoder().decode(buf)
+  }
+
+  it('throws when neither referenceFile nor assetId is provided', async () => {
+    await expect(
+      mlApi.samReplaceObjectDiffusion(1, makeMaskDataUrl('mask-bytes'), fakeBbox, {})
+    ).rejects.toThrow('Provide referenceFile or assetId')
+
+    expect(mockedClient.post).not.toHaveBeenCalled()
+  })
+
+  it('posts multipart/form-data to correct async url', async () => {
+    mockJobSuccess('job-12', fakeMLResult)
+
+    await mlApi.samReplaceObjectDiffusion(1, makeMaskDataUrl('mask-bytes'), fakeBbox, {
+      referenceFile: fakeReferenceFile,
+    })
+
+    const [url, body] = mockedClient.post.mock.calls[0]
+    expect(url).toBe('/ml/images/1/replace/diffusion/async')
+    expect(body).toBeInstanceOf(FormData)
+  })
+
+  it('sets multipart/form-data header', async () => {
+    mockJobSuccess('job-12', fakeMLResult)
+
+    await mlApi.samReplaceObjectDiffusion(1, makeMaskDataUrl('mask-bytes'), fakeBbox, {
+      referenceFile: fakeReferenceFile,
+    })
+
+    const [, , config] = mockedClient.post.mock.calls[0]
+    expect((config as any).headers['Content-Type']).toBe('multipart/form-data')
+  })
+
+  it('decodes the mask data URL into a mask_file blob named mask.png', async () => {
+    mockJobSuccess('job-12', fakeMLResult)
+
+    await mlApi.samReplaceObjectDiffusion(
+      1,
+      makeMaskDataUrl('hello mask world', 'image/png'),
+      fakeBbox,
+      { referenceFile: fakeReferenceFile }
+    )
+
+    const [, body] = mockedClient.post.mock.calls[0]
+    const maskEntry = (body as FormData).get('mask_file')
+    expect(maskEntry).toBeInstanceOf(Blob)
+
+    const maskFile = maskEntry as File
+    expect(maskFile.name).toBe('mask.png')
+    expect(maskFile.type).toBe('image/png')
+    await expect(blobToText(maskFile)).resolves.toBe('hello mask world')
+  })
+
+  it('preserves the mime type declared in the mask data URL', async () => {
+    mockJobSuccess('job-12', fakeMLResult)
+
+    await mlApi.samReplaceObjectDiffusion(
+      1,
+      makeMaskDataUrl('jpeg-mask-bytes', 'image/jpeg'),
+      fakeBbox,
+      { referenceFile: fakeReferenceFile }
+    )
+
+    const [, body] = mockedClient.post.mock.calls[0]
+    const maskFile = (body as FormData).get('mask_file') as File
+    expect(maskFile.type).toBe('image/jpeg')
+  })
+
+  it('falls back to image/png when the data URL has no parseable mime header', async () => {
+    mockJobSuccess('job-12', fakeMLResult)
+
+    // No "data:<mime>;base64," prefix at all — mimeMatch will be null
+    const malformedDataUrl = `not-a-data-url,${btoa('raw-bytes')}`
+
+    await mlApi.samReplaceObjectDiffusion(1, malformedDataUrl, fakeBbox, {
+      referenceFile: fakeReferenceFile,
+    })
+
+    const [, body] = mockedClient.post.mock.calls[0]
+    const maskFile = (body as FormData).get('mask_file') as File
+    expect(maskFile.type).toBe('image/png')
+    await expect(blobToText(maskFile)).resolves.toBe('raw-bytes')
+  })
+
+  it('appends reference_file when referenceFile is provided', async () => {
+    mockJobSuccess('job-12', fakeMLResult)
+
+    await mlApi.samReplaceObjectDiffusion(1, makeMaskDataUrl('mask'), fakeBbox, {
+      referenceFile: fakeReferenceFile,
+    })
+
+    const [, body] = mockedClient.post.mock.calls[0]
+    expect((body as FormData).get('reference_file')).toBe(fakeReferenceFile)
+  })
+
+  it('does not append reference_file when using assetId instead', async () => {
+    mockJobSuccess('job-12', fakeMLResult)
+
+    await mlApi.samReplaceObjectDiffusion(1, makeMaskDataUrl('mask'), fakeBbox, {
+      assetId: 'asset-123',
+    })
+
+    const [, body, config] = mockedClient.post.mock.calls[0]
+    expect((body as FormData).has('reference_file')).toBe(false)
+    expect((config as any).params.asset_id).toBe('asset-123')
+  })
+
+  it('sends bbox coordinates as separate query params', async () => {
+    mockJobSuccess('job-12', fakeMLResult)
+
+    await mlApi.samReplaceObjectDiffusion(1, makeMaskDataUrl('mask'), fakeBbox, {
+      referenceFile: fakeReferenceFile,
+    })
+
+    const [, , config] = mockedClient.post.mock.calls[0]
+    expect((config as any).params.bbox_x1).toBe(fakeBbox.x1)
+    expect((config as any).params.bbox_y1).toBe(fakeBbox.y1)
+    expect((config as any).params.bbox_x2).toBe(fakeBbox.x2)
+    expect((config as any).params.bbox_y2).toBe(fakeBbox.y2)
+  })
+
+  it('sends default query params when no diffusion options are provided', async () => {
+    mockJobSuccess('job-12', fakeMLResult)
+
+    await mlApi.samReplaceObjectDiffusion(1, makeMaskDataUrl('mask'), fakeBbox, {
+      referenceFile: fakeReferenceFile,
+    })
+
+    const [, , config] = mockedClient.post.mock.calls[0]
+    expect((config as any).params).toEqual({
+      asset_id: undefined,
+      bbox_x1: fakeBbox.x1,
+      bbox_y1: fakeBbox.y1,
+      bbox_x2: fakeBbox.x2,
+      bbox_y2: fakeBbox.y2,
+      prompt: '',
+      negative_prompt: undefined,
+      use_color_matching: false,
+      color_match_method: 'color_transfer',
+      num_inference_steps: undefined,
+      guidance_scale: undefined,
+      ip_adapter_scale: undefined,
+      strength: undefined,
+      seed: 0,
+    })
+  })
+
+  it('passes custom diffusion options through to query params', async () => {
+    mockJobSuccess('job-12', fakeMLResult)
+
+    await mlApi.samReplaceObjectDiffusion(1, makeMaskDataUrl('mask'), fakeBbox, {
+      referenceFile: fakeReferenceFile,
+      prompt: 'a red sports car',
+      negativePrompt: 'blurry, low quality',
+      useColorMatching: true,
+      colorMatchMethod: 'histogram',
+      numInferenceSteps: 40,
+      guidanceScale: 7.5,
+      ipAdapterScale: 0.6,
+      strength: 0.85,
+      seed: 42,
+    })
+
+    const [, , config] = mockedClient.post.mock.calls[0]
+    expect((config as any).params).toMatchObject({
+      prompt: 'a red sports car',
+      negative_prompt: 'blurry, low quality',
+      use_color_matching: true,
+      color_match_method: 'histogram',
+      num_inference_steps: 40,
+      guidance_scale: 7.5,
+      ip_adapter_scale: 0.6,
+      strength: 0.85,
+      seed: 42,
+    })
+  })
+
+  it('polls the job and returns MLResultResponse', async () => {
+    mockJobSuccess('job-12', fakeMLResult)
+
+    const result = await mlApi.samReplaceObjectDiffusion(1, makeMaskDataUrl('mask'), fakeBbox, {
+      referenceFile: fakeReferenceFile,
+    })
+
+    expect(mockedClient.get).toHaveBeenCalledWith('/ml/jobs/job-12')
+    expect(result).toEqual(fakeMLResult)
+  })
+
+  it('calls onStatus callback with job status', async () => {
+    mockJobSuccess('job-12', fakeMLResult)
+    const onStatus = vi.fn()
+
+    await mlApi.samReplaceObjectDiffusion(
+      1,
+      makeMaskDataUrl('mask'),
+      fakeBbox,
+      { referenceFile: fakeReferenceFile },
+      onStatus
+    )
+
+    expect(onStatus).toHaveBeenCalledWith('complete')
+  })
+
+  it('propagates enqueue error', async () => {
+    mockedClient.post.mockRejectedValue(new Error('diffusion replace failed'))
+
+    await expect(
+      mlApi.samReplaceObjectDiffusion(1, makeMaskDataUrl('mask'), fakeBbox, {
+        referenceFile: fakeReferenceFile,
+      })
+    ).rejects.toThrow('diffusion replace failed')
+  })
+
+  it('throws MLJobError when the job itself fails', async () => {
+    mockJobFailure('job-12', 'diffusion replace crashed')
+
+    await expect(
+      mlApi.samReplaceObjectDiffusion(1, makeMaskDataUrl('mask'), fakeBbox, {
+        referenceFile: fakeReferenceFile,
+      })
+    ).rejects.toThrow(MLJobError)
+  })
+})
 describe('mlApi: samReplaceObjectWithAsset', () => {
   it('posts to correct async url with undefined body and default params', async () => {
     mockJobSuccess('job-9', fakeMLResult)
@@ -891,8 +1124,6 @@ describe('mlApi: extractObject', () => {
   })
 })
 
-// pasteExtractedObject stays synchronous — no worker task / async route exists
-// for it in the backend (see app/worker.py and app/api/routes/ml.py).
 describe('mlApi: pasteExtractedObject', () => {
   const targetBbox = { x1: 50, y1: 60, x2: 140, y2: 250 }
 

@@ -11,6 +11,7 @@ import type {
   ExtractResponse,
   PasteResponse,
   ReplaceOptions,
+  DiffusionReplaceOptions,
   Asset,
   SegmentByPolygonParams,
   SegmentHybridParams,
@@ -27,8 +28,18 @@ export const PRESETS: Record<string, LdmConfig> = {
 export class MLJobError extends Error {}
 export class MLJobTimeoutError extends Error {}
 
+function dataUrlToBlob(dataUrl: string): Blob {
+  const [header, base64] = dataUrl.split(',')
+  const mimeMatch = header.match(/data:(.*);base64/)
+  const mime = mimeMatch ? mimeMatch[1] : 'image/png'
+  const binary = atob(base64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return new Blob([bytes], { type: mime })
+}
+
 async function pollJob<T>(jobId: string, opts: PollOptions = {}): Promise<T> {
-  const { intervalMs = 1000, timeoutMs = 300_000, onStatus } = opts
+  const { intervalMs = 1000, timeoutMs = 100_000_000, onStatus } = opts
   const start = Date.now()
 
   while (true) {
@@ -273,6 +284,51 @@ export const mlApi = {
           ldm_steps: ldm.ldm_steps,
           ldm_sampler: ldm.ldm_sampler,
           hd_strategy: ldm.hd_strategy,
+        }
+      }
+    )
+    return pollJob<MLResultResponse>(data.job_id, { onStatus })
+  },
+
+  async samReplaceObjectDiffusion(
+    imageId: number,
+    maskDataUrl: string,
+    bbox: Bbox,
+    params: {
+      referenceFile?: File
+      assetId?: string
+    } & DiffusionReplaceOptions = {},
+    onStatus?: PollOptions['onStatus']): Promise<MLResultResponse> {
+    if (!params.referenceFile && !params.assetId) {
+      throw new Error('Provide referenceFile or assetId')
+    }
+
+    const formData = new FormData()
+    formData.append('mask_file', dataUrlToBlob(maskDataUrl), 'mask.png')
+    if (params.referenceFile) {
+      formData.append('reference_file', params.referenceFile)
+    }
+
+    const { data } = await apiClient.post<EnqueueResponse>(
+      `/ml/images/${imageId}/replace/diffusion/async`,
+      formData,
+      {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        params: {
+          asset_id: params.assetId,
+          bbox_x1: bbox.x1,
+          bbox_y1: bbox.y1,
+          bbox_x2: bbox.x2,
+          bbox_y2: bbox.y2,
+          prompt: params.prompt ?? '',
+          negative_prompt: params.negativePrompt,
+          use_color_matching: params.useColorMatching ?? false,
+          color_match_method: params.colorMatchMethod ?? 'color_transfer',
+          num_inference_steps: params.numInferenceSteps,
+          guidance_scale: params.guidanceScale,
+          ip_adapter_scale: params.ipAdapterScale,
+          strength: params.strength,
+          seed: params.seed ?? 0,
         }
       }
     )

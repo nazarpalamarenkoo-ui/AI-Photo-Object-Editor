@@ -116,6 +116,20 @@ export interface ReplaceOptions {
   ldm?: LdmConfig
 }
 
+export type ReplaceEngine = 'lama' | 'diffusion'
+
+export interface DiffusionReplaceOptions {
+  prompt?: string
+  negativePrompt?: string
+  useColorMatching?: boolean
+  colorMatchMethod?: ColorMatchMethod
+  numInferenceSteps?: number
+  guidanceScale?: number
+  ipAdapterScale?: number
+  strength?: number
+  seed?: number
+}
+
 export interface MLResultResponse {
   result_url: string
   presigned_url: string
