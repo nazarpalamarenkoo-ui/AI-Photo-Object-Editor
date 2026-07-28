@@ -146,4 +146,5 @@ def configure_logging(settings: LoggingSettings | None = None) -> None:
         since arq imports the module before running anything) — safe to
         call again in `WorkerSettings.on_startup`, it's idempotent.
     """
+    logging.basicConfig(level=logging.WARNING)
     _configure_logging_impl(settings or get_logging_settings())
