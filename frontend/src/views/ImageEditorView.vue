@@ -19,6 +19,8 @@
         v-model:modelConfig="modelPreset"
         v-model:mode="mode"
         v-model:useHybrid="useHybridSegment"
+        v-model:replaceEngine="replaceEngine"
+        v-model:diffusionPrompt="diffusionPrompt"
         :zoom="zoom"
         :canUndo="canUndo"
         :mlLoading="mlLoading"
@@ -88,7 +90,7 @@
         @remove="handleRemove(selectedBboxIds, modelPreset)"
         @replace="handleReplace(selectedBboxIds, modelPreset)"
         @sam-remove="handleSamRemove(modelPreset)"
-        @sam-replace="handleSamReplace(modelPreset)"
+        @sam-replace="onSamReplace"
         @run-polygon-segment="() => handleSegmentByPolygon()"
         @clear-polygon="clearPolygon"
         @extract="onExtract"
@@ -117,7 +119,7 @@ import { useMlOperations } from '@/composables/useMlOperations'
 import { useSegmentation } from '@/composables/useSegmentation'
 import { useAssets } from '@/composables/useAssets'
 import { PRESETS } from '@/api/ml'
-import type { LdmConfig, EditingMode, RegionItem } from '@/types/Index'
+import type { LdmConfig, EditingMode, RegionItem, ReplaceEngine } from '@/types/Index'
 
 import EditorNavbar from '@/components/EditorNavbar.vue'
 import EditorToolbar from '@/components/EditorToolbar.vue'
@@ -139,8 +141,20 @@ function toggleTheme() {
 
 async function onSamReplaceAsset() {
   if (!selectedAssetId.value) return
-  await handleSamReplaceWithAsset(selectedAssetId.value, modelPreset.value)
+  if (replaceEngine.value === 'diffusion') {
+    await handleSamReplaceWithAssetDiffusion(selectedAssetId.value, { prompt: diffusionPrompt.value })
+  } else {
+    await handleSamReplaceWithAsset(selectedAssetId.value, modelPreset.value)
+  }
   clearExtracted()
+}
+
+function onSamReplace() {
+  if (replaceEngine.value === 'diffusion') {
+    handleSamReplaceDiffusion({ prompt: diffusionPrompt.value })
+  } else {
+    handleSamReplace(modelPreset.value)
+  }
 }
 
 const activeTool = ref('select')
@@ -148,6 +162,8 @@ const zoom = ref(1)
 const modelPreset = ref<LdmConfig>(PRESETS.quality)
 const mode = ref<EditingMode>('yolo')
 const useHybridSegment = ref(false)
+const replaceEngine = ref<ReplaceEngine>('lama')
+const diffusionPrompt = ref('')
 
 const {
   image, imageUrl, originalImageUrl, loading,
@@ -174,6 +190,7 @@ const {
   mlError: samError, useEdgeBlending: samUseEdgeBlending, replacementFile: samReplacementFile,
   handleSegment, handleSegmentHybrid, handleSegmentWithPrompt, handleSegmentByPolygon, toggleMaskSelection,
   handleSamRemove, handleSamReplace, handleSamReplaceWithAsset,
+  handleSamReplaceDiffusion, handleSamReplaceWithAssetDiffusion,
   onReplacementSelect: onSamReplacementSelect, clearSegments,
   promptMode, promptLabel, promptPoints, promptBbox,
   addPromptPoint, setPromptBbox, clearPrompt, setPromptMode,
@@ -268,6 +285,8 @@ watch(mode, () => {
   selectedMaskId.value = null
   clearExtracted()
   setPromptMode(null)
+  replaceEngine.value = 'lama'
+  diffusionPrompt.value = ''
 })
 
 const combinedError = computed(() =>
