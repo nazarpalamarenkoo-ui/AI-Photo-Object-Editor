@@ -159,3 +159,33 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+.prompt-group {
+  position: relative;
+}
+
+.prompt-btn {
+  position: relative;
+  white-space: nowrap;
+}
+
+.prompt-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.prompt-dropdown {
+  width: 280px;
+  max-width: min(320px, 90vw);
+}
+
+.prompt-field .diffusion-prompt-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 72px;
+  font-family: inherit;
+}

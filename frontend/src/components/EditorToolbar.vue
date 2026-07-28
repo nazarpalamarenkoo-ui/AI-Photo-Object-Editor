@@ -1,3 +1,4 @@
+
 <template>
   <aside class="toolbar">
     <div class="tool-group">
@@ -43,6 +44,60 @@
       >
         Hybrid
       </button>
+    </div>
+
+    <div class="tool-divider" />
+
+    <div v-if="mode === 'sam'" class="tool-group mode-switch">
+      <button
+        :class="['tool-btn', { active: replaceEngine === 'lama' }]"
+        :disabled="busy"
+        title="Remove/replace via LaMa inpainting + compositing"
+        @click="$emit('update:replaceEngine', 'lama')"
+      >
+        LaMa
+      </button>
+      <button
+        :class="['tool-btn', { active: replaceEngine === 'diffusion' }]"
+        :disabled="busy"
+        title="Replace via diffusion (SD-inpaint + IP-Adapter) — blends into scene lighting/perspective"
+        @click="$emit('update:replaceEngine', 'diffusion')"
+      >
+        Diffusion
+      </button>
+    </div>
+
+    <div v-if="mode === 'sam' && replaceEngine === 'diffusion'" class="tool-group prompt-group" ref="promptRef">
+      <button
+        :class="['tool-btn', 'prompt-btn', { active: promptOpen || !!diffusionPrompt }]"
+        :disabled="busy"
+        title="Diffusion prompt"
+        @click="togglePrompt"
+      >
+        Prompt
+        <span v-if="diffusionPrompt" class="prompt-dot" />
+      </button>
+
+      <div v-if="promptOpen" class="settings-dropdown prompt-dropdown">
+        <div class="settings-title">Diffusion Prompt</div>
+
+        <div class="settings-field prompt-field">
+          <label>Description</label>
+          <textarea
+            class="settings-input diffusion-prompt-input"
+            v-model="localPrompt"
+            :disabled="busy"
+            rows="4"
+            placeholder="Describe the replacement, e.g. 'a red vintage armchair, soft studio light'"
+            title="Prompt describing the desired diffusion result"
+            @keydown.enter.exact.prevent="applyPrompt"
+          />
+        </div>
+
+        <button class="apply-settings-btn" @click="applyPrompt">
+          Apply
+        </button>
+      </div>
     </div>
 
     <div class="tool-divider" />
@@ -196,7 +251,7 @@ import {
   tools
 } from '../composables/useEditorIcons'
 
-import type { LdmConfig, EditingMode } from '@/types/Index'
+import type { LdmConfig, EditingMode, ReplaceEngine } from '@/types/Index'
 import { PRESETS } from '@/api/ml'
 
 const props = defineProps<{
@@ -208,6 +263,8 @@ const props = defineProps<{
   mode: EditingMode
   busy: boolean
   useHybrid: boolean
+  replaceEngine: ReplaceEngine
+  diffusionPrompt: string
 }>()
 
 const emit = defineEmits<{
@@ -219,10 +276,16 @@ const emit = defineEmits<{
   'update:modelConfig': [value: LdmConfig]
   'update:mode': [value: EditingMode]
   'update:useHybrid': [value: boolean]
+  'update:replaceEngine': [value: ReplaceEngine]
+  'update:diffusionPrompt': [value: string]
 }>()
 
 const settingsOpen = ref(false)
 const settingsRef = ref<HTMLElement | null>(null)
+
+const promptOpen = ref(false)
+const promptRef = ref<HTMLElement | null>(null)
+const localPrompt = ref(props.diffusionPrompt)
 
 const preset = ref<'fast' | 'quality' | 'custom'>('quality')
 
@@ -237,6 +300,26 @@ watch(
   },
   { deep: true }
 )
+
+watch(
+  () => props.diffusionPrompt,
+  (value) => {
+    localPrompt.value = value
+  }
+)
+
+function togglePrompt() {
+  if (!promptOpen.value) {
+    localPrompt.value = props.diffusionPrompt
+  }
+  promptOpen.value = !promptOpen.value
+  settingsOpen.value = false
+}
+
+function applyPrompt() {
+  emit('update:diffusionPrompt', localPrompt.value)
+  promptOpen.value = false
+}
 
 function onPresetChange() {
   if (preset.value === 'fast') {
@@ -256,12 +339,23 @@ function applySettings() {
   settingsOpen.value = false
 }
 
+watch(settingsOpen, (open) => {
+  if (open) promptOpen.value = false
+})
+
 function onClickOutside(e: MouseEvent) {
   if (
     settingsRef.value &&
     !settingsRef.value.contains(e.target as Node)
   ) {
     settingsOpen.value = false
+  }
+
+  if (
+    promptRef.value &&
+    !promptRef.value.contains(e.target as Node)
+  ) {
+    promptOpen.value = false
   }
 }
 
