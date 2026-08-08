@@ -2,6 +2,7 @@ import pytest
 import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
+from sqlalchemy import text
 from io import BytesIO
 import numpy as np
 import sys
@@ -15,29 +16,53 @@ from app.db.db_connect import Base
 from app.db.models.user import User
 from app.db.models.image import Image
 from app.db.models.detection import Detection
+from app.db.models.assets import Asset
+from app.db.models.image_content import ImageContent
+from app.db.models.image_version import ImageVersion
+from app.db.models.mljobs import MLJob
+from app.db.models.segmentation import SegmentationMask
+from app.db.models.image_edit_history import ImageEditHistory
+from app.db.enums.ml_task_status import MLTaskType
+from app.db.enums.edit_operation import EditOperation
+from app.db.enums.engine_types import EngineType
+from app.db.enums.segmentation_mode import SegmentationMode
+
 from app.repository.image_repo import ImageRepository
 from app.repository.detection_repo import DetectionRepository
+from app.repository.image_version_repo import ImageVersionRepository
+from app.repository.image_content_repo import ImageContentRepository
+from app.repository.segmentation_repo import SegmentationRepository
+from app.repository.edit_history_repo import ImageEditHistoryRepository
+from app.repository.assets_repo import AssetRepository
+from app.repository.mljob_repo import MLJobRepository
+from app.repository.user_repo import UserRepository
 from app.config.test_settings import test_settings
+from contextlib import asynccontextmanager
+import sys
+import asyncio
 
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
 TEST_DATABASE = test_settings.TEST_DATABASE_URL
 
-@pytest.fixture(scope = 'session')
-def event_loop():
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
     
-@pytest_asyncio.fixture(scope = 'function')
+@pytest_asyncio.fixture(scope='function')
 async def db_engine():
-    engine = create_async_engine(TEST_DATABASE, echo = False, poolclass = NullPool)
-    
+    engine = create_async_engine(TEST_DATABASE, echo=False, poolclass=NullPool)
+
     async with engine.begin() as conn:
+        # Guarantee a clean slate even if a previous run left things dirty
+        await conn.execute(text("DROP SCHEMA public CASCADE"))
+        await conn.execute(text("CREATE SCHEMA public"))
         await conn.run_sync(Base.metadata.create_all)
+
     yield engine
-    
+
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        
+        await conn.execute(text("DROP SCHEMA public CASCADE"))
+        await conn.execute(text("CREATE SCHEMA public"))
+
     await engine.dispose()
     
 @pytest_asyncio.fixture(scope='function')
@@ -49,10 +74,25 @@ async def db_session(db_engine):
         autoflush=False,
         autocommit=False
     )
-    
+
     async with async_session_maker() as session:
-        yield session
+        proxy = SessionFactoryProxy(session)
+        yield proxy
         await session.rollback()
+        
+class SessionFactoryProxy:
+    def __init__(self, session: AsyncSession):
+        self._session = session
+
+    def __call__(self):
+        return self._session_cm()
+
+    @asynccontextmanager
+    async def _session_cm(self):
+        yield self._session
+
+    def __getattr__(self, name):
+        return getattr(self._session, name)
         
 @pytest.fixture
 def mock_upload_file():
@@ -68,6 +108,82 @@ async def image_repo(db_session):
 @pytest_asyncio.fixture
 async def detection_repo(db_session):
     return DetectionRepository(db_session)
+
+@pytest_asyncio.fixture
+async def image_version_repo(db_session):
+    return ImageVersionRepository(db_session)
+
+@pytest_asyncio.fixture
+async def image_content_repo(db_session):
+    return ImageContentRepository(db_session)
+
+@pytest_asyncio.fixture
+async def segmentation_repo(db_session):
+    return SegmentationRepository(db_session)
+
+@pytest_asyncio.fixture
+async def edit_history_repo(db_session):
+    return ImageEditHistoryRepository(db_session)
+
+@pytest_asyncio.fixture
+async def assets_repo(db_session):
+    return AssetRepository(db_session)
+
+@pytest_asyncio.fixture
+async def mljob_repo(db_session):
+    return MLJobRepository(db_session)
+
+@pytest_asyncio.fixture
+async def user_repo(db_session):
+    return UserRepository(db_session)
+
+
+@pytest.fixture
+def mock_redis_history():
+    """Mock for RedisHistory (undo/redo byte-stack) — separate storage
+    class from RedisStorage (mock_redis_cache), never persisted to DB."""
+    return AsyncMock()
+
+
+@pytest.fixture
+def mock_redis_assets():
+    return AsyncMock()
+
+
+@pytest.fixture
+def mock_pipeline():
+    """Mock MLPipeline — every ML service treats this as the boundary to
+    the actual models; integration tests exercise real DB + repo wiring
+    around it, not the models themselves."""
+    return AsyncMock()
+
+
+@pytest.fixture
+def ml_service_kwargs(
+    mock_s3_storage, mock_redis_cache, mock_redis_history, mock_redis_assets,
+    image_repo, image_version_repo, image_content_repo, detection_repo,
+    segmentation_repo, edit_history_repo, assets_repo, mock_pipeline,
+):
+    """Common BaseMLService constructor kwargs: real DB-backed repos +
+    mocked S3/Redis/pipeline. Every ML service (DetectorService,
+    SegmentationService, EditingService, AssetService, BaseMLService
+    itself) takes exactly this kwarg set — build with
+    `SomeService(**ml_service_kwargs)`."""
+    return dict(
+        s3_storage=mock_s3_storage,
+        redis_storage=mock_redis_cache,
+        redis_history=mock_redis_history,
+        redis_assets=mock_redis_assets,
+        image_repo=image_repo,
+        image_version_repo=image_version_repo,
+        image_content_repo=image_content_repo,
+        detection_repo=detection_repo,
+        segmentation_repo=segmentation_repo,
+        edit_history_repo=edit_history_repo,
+        assets_repo=assets_repo,
+        pipeline=mock_pipeline,
+    )
+
 
 @pytest.fixture
 def image_bytes():
@@ -185,6 +301,10 @@ async def sample_image(db_session, sample_user):
         filename="test.jpg",
         storage_path="s3://bucket/test.jpg",
         user_id=sample_user.id,
+        mime_type="image/jpeg",
+        width=100,
+        height=100,
+        file_size=1000,
         status="uploaded"
     )
     db_session.add(image)
@@ -194,13 +314,20 @@ async def sample_image(db_session, sample_user):
 
 
 @pytest_asyncio.fixture
-async def sample_detection(db_session, sample_image):
+async def sample_detection(db_session, sample_image_version):
+    """Detection is keyed by content_id (ImageContent), not image_id —
+    depends on sample_image_version so the underlying image also gets a
+    current_version_id, which detection lookups by image resolve through."""
     detection = Detection(
-        image_id=sample_image.id,
-        bbox_id=0,         
+        content_id=sample_image_version.content_id,
+        bbox_id=0,
         x1=10, y1=10, x2=100, y2=100,
         detected_class="person",
-        confidence=0.95
+        confidence=0.95,
+        is_active=True,
+        model_name="yolov8",
+        model_version="v1",
+        inference_time_ms=12.5,
     )
     db_session.add(detection)
     await db_session.commit()
@@ -215,7 +342,11 @@ async def multiple_images(db_session, sample_user):
         img = Image(
             filename=f"img{i}.jpg",
             storage_path=f"s3://bucket/img{i}.jpg",
-            user_id=sample_user.id
+            user_id=sample_user.id,
+            mime_type="image/jpeg",
+            width=100,
+            height=100,
+            file_size=1000,
         )
         db_session.add(img)
         images.append(img)
@@ -284,3 +415,163 @@ def segmentor(fake_mobile_sam_env, tracker):
         device="cpu",
         tracker=tracker,
     )
+    
+@pytest_asyncio.fixture
+async def another_user(db_session):
+    user = User(username="anotheruser", email="another@example.com", password_hash="hashed")
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+    return user
+
+
+@pytest_asyncio.fixture
+async def another_image(db_session, sample_user):
+    image = Image(
+        filename="another.jpg",
+        storage_path="s3://bucket/another.jpg",
+        user_id=sample_user.id,
+        mime_type="image/jpeg",
+        width=100,
+        height=100,
+        file_size=1000,
+        status="uploaded"
+    )
+    db_session.add(image)
+    await db_session.commit()
+    await db_session.refresh(image)
+    return image
+
+
+@pytest_asyncio.fixture
+async def sample_image_content(db_session):
+    content = ImageContent(
+        content_hash="sample_content_hash",
+        storage_path="s3://bucket/content/sample.jpg",
+        width=800,
+        height=600,
+        file_size=51200,
+    )
+    db_session.add(content)
+    await db_session.commit()
+    await db_session.refresh(content)
+    return content
+
+
+@pytest_asyncio.fixture
+async def another_image_content(db_session):
+    content = ImageContent(
+        content_hash="another_content_hash",
+        storage_path="s3://bucket/content/another.jpg",
+        width=800,
+        height=600,
+        file_size=51200,
+    )
+    db_session.add(content)
+    await db_session.commit()
+    await db_session.refresh(content)
+    return content
+
+
+@pytest_asyncio.fixture
+async def third_image_content(db_session):
+    content = ImageContent(
+        content_hash="third_content_hash",
+        storage_path="s3://bucket/content/third.jpg",
+        width=800,
+        height=600,
+        file_size=51200,
+    )
+    db_session.add(content)
+    await db_session.commit()
+    await db_session.refresh(content)
+    return content
+
+
+@pytest_asyncio.fixture
+async def sample_image_version(db_session, sample_image, sample_image_content):
+    version = ImageVersion(
+        image_id=sample_image.id,
+        content_id=sample_image_content.id,
+        version_number=0,
+        storage_path=sample_image.storage_path,
+    )
+    db_session.add(version)
+    await db_session.commit()
+    await db_session.refresh(version)
+
+    sample_image.current_version_id = version.id
+    db_session.add(sample_image)
+    await db_session.commit()
+    await db_session.refresh(version)
+
+    return version
+
+
+@pytest_asyncio.fixture
+async def another_image_version(db_session, another_image, another_image_content):
+    version = ImageVersion(
+        image_id=another_image.id,
+        content_id=another_image_content.id,
+        version_number=0,
+        storage_path=another_image.storage_path,
+    )
+    db_session.add(version)
+    await db_session.commit()
+    await db_session.refresh(version)
+
+    another_image.current_version_id = version.id
+    db_session.add(another_image)
+    await db_session.commit()
+    await db_session.refresh(version)
+
+    return version
+
+
+@pytest_asyncio.fixture
+async def sample_mljob(db_session, sample_image_content, sample_image_version):
+    job = MLJob(
+        content_id=sample_image_content.id,
+        image_version_id=sample_image_version.id,
+        task_type=MLTaskType.DETECTION,
+    )
+    db_session.add(job)
+    await db_session.commit()
+    await db_session.refresh(job)
+    return job
+
+
+@pytest_asyncio.fixture
+async def sample_segmentation_mask(db_session, sample_image_content):
+    mask = SegmentationMask(
+        content_id=sample_image_content.id,
+        mask_id=0,
+        mask_storage_path="s3://bucket/masks/sample_mask.png",
+        preview_storage_path="s3://bucket/masks/sample_preview.png",
+        x1=10, y1=10, x2=100, y2=100,
+        area=8100.0,
+        score=0.92,
+        segmentation_mode=SegmentationMode.SAM,
+        model_name="mobile_sam",
+        model_version="v1",
+        inference_time_ms=120.0,
+    )
+    db_session.add(mask)
+    await db_session.commit()
+    await db_session.refresh(mask)
+    return mask
+
+
+@pytest_asyncio.fixture
+async def sample_edit_history_entry(db_session, sample_image_version):
+    entry = ImageEditHistory(
+        image_version_id=sample_image_version.id,
+        operation=EditOperation.DETECT,
+        engine=EngineType.YOLO,
+        parameters={"confidence_threshold": 0.5},
+        processing_time_ms=42,
+    )
+    db_session.add(entry)
+    await db_session.commit()
+    await db_session.refresh(entry)
+    return entry
