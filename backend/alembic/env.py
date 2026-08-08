@@ -14,12 +14,20 @@ from app.db.db_connect import Base
 from app.db.models.user import User
 from app.db.models.image import Image
 from app.db.models.detection import Detection
+from app.db.models.image_version import ImageVersion
+from app.db.models.segmentation import SegmentationMask
+from app.db.models.image_edit_history import ImageEditHistory
+from app.db.models.assets import Asset
+from app.db.models.mljobs import MLJob
+
 
 config = context.config
 
+sync_url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
+
 config.set_main_option(
     "sqlalchemy.url",
-    settings.ALEMBIC_DATABASE_URL
+    sync_url
 )
 
 target_metadata = Base.metadata
