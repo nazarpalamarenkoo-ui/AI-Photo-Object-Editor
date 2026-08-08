@@ -1,60 +1,66 @@
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 from typing import Optional
+
+from sqlalchemy import select
+
 from app.db.models.user import User
+from app.repository.base_repo import BaseRepository
 
 
-class UserRepository:
-
-    def __init__(self, db: AsyncSession):
-        self.db = db
+class UserRepository(BaseRepository):
 
     async def create(self, username: str, email: str, password_hash: str) -> User:
-        user = User(username=username, email=email, password_hash=password_hash)
-        self.db.add(user)
-        await self.db.commit()
-        await self.db.refresh(user)
-        return user
+        async with self.session_factory() as db:
+            user = User(username=username, email=email, password_hash=password_hash)
+            db.add(user)
+            await db.commit()
+            await db.refresh(user)
+            return user
 
     async def get_by_id(self, user_id: int) -> Optional[User]:
-        result = await self.db.execute(
-            select(User).where(User.id == user_id)
-        )
-        return result.scalar_one_or_none()
+        async with self.session_factory() as db:
+            result = await db.execute(select(User).where(User.id == user_id))
+            return result.scalar_one_or_none()
 
     async def get_by_email(self, email: str) -> Optional[User]:
-        result = await self.db.execute(
-            select(User).where(User.email == email)
-        )
-        return result.scalar_one_or_none()
+        async with self.session_factory() as db:
+            result = await db.execute(select(User).where(User.email == email))
+            return result.scalar_one_or_none()
 
     async def get_by_username(self, username: str) -> Optional[User]:
-        result = await self.db.execute(
-            select(User).where(User.username == username)
-        )
-        return result.scalar_one_or_none()
+        async with self.session_factory() as db:
+            result = await db.execute(select(User).where(User.username == username))
+            return result.scalar_one_or_none()
 
     async def exists_by_email(self, email: str) -> bool:
-        result = await self.db.execute(
-            select(User.id).where(User.email == email)
-        )
-        return result.scalar_one_or_none() is not None
+        async with self.session_factory() as db:
+            result = await db.execute(select(User.id).where(User.email == email))
+            return result.scalar_one_or_none() is not None
 
     async def update(self, user: User) -> User:
-        await self.db.commit()
-        await self.db.refresh(user)
-        return user
+        """`user` may be a detached instance whose attributes were changed
+        outside this session (e.g. a route handler mutated user.email
+        after fetching it earlier). merge() is required to pick those
+        changes up — a fresh session has nothing pending to flush
+        otherwise."""
+        async with self.session_factory() as db:
+            merged = await db.merge(user)
+            await db.commit()
+            await db.refresh(merged)
+            return merged
 
     async def update_password(self, user: User, new_password_hash: str) -> User:
-        user.password_hash = new_password_hash
-        await self.db.commit()
-        await self.db.refresh(user)
-        return user
+        async with self.session_factory() as db:
+            merged = await db.merge(user)
+            merged.password_hash = new_password_hash
+            await db.commit()
+            await db.refresh(merged)
+            return merged
 
     async def delete(self, user_id: int) -> bool:
-        user = await self.get_by_id(user_id)
-        if user is None:
-            return False
-        await self.db.delete(user)
-        await self.db.commit()
-        return True
+        async with self.session_factory() as db:
+            user = await db.get(User, user_id)
+            if user is None:
+                return False
+            await db.delete(user)
+            await db.commit()
+            return True
