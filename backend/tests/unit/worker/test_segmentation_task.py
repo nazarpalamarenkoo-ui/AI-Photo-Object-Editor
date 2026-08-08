@@ -14,24 +14,12 @@ from app.workers.worker import (
 class _FakeDepsCM:
     """Fake async context manager mimicking _build_ml_deps()."""
 
-    def __init__(self, deps):
+    def __init__(self, deps, mljob_service):
         self._deps = deps
+        self._mljob_service = mljob_service
 
     async def __aenter__(self):
-        return self._deps
-
-    async def __aexit__(self, *exc):
-        return False
-
-
-class _FakeDbCM:
-    """Fake async context manager mimicking get_db_session()."""
-
-    def __init__(self, db):
-        self._db = db
-
-    async def __aenter__(self):
-        return self._db
+        return self._deps, self._mljob_service
 
     async def __aexit__(self, *exc):
         return False
@@ -40,22 +28,32 @@ class _FakeDbCM:
 @pytest.fixture
 def fake_deps():
     return {
-        "db": MagicMock(name="db"),
         "s3_storage": MagicMock(name="s3_storage"),
         "redis_storage": MagicMock(name="redis_storage"),
         "redis_history": MagicMock(name="redis_history"),
         "redis_assets": MagicMock(name="redis_assets"),
         "image_repo": MagicMock(name="image_repo"),
+        "image_version_repo": MagicMock(name="image_version_repo"),
+        "image_content_repo": MagicMock(name="image_content_repo"),
         "detection_repo": MagicMock(name="detection_repo"),
+        "segmentation_repo": MagicMock(name="segmentation_repo"),
+        "edit_history_repo": MagicMock(name="edit_history_repo"),
+        "assets_repo": MagicMock(name="assets_repo"),
         "pipeline": MagicMock(name="pipeline"),
     }
 
 
+@pytest.fixture
+def fake_mljob_service():
+    return MagicMock(name="mljob_service")
+
+
 @pytest.fixture(autouse=True)
-def patch_db_and_deps(fake_deps):
+def patch_build_ml_deps(fake_deps, fake_mljob_service):
     with patch(
-        "app.workers.worker.get_db_session", return_value=_FakeDbCM(fake_deps["db"])
-    ), patch("app.workers.worker._build_ml_deps", return_value=_FakeDepsCM(fake_deps)):
+        "app.workers.worker._build_ml_deps",
+        return_value=_FakeDepsCM(fake_deps, fake_mljob_service),
+    ):
         yield fake_deps
 
 
