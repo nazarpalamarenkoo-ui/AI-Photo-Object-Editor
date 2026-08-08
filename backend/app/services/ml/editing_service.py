@@ -1,23 +1,36 @@
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from app.db.models.image import Image
+from app.db.enums.edit_operation import EditOperation
+from app.db.enums.engine_types import EngineType
 from app.services.ml.base_ml_service import BaseMLService
+from app.services.ml.version_carry_forward import VersionCarryForwardMixin
 from app.core.logging import get_logger, log_execution
 
 logger = get_logger(__name__)
 
 
-class EditingService(BaseMLService):
+class EditingService(VersionCarryForwardMixin, BaseMLService):
     """
-    Handles YOLO-based image editing: remove / replace / remove_multiple.
-    Owns undo / redo / history and save / reset lifecycle.
+    Handles YOLO-based destructive pixel edits: remove / replace /
+    remove_multiple, plus SAM-mask diffusion replace. Owns version
+    forking for these ops; carry-forward mechanics live in
+    VersionCarryForwardMixin 
+
+    Versioning model:
+      - Every destructive op forks a new ImageVersion from the current one,
+        storage_path = the freshly uploaded result image in S3.
+      - Detection/SegmentationMask rows for the OLD version that are still
+        valid get cloned onto the NEW version (VersionCarryForwardMixin).
+      - undo/redo stay on the Redis byte-stack (VersionHistoryService) —
+        that's a fast per-edit UI convenience layer, separate from
+        ImageVersion, which represents the data-level checkpoint.
 
     Workflow:
         detect_objects (DetectorService)
             -> User selects bbox
             -> remove_object / replace_object / remove_multiple_objects
-            -> undo / redo / save_result / reset_current_state
+            -> undo / redo / save_result / reset_current_state (VersionHistoryService)
     """
 
     async def remove_object(
@@ -33,19 +46,11 @@ class EditingService(BaseMLService):
     ) -> Dict:
         """
         Remove a single YOLO-detected object using LaMa inpainting.
-
-        Args:
-            image_id:           ID of image to process
-            bbox_id:            Detection bbox_id to remove
-            user_id:            ID of requesting user
-            expand_mask_pixels: Mask expansion in pixels (default: 5)
-            use_edge_blending:  Apply edge blending (default: True)
-            ldm_steps:          LaMa diffusion steps (default: 25)
-            ldm_sampler:        LaMa sampler (default: 'plms')
-            hd_strategy:        LaMa HD strategy (default: 'CROP')
+        Forks a new ImageVersion; carries forward everything except the
+        removed detection.
 
         Returns:
-            Dict: result_url, presigned_url, metrics, timestamp
+            Dict: result_url, presigned_url, metrics, timestamp, image_version_id
 
         Raises:
             ValueError: If image/detection not found or unauthorized.
@@ -56,15 +61,15 @@ class EditingService(BaseMLService):
             image_id=image_id,
             bbox_id=bbox_id,
         ):
-            image = await self._get_image_authorized(image_id, user_id)
+            image, version = await self._get_current_version_authorized(image_id, user_id)
 
-            detections = await self.detection_repo.get_by_image(image_id)
+            detections = await self.detection_repo.get_by_content(version.content_id, active_only=True)
             detection = next((d for d in detections if d.bbox_id == bbox_id), None)
             if not detection:
                 logger.warning("detection_not_found", image_id=image_id, bbox_id=bbox_id)
                 raise ValueError(f"Detection with bbox_id={bbox_id} not found")
 
-            image_bytes = await self._get_current_image_bytes(image_id, image.storage_path)
+            image_bytes = await self._get_current_image_bytes(image_id, version.storage_path)
             await self.redis_history.push_undo_state(
                 image_id, image_bytes, label=f"remove bbox_id={bbox_id}"
             )
@@ -89,10 +94,6 @@ class EditingService(BaseMLService):
                 hd_strategy=hd_strategy,
             )
 
-            await self._save_current_state(image_id, result["result_bytes"])
-            await self.detection_repo.delete_by_image(image_id)
-            await self.redis_storage.delete(f"image:{image_id}:detections")
-
             result_path = (
                 f"results/{user_id}/{image_id}/"
                 f"remove_{bbox_id}_{int(datetime.utcnow().timestamp())}.jpg"
@@ -101,11 +102,45 @@ class EditingService(BaseMLService):
                 result["result_bytes"], result_path
             )
 
+            new_version = await self._fork_version(image, result["result_bytes"], result_url)
+
+            removed_boxes = await self._carry_forward_detections(
+                version.content_id, new_version.content_id, excluded_bbox_ids=frozenset({bbox_id})
+            )
+            await self._carry_forward_masks(
+                version.content_id, new_version.content_id, affected_boxes=removed_boxes or [selected_bbox]
+            )
+
+            await self._save_current_state(image_id, result["result_bytes"])
+
+            await self.edit_history_repo.create(
+                image_version_id=new_version.id,
+                operation=EditOperation.REMOVE,
+                engine=EngineType.LAMA,
+                parameters={
+                    "bbox_id": bbox_id,
+                    "expand_mask_pixels": expand_mask_pixels,
+                    "use_edge_blending": use_edge_blending,
+                    "ldm_steps": ldm_steps,
+                    "ldm_sampler": ldm_sampler,
+                    "hd_strategy": hd_strategy,
+                },
+                processing_time_ms=self._extract_processing_time_ms(result.get("metrics")),
+            )
+
+            logger.info(
+                "object_removed",
+                image_id=image_id,
+                old_version_id=version.id,
+                new_version_id=new_version.id,
+            )
+
         return {
             "result_url": result_url,
             "presigned_url": presigned_url,
             "metrics": result["metrics"],
             "timestamp": result["timestamp"],
+            "image_version_id": new_version.id,
         }
 
     async def replace_object(
@@ -124,22 +159,11 @@ class EditingService(BaseMLService):
     ) -> Dict:
         """
         Replace a single YOLO-detected object with a provided image.
-
-        Args:
-            image_id:             ID of image to process
-            bbox_id:              Detection bbox_id to replace
-            replace_image_bytes:  Replacement image bytes
-            user_id:              ID of requesting user
-            expand_mask_pixels:   Mask expansion in pixels (default: 25)
-            use_color_matching:   Apply color matching (default: True)
-            use_edge_blending:    Apply edge blending (default: True)
-            color_match_method:   Color match method (default: 'mean_std')
-            ldm_steps:            LaMa diffusion steps (default: 25)
-            ldm_sampler:          LaMa sampler (default: 'plms')
-            hd_strategy:          LaMa HD strategy (default: 'CROP')
+        Forks a new ImageVersion; carries forward everything except the
+        replaced detection (and any mask overlapping its region).
 
         Returns:
-            Dict: result_url, presigned_url, metrics, timestamp
+            Dict: result_url, presigned_url, metrics, timestamp, image_version_id
 
         Raises:
             ValueError: If image/detection not found or unauthorized.
@@ -151,15 +175,15 @@ class EditingService(BaseMLService):
             bbox_id=bbox_id,
             color_match_method=color_match_method,
         ):
-            image = await self._get_image_authorized(image_id, user_id)
+            image, version = await self._get_current_version_authorized(image_id, user_id)
 
-            detections = await self.detection_repo.get_by_image(image_id)
+            detections = await self.detection_repo.get_by_content(version.content_id, active_only=True)
             detection = next((d for d in detections if d.bbox_id == bbox_id), None)
             if not detection:
                 logger.warning("detection_not_found", image_id=image_id, bbox_id=bbox_id)
                 raise ValueError(f"Detection with bbox_id={bbox_id} not found")
 
-            image_bytes = await self._get_current_image_bytes(image_id, image.storage_path)
+            image_bytes = await self._get_current_image_bytes(image_id, version.storage_path)
             await self.redis_history.push_undo_state(
                 image_id, image_bytes, label=f"replace bbox_id={bbox_id}"
             )
@@ -187,10 +211,6 @@ class EditingService(BaseMLService):
                 hd_strategy=hd_strategy,
             )
 
-            await self._save_current_state(image_id, result["result_bytes"])
-            await self.detection_repo.delete_by_image(image_id)
-            await self.redis_storage.delete(f"image:{image_id}:detections")
-
             result_path = (
                 f"results/{user_id}/{image_id}/"
                 f"replace_{bbox_id}_{int(datetime.utcnow().timestamp())}.jpg"
@@ -199,11 +219,47 @@ class EditingService(BaseMLService):
                 result["result_bytes"], result_path
             )
 
+            new_version = await self._fork_version(image, result["result_bytes"], result_url)
+
+            removed_boxes = await self._carry_forward_detections(
+                version.content_id, new_version.content_id, excluded_bbox_ids=frozenset({bbox_id})
+            )
+            await self._carry_forward_masks(
+                version.content_id, new_version.content_id, affected_boxes=removed_boxes or [selected_bbox]
+            )
+
+            await self._save_current_state(image_id, result["result_bytes"])
+
+            await self.edit_history_repo.create(
+                image_version_id=new_version.id,
+                operation=EditOperation.REPLACE,
+                engine=EngineType.LAMA,
+                parameters={
+                    "bbox_id": bbox_id,
+                    "expand_mask_pixels": expand_mask_pixels,
+                    "use_color_matching": use_color_matching,
+                    "use_edge_blending": use_edge_blending,
+                    "color_match_method": color_match_method,
+                    "ldm_steps": ldm_steps,
+                    "ldm_sampler": ldm_sampler,
+                    "hd_strategy": hd_strategy,
+                },
+                processing_time_ms=self._extract_processing_time_ms(result.get("metrics")),
+            )
+
+            logger.info(
+                "object_replaced",
+                image_id=image_id,
+                old_version_id=version.id,
+                new_version_id=new_version.id,
+            )
+
         return {
             "result_url": result_url,
             "presigned_url": presigned_url,
             "metrics": result["metrics"],
             "timestamp": result["timestamp"],
+            "image_version_id": new_version.id,
         }
 
     async def sam_replace_object_diffusion(
@@ -227,35 +283,8 @@ class EditingService(BaseMLService):
         Replace a SAM-segmented object using diffusion (SD-inpainting +
         IP-Adapter) instead of LaMa + paste.
 
-        Unlike replace_object (YOLO bbox_id -> stored detection lookup),
-        this operates directly on a client-supplied SAM mask + bbox, since
-        SAM segments aren't persisted as detection records. The replacement
-        content is generated in-scene, conditioned on
-        reference_image_bytes via IP-Adapter (+ optional text prompt),
-        instead of being a flat cutout paste.
-
-        Args:
-            image_id:               ID of image to process
-            mask_bytes:             Binary mask from SAM (PNG, L mode)
-            bbox:                  Segment bbox {'x1','y1','x2','y2'} (used
-                                    for color matching)
-            reference_image_bytes: Reference/asset image for IP-Adapter
-                                    conditioning
-            user_id:               ID of requesting user
-            prompt:                Text prompt describing the desired result
-                                    (strongly recommended — falls back to a
-                                    generic quality prompt if empty)
-            use_color_matching:    Apply color correction (default: False)
-            color_match_method:    Color match method (default: 'color_transfer')
-            negative_prompt:       Overrides the configured default
-            num_inference_steps:  SD inference steps override
-            guidance_scale:        SD guidance scale override
-            ip_adapter_scale:      IP-Adapter conditioning strength override
-            strength:              SD inpainting strength override
-            seed:                  Generator seed (default: 0, deterministic)
-
         Returns:
-            Dict: result_url, presigned_url, metrics, timestamp
+            Dict: result_url, presigned_url, metrics, timestamp, image_version_id
 
         Raises:
             ValueError: If image not found or unauthorized.
@@ -267,9 +296,9 @@ class EditingService(BaseMLService):
             use_color_matching=use_color_matching,
             color_match_method=color_match_method,
         ):
-            image = await self._get_image_authorized(image_id, user_id)
+            image, version = await self._get_current_version_authorized(image_id, user_id)
 
-            image_bytes = await self._get_current_image_bytes(image_id, image.storage_path)
+            image_bytes = await self._get_current_image_bytes(image_id, version.storage_path)
             await self.redis_history.push_undo_state(
                 image_id, image_bytes, label="sam replace (diffusion)"
             )
@@ -290,8 +319,6 @@ class EditingService(BaseMLService):
                 seed=seed,
             )
 
-            await self._save_current_state(image_id, result["result_bytes"])
-
             result_path = (
                 f"results/{user_id}/{image_id}/"
                 f"sam_replace_diffusion_{int(datetime.utcnow().timestamp())}.jpg"
@@ -300,11 +327,49 @@ class EditingService(BaseMLService):
                 result["result_bytes"], result_path
             )
 
+            new_version = await self._fork_version(image, result["result_bytes"], result_url)
+
+            await self._carry_forward_detections_by_overlap(
+                version.content_id, new_version.content_id, affected_boxes=[bbox]
+            )
+            await self._carry_forward_masks(
+                version.content_id, new_version.content_id, affected_boxes=[bbox]
+            )
+
+            await self._save_current_state(image_id, result["result_bytes"])
+
+            await self.edit_history_repo.create(
+                image_version_id=new_version.id,
+                operation=EditOperation.REPLACE,
+                engine=EngineType.DIFFUSION,
+                parameters={
+                    "bbox": bbox,
+                    "prompt": prompt,
+                    "use_color_matching": use_color_matching,
+                    "color_match_method": color_match_method,
+                    "negative_prompt": negative_prompt,
+                    "num_inference_steps": num_inference_steps,
+                    "guidance_scale": guidance_scale,
+                    "ip_adapter_scale": ip_adapter_scale,
+                    "strength": strength,
+                    "seed": seed,
+                },
+                processing_time_ms=self._extract_processing_time_ms(result.get("metrics")),
+            )
+
+            logger.info(
+                "sam_object_replaced_diffusion",
+                image_id=image_id,
+                old_version_id=version.id,
+                new_version_id=new_version.id,
+            )
+
         return {
             "result_url": result_url,
             "presigned_url": presigned_url,
             "metrics": result["metrics"],
             "timestamp": result["timestamp"],
+            "image_version_id": new_version.id,
         }
 
     async def remove_multiple_objects(
@@ -320,19 +385,11 @@ class EditingService(BaseMLService):
     ) -> Dict:
         """
         Remove multiple YOLO-detected objects in a single LaMa inpainting pass.
-
-        Args:
-            image_id:           ID of image to process
-            bbox_ids:           List of detection bbox_ids to remove
-            user_id:            ID of requesting user
-            expand_mask_pixels: Mask expansion per bbox in pixels (default: 5)
-            use_edge_blending:  Apply edge blending (default: True)
-            ldm_steps:          LaMa diffusion steps (default: 25)
-            ldm_sampler:        LaMa sampler (default: 'plms')
-            hd_strategy:        LaMa HD strategy (default: 'CROP')
+        Forks a new ImageVersion; carries forward everything except the
+        removed detections.
 
         Returns:
-            Dict: result_url, presigned_url, metrics, timestamp
+            Dict: result_url, presigned_url, metrics, timestamp, image_version_id
 
         Raises:
             ValueError: If image not found, unauthorized, or no valid detections.
@@ -343,9 +400,9 @@ class EditingService(BaseMLService):
             image_id=image_id,
             num_requested=len(bbox_ids),
         ):
-            image = await self._get_image_authorized(image_id, user_id)
+            image, version = await self._get_current_version_authorized(image_id, user_id)
 
-            all_detections = await self.detection_repo.get_by_image(image_id)
+            all_detections = await self.detection_repo.get_by_content(version.content_id, active_only=True)
             selected_detections = [d for d in all_detections if d.bbox_id in bbox_ids]
 
             if not selected_detections:
@@ -354,7 +411,7 @@ class EditingService(BaseMLService):
                 )
                 raise ValueError(f"No valid detections found for bbox_ids: {bbox_ids}")
 
-            image_bytes = await self._get_current_image_bytes(image_id, image.storage_path)
+            image_bytes = await self._get_current_image_bytes(image_id, version.storage_path)
             await self.redis_history.push_undo_state(
                 image_id, image_bytes, label=f"remove {len(bbox_ids)} objects"
             )
@@ -380,13 +437,6 @@ class EditingService(BaseMLService):
                 hd_strategy=hd_strategy,
             )
 
-            await self._save_current_state(image_id, result["result_bytes"])
-
-            for det in selected_detections:
-                await self.db.delete(det)
-            await self.db.commit()
-            await self.redis_storage.delete(f"image:{image_id}:detections")
-
             bbox_ids_str = "_".join(map(str, bbox_ids))
             result_path = (
                 f"results/{user_id}/{image_id}/"
@@ -396,152 +446,45 @@ class EditingService(BaseMLService):
                 result["result_bytes"], result_path
             )
 
+            new_version = await self._fork_version(image, result["result_bytes"], result_url)
+
+            actually_removed_ids = frozenset(d.bbox_id for d in selected_detections)
+            removed_boxes = await self._carry_forward_detections(
+                version.content_id, new_version.content_id, excluded_bbox_ids=actually_removed_ids
+            )
+            await self._carry_forward_masks(
+                version.content_id, new_version.content_id, affected_boxes=removed_boxes or selected_bboxes
+            )
+
+            await self._save_current_state(image_id, result["result_bytes"])
+
+            await self.edit_history_repo.create(
+                image_version_id=new_version.id,
+                operation=EditOperation.REMOVE,
+                engine=EngineType.LAMA,
+                parameters={
+                    "bbox_ids": bbox_ids,
+                    "expand_mask_pixels": expand_mask_pixels,
+                    "use_edge_blending": use_edge_blending,
+                    "ldm_steps": ldm_steps,
+                    "ldm_sampler": ldm_sampler,
+                    "hd_strategy": hd_strategy,
+                },
+                processing_time_ms=self._extract_processing_time_ms(result.get("metrics")),
+            )
+
+            logger.info(
+                "multiple_objects_removed",
+                image_id=image_id,
+                old_version_id=version.id,
+                new_version_id=new_version.id,
+                num_removed=len(selected_detections),
+            )
+
         return {
             "result_url": result_url,
             "presigned_url": presigned_url,
             "metrics": result["metrics"],
             "timestamp": result["timestamp"],
+            "image_version_id": new_version.id,
         }
-
-    async def undo(self, image_id: int, user_id: int) -> Dict:
-        """
-        Undo last operation — pop from undo stack, push current to redo.
-
-        Returns:
-            Dict: presigned_url, label, history
-
-        Raises:
-            ValueError: If nothing to undo.
-        """
-        await self._get_image_authorized(image_id, user_id)
-
-        current = await self.redis_storage.get_cache_image(image_id, suffix="current_state")
-        prev_state = await self.redis_history.pop_undo_state(image_id)
-
-        if not prev_state:
-            logger.info("undo_nothing_to_undo", image_id=image_id)
-            raise ValueError("Nothing to undo")
-
-        if current:
-            await self.redis_history.push_redo_state(image_id, current, label="redo")
-
-        await self._save_current_state(image_id, prev_state["bytes"])
-        presigned_url = await self._get_temp_url_from_bytes(
-            image_id, user_id, prev_state["bytes"], "undo"
-        )
-        logger.info("undo_applied", image_id=image_id, label=prev_state["label"])
-
-        return {
-            "presigned_url": presigned_url,
-            "label": prev_state["label"],
-            "history": await self.redis_history.get_history_labels(image_id),
-        }
-
-    async def redo(self, image_id: int, user_id: int) -> Dict:
-        """
-        Redo last undone operation.
-
-        Returns:
-            Dict: presigned_url, label, history
-
-        Raises:
-            ValueError: If nothing to redo.
-        """
-        await self._get_image_authorized(image_id, user_id)
-
-        current = await self.redis_storage.get_cache_image(image_id, suffix="current_state")
-        next_state = await self.redis_history.pop_redo_state(image_id)
-
-        if not next_state:
-            logger.info("redo_nothing_to_redo", image_id=image_id)
-            raise ValueError("Nothing to redo")
-
-        if current:
-            await self.redis_history.push_undo_state(
-                image_id, current, label="redo_checkpoint"
-            )
-
-        await self._save_current_state(image_id, next_state["bytes"])
-        presigned_url = await self._get_temp_url_from_bytes(
-            image_id, user_id, next_state["bytes"], "redo"
-        )
-        logger.info("redo_applied", image_id=image_id, label=next_state["label"])
-
-        return {
-            "presigned_url": presigned_url,
-            "label": next_state["label"],
-            "history": await self.redis_history.get_history_labels(image_id),
-        }
-
-    async def get_history(self, image_id: int, user_id: int) -> Dict:
-        """Return undo stack labels for UI display."""
-        await self._get_image_authorized(image_id, user_id)
-        labels = await self.redis_history.get_history_labels(image_id)
-        return {"history": labels}
-
-    async def get_current_state(self, image_id: int, user_id: int) -> Dict:
-        """
-        Return the presigned URL the editor should actually display: the Redis
-        current_state if the user has made edits, otherwise the original S3 image.
-
-        This must be called every time the editor page (re)loads — on first open,
-        on refresh, and after a dropped connection — so the UI always shows what
-        the backend will actually keep editing on top of, instead of silently
-        falling back to the untouched original.
-
-        Returns:
-            Dict: presigned_url, is_edited, history
-        """
-        image = await self._get_image_authorized(image_id, user_id)
-        presigned_url, is_edited = await self._get_current_state_url(
-            image_id, user_id, image.storage_path
-        )
-        return {
-            "presigned_url": presigned_url,
-            "is_edited": is_edited,
-            "history": await self.redis_history.get_history_labels(image_id),
-        }
-
-    async def save_result(self, image_id: int, user_id: int) -> Image:
-        """
-        Persist current Redis state as a new Image record in DB + S3.
-
-        Returns:
-            Newly created Image record with status='processed'.
-
-        Raises:
-            ValueError: If no processed result exists in Redis.
-        """
-        image = await self._get_image_authorized(image_id, user_id)
-
-        result_bytes = await self.redis_storage.get_cache_image(
-            image_id, suffix="current_state"
-        )
-        if not result_bytes:
-            logger.warning("save_result_nothing_to_save", image_id=image_id)
-            raise ValueError("No processed result to save. Run an operation first.")
-
-        result_path = (
-            f"saved/{user_id}/{image_id}/"
-            f"result_{int(datetime.utcnow().timestamp())}.jpg"
-        )
-        result_s3_uri = await self.s3.upload_bytes(
-            data=result_bytes, path=result_path, content_type="image/jpeg"
-        )
-
-        saved = await self.image_repo.create(
-            filename=f"edited_{image.filename}",
-            storage_path=result_s3_uri,
-            user_id=user_id,
-            cache_key=None,
-        )
-        saved.status = "processed"
-        await self.image_repo.update(saved)
-        logger.info("result_saved", source_image_id=image_id, new_image_id=saved.id)
-        return saved
-
-    async def reset_current_state(self, image_id: int) -> None:
-        """Reset current state — next operation will use original S3 image."""
-        await self.redis_storage.delete(f"image:{image_id}:current_state")
-        await self.redis_history.clear_history(image_id)
-        logger.info("current_state_reset", image_id=image_id)

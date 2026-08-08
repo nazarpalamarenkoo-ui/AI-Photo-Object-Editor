@@ -2,29 +2,132 @@ import base64
 from datetime import datetime
 from typing import Dict, List, Optional
 
+from app.db.enums.edit_operation import EditOperation
+from app.db.enums.engine_types import EngineType
+from app.db.enums.segmentation_mode import SegmentationMode
+from app.db.models.image_version import ImageVersion
+from app.db.models.segmentation import SegmentationMask
 from app.services.ml.base_ml_service import BaseMLService
+from app.services.ml.version_carry_forward import VersionCarryForwardMixin
 from app.core.logging import get_logger, log_execution
 
 logger = get_logger(__name__)
 
 
-
-class SegmentationService(BaseMLService):
+class SegmentationService(VersionCarryForwardMixin, BaseMLService):
     """
     Handles MobileSAM segmentation and SAM-based editing.
 
     Workflow:
         Upload image
-            -> segment_objects / segment_with_prompt  (cache segments in Redis)
+            -> segment_objects / segment_with_prompt / segment_by_polygon / segment_hybrid
             -> sam_remove_object / sam_replace_object
     """
-    async def _next_mask_offset(self, image_id: int) -> int:
-        """Compute the next free mask_id for this image based on what's cached."""
-        cached = await self.redis_storage.get_cached_segments(image_id)
-        if not cached:
-            return 0
-        return max(seg["mask_id"] for seg in cached) + 1
-    
+
+    DEFAULT_MODEL_NAME = "mobile_sam"
+    DEFAULT_MODEL_VERSION = "unknown"
+
+    async def _next_mask_offset(self, content_id: int) -> int:
+        """Next free mask_id for this content, based on what's persisted in DB —
+        scoped by content_id so two versions sharing the same pixel content
+        also share the same mask_id sequence instead of colliding/duplicating."""
+        return await self.segmentation_repo.max_mask_id(content_id) + 1
+
+    async def _segments_from_cached_masks(
+        self, image_id: int, content_id: int, masks: List[SegmentationMask]
+    ) -> List[Dict]:
+        """
+        Rehydrate already-persisted SegmentationMask rows into the same
+        dict shape the pipeline produces (bbox/area/score/mask_bytes), so
+        a cache hit can go through the exact same _segments_for_response
+        formatting a fresh pipeline run would.
+
+        """
+        segments = []
+        for m in masks:
+            cache_suffix = f"mask:{content_id}:{m.mask_id}"
+            mask_bytes = await self.redis_storage.get_cache_image(image_id, suffix=cache_suffix)
+            if not mask_bytes:
+                mask_bytes = await self.s3.download(m.mask_storage_path)
+                await self.redis_storage.cache_image(
+                    image_id=image_id,
+                    image_data=mask_bytes,
+                    suffix=cache_suffix,
+                    ttl=7200,
+                )
+            segments.append({
+                "mask_id": m.mask_id,
+                "bbox_id": m.mask_id,
+                "bbox": {"x1": m.x1, "y1": m.y1, "x2": m.x2, "y2": m.y2},
+                "area": m.area,
+                "stability_score": m.score,
+                "mask_bytes": mask_bytes,
+            })
+        return segments
+
+    async def _persist_segments(
+        self,
+        image_id: int,
+        user_id: int,
+        version: ImageVersion,
+        segments: List[Dict],
+        mode: SegmentationMode,
+        metrics: Optional[dict] = None,
+    ) -> List[SegmentationMask]:
+        """
+        Upload each segment's raster mask to S3, write SegmentationMask rows,
+        and warm the Redis mask-bytes cache.
+
+        """
+        content_id = version.content_id
+        db_masks = []
+        for seg in segments:
+            seg_metrics = seg.pop("_meta_source_metrics", None) or metrics 
+            meta = self._extract_model_meta(seg_metrics, self.DEFAULT_MODEL_NAME, self.DEFAULT_MODEL_VERSION)
+            mask_bytes = seg["mask_bytes"]
+            path = f"masks/content_{content_id}/{seg['mask_id']}.png"
+            mask_url = await self.s3.upload_bytes(mask_bytes, path, content_type="image/png")
+
+            bbox = seg["bbox"]
+            db_masks.append(
+                SegmentationMask(
+                    content_id=content_id,
+                    mask_id=seg["mask_id"],
+                    mask_storage_path=mask_url,
+                    preview_storage_path=mask_url,
+                    x1=bbox["x1"],
+                    y1=bbox["y1"],
+                    x2=bbox["x2"],
+                    y2=bbox["y2"],
+                    area=seg.get("area", 0.0),
+                    score=seg.get("stability_score", seg.get("score", 0.0)) or 0.0,
+                    segmentation_mode=mode,
+                    model_name=meta.model_name,
+                    model_version=meta.model_version,
+                    inference_time_ms=meta.inference_time_ms,
+                )
+            )
+
+            # Cache key must match base_ml_service._get_segment_or_raise's
+            # read key exactly: f"mask:{content_id}:{mask_id}".
+            await self.redis_storage.cache_image(
+                image_id=image_id,
+                image_data=mask_bytes,
+                suffix=f"mask:{content_id}:{seg['mask_id']}",
+                ttl=7200,
+            )
+
+        persisted = await self.segmentation_repo.create_many(db_masks)
+        logger.info(
+            "segments_persisted",
+            image_id=image_id,
+            image_version_id=version.id,
+            content_id=content_id,
+            mode=mode.value,
+            count=len(persisted),
+        )
+        return persisted
+
     async def segment_objects(
         self,
         image_id: int,
@@ -35,21 +138,11 @@ class SegmentationService(BaseMLService):
         """
         Auto-segment all objects using MobileSAM (no prompts).
 
-        Args:
-            image_id:     ID of image to process
-            user_id:      ID of requesting user
-            min_area:     Minimum segment area in pixels (default: 500)
-            max_segments: Maximum segments returned (default: 50)
-
         Returns:
-            Dict:
-                - segments:   List[Dict] — mask_id, bbox_id, bbox, area, stability_score
-                - metrics:    Dict
-                - image_size: Tuple[int, int]
-                - timestamp:  str ISO
+            Dict: segments, metrics, image_size, timestamp
 
         Raises:
-            ValueError: If image not found or unauthorized.
+            ValueError: If image not found, unauthorized, or has no current version.
         """
         with log_execution(
             "service_segment_objects",
@@ -58,7 +151,33 @@ class SegmentationService(BaseMLService):
             min_area=min_area,
             max_segments=max_segments,
         ):
-            image = await self._get_image_authorized(image_id, user_id)
+            image, version = await self._get_current_version_authorized(image_id, user_id)
+
+            # Dedup point, same shape as DetectorService.detect_objects:
+            # this content_id may already have been auto-segmented (same
+            # upload twice, a redo, a no-op edit). If so, skip MobileSAM
+            # entirely and rehydrate the persisted masks instead.
+            existing = await self.segmentation_repo.get_by_content(
+                version.content_id, active_only=True
+            )
+            if existing:
+                segments_for_response = _segments_for_response(
+                    await self._segments_from_cached_masks(image_id, version.content_id, existing)
+                )
+                logger.debug(
+                    "segments_served_from_cache",
+                    image_id=image_id,
+                    image_version_id=version.id,
+                    content_id=version.content_id,
+                    count=len(existing),
+                )
+                return {
+                    "segments": segments_for_response,
+                    "metrics": {"cache_hit": True},
+                    "image_size": (image.width, image.height),
+                    "timestamp": datetime.now().isoformat(),
+                }
+
             image_bytes = await self._get_current_image_bytes(image_id, image.storage_path)
 
             result = await self.pipeline.sam_segment_objects(
@@ -66,21 +185,23 @@ class SegmentationService(BaseMLService):
                 min_area=min_area,
                 max_segments=max_segments,
             )
-            for idx, seg in enumerate(result["segments"]):
-                seg["mask_id"] = idx
-                seg["bbox_id"] = idx
 
-            await self.redis_storage.cache_segments(
-                image_id=image_id,
-                segments=result["segments"],
-                ttl=7200,
+            offset = await self._next_mask_offset(version.content_id)
+            for i, seg in enumerate(result["segments"]):
+                seg["mask_id"] = offset + i
+                seg["bbox_id"] = offset + i
+
+            await self._persist_segments(
+                image_id, user_id, version, result["segments"],
+                mode=SegmentationMode.SAM, metrics=result.get("metrics"),
             )
 
             segments_for_response = _segments_for_response(result["segments"])
 
             logger.info(
-                "segments_cached",
+                "segments_persisted_auto",
                 image_id=image_id,
+                image_version_id=version.id,
                 num_segments=len(segments_for_response),
             )
 
@@ -98,27 +219,16 @@ class SegmentationService(BaseMLService):
         point_coords: Optional[List[tuple]] = None,
         point_labels: Optional[List[int]] = None,
         bbox: Optional[Dict[str, int]] = None,
-        multimask_output: Optional[bool] = None
+        multimask_output: Optional[bool] = None,
     ) -> Dict:
         """
         Prompt-based MobileSAM segmentation — points or bbox as input.
 
-        Args:
-            image_id:     ID of image to process
-            user_id:      ID of requesting user
-            point_coords: List of (x, y) points
-            point_labels: 1=foreground, 0=background per point
-            bbox:         {'x1','y1','x2','y2'} as MobileSAM prompt
-
         Returns:
-            Dict:
-                - segments:   List[Dict] — sorted by stability_score desc
-                - metrics:    Dict
-                - image_size: Tuple[int, int]
-                - timestamp:  str ISO
+            Dict: segments, metrics, image_size, timestamp
 
         Raises:
-            ValueError: If image not found or unauthorized.
+            ValueError: If image not found, unauthorized, or has no current version.
         """
         with log_execution(
             "service_segment_with_prompt",
@@ -127,7 +237,7 @@ class SegmentationService(BaseMLService):
             num_points=len(point_coords) if point_coords else 0,
             has_bbox=bbox is not None,
         ):
-            image = await self._get_image_authorized(image_id, user_id)
+            image, version = await self._get_current_version_authorized(image_id, user_id)
             image_bytes = await self._get_current_image_bytes(image_id, image.storage_path)
 
             result = await self.pipeline.sam_segment_with_prompt(
@@ -135,26 +245,25 @@ class SegmentationService(BaseMLService):
                 point_coords=point_coords,
                 point_labels=point_labels,
                 bbox=bbox,
-                multimask_output=multimask_output
+                multimask_output=multimask_output,
             )
 
-            offset = await self._next_mask_offset(image_id)
+            offset = await self._next_mask_offset(version.content_id)
             for i, seg in enumerate(result["segments"]):
                 seg["mask_id"] = offset + i
                 seg["bbox_id"] = offset + i
 
-            existing = await self.redis_storage.get_cached_segments(image_id) or []
-            await self.redis_storage.cache_segments(
-                image_id=image_id,
-                segments=existing + result["segments"],
-                ttl=7200,
+            await self._persist_segments(
+                image_id, user_id, version, result["segments"],
+                mode=SegmentationMode.SAM, metrics=result.get("metrics"),
             )
 
             segments_for_response = _segments_for_response(result["segments"])
 
             logger.info(
-                "segments_cached",
+                "segments_persisted_prompt",
                 image_id=image_id,
+                image_version_id=version.id,
                 num_segments=len(segments_for_response),
             )
 
@@ -181,7 +290,7 @@ class SegmentationService(BaseMLService):
             Dict: segments, metrics, image_size, timestamp
 
         Raises:
-            ValueError: If image not found or unauthorized.
+            ValueError: If image not found, unauthorized, or has no current version.
         """
         with log_execution(
             "service_segment_by_polygon",
@@ -189,7 +298,7 @@ class SegmentationService(BaseMLService):
             image_id=image_id,
             num_points=len(points),
         ):
-            image = await self._get_image_authorized(image_id, user_id)
+            image, version = await self._get_current_version_authorized(image_id, user_id)
             image_bytes = await self._get_current_image_bytes(image_id, image.storage_path)
 
             result = await self.pipeline.sam_segment_by_polygon(
@@ -200,23 +309,22 @@ class SegmentationService(BaseMLService):
                 feather_px=feather_px,
             )
 
-            offset = await self._next_mask_offset(image_id)
+            offset = await self._next_mask_offset(version.content_id)
             for seg in result["segments"]:
                 seg["mask_id"] = offset
                 seg["bbox_id"] = offset
 
-            existing = await self.redis_storage.get_cached_segments(image_id) or []
-            await self.redis_storage.cache_segments(
-                image_id=image_id,
-                segments=existing + result["segments"],
-                ttl=7200,
+            await self._persist_segments(
+                image_id, user_id, version, result["segments"],
+                mode=SegmentationMode.POLYGON, metrics=result.get("metrics"),
             )
 
             segments_for_response = _segments_for_response(result["segments"])
 
             logger.info(
-                "segments_cached",
+                "segments_persisted_polygon",
                 image_id=image_id,
+                image_version_id=version.id,
                 num_segments=len(segments_for_response),
             )
 
@@ -226,7 +334,101 @@ class SegmentationService(BaseMLService):
             "image_size": result["image_size"],
             "timestamp": datetime.now().isoformat(),
         }
-    
+
+    async def segment_hybrid(
+        self,
+        image_id: int,
+        user_id: int,
+        yolo_conf_threshold: float = 0.35,
+        yolo_classes: Optional[List[str]] = None,
+        fallback_min_area: int = 800,
+        fallback_max_segments: int = 50,
+        overlap_iou_thresh: float = 0.5,
+    ) -> Dict:
+        """
+        Hybrid segmentation: YOLO finds common objects first,
+        then each YOLO bbox is segmented with MobileSAM as a prompt.
+
+        Returns:
+            Dict: segments, image_size, timestamp
+
+        Raises:
+            ValueError: If image not found, unauthorized, or has no current version.
+        """
+        with log_execution(
+            "service_segment_hybrid",
+            logger=logger,
+            image_id=image_id,
+            yolo_conf_threshold=yolo_conf_threshold,
+        ):
+            image, version = await self._get_current_version_authorized(image_id, user_id)
+            image_bytes = await self._get_current_image_bytes(image_id, image.storage_path)
+
+            # 1. YOLO — fast pass, internal prompt source only (not persisted).
+            detection_result = await self.pipeline.detect_objects(
+                image_bytes=image_bytes,
+                conf_threshold=yolo_conf_threshold,
+                classes=yolo_classes,
+            )
+
+            yolo_bboxes = [
+                {"x1": det["x1"], "y1": det["y1"], "x2": det["x2"], "y2": det["y2"]}
+                for det in detection_result["detections"]
+            ]
+
+            all_segments: List[Dict] = []
+            covered_bboxes: List[Dict] = []
+
+            # 2. MobileSAM for all YOLO bboxes in a single encoder pass.
+            if yolo_bboxes:
+                batch_result = await self.pipeline.sam_segment_with_prompts_batch(
+                    image_bytes=image_bytes,
+                    bboxes=yolo_bboxes,
+                )
+                for seg in batch_result["segments"]:
+                    seg["source"] = "yolo"
+                    seg["_meta_source_metrics"] = batch_result.get("metrics")
+                    all_segments.append(seg)
+                    covered_bboxes.append(seg["bbox"])
+
+            fallback = await self.pipeline.sam_segment_objects(
+                image_bytes=image_bytes,
+                min_area=fallback_min_area,
+                max_segments=fallback_max_segments,
+            )
+            for seg in fallback["segments"]:
+                if not self._overlaps_any(seg["bbox"], covered_bboxes, overlap_iou_thresh):
+                    seg["source"] = "sam_auto"
+                    seg["_meta_source_metrics"] = fallback.get("metrics")
+                    all_segments.append(seg)
+
+            offset = await self._next_mask_offset(version.content_id)
+            for i, seg in enumerate(all_segments):
+                seg["mask_id"] = offset + i
+                seg["bbox_id"] = offset + i
+
+            await self._persist_segments(
+                image_id, user_id, version, all_segments,
+                mode=SegmentationMode.HYBRID,
+            )
+
+            segments_for_response = _segments_for_response(all_segments)
+
+            logger.info(
+                "hybrid_segments_persisted",
+                image_id=image_id,
+                image_version_id=version.id,
+                num_yolo=len(covered_bboxes),
+                num_sam_auto=len(all_segments) - len(covered_bboxes),
+                total=len(all_segments),
+            )
+
+        return {
+            "segments": segments_for_response,
+            "image_size": fallback["image_size"],
+            "timestamp": datetime.now().isoformat(),
+        }
+
     async def sam_remove_object(
         self,
         image_id: int,
@@ -241,21 +443,11 @@ class SegmentationService(BaseMLService):
         """
         Remove object selected by MobileSAM mask_id using LaMa inpainting.
 
-        Args:
-            image_id:           ID of image to process
-            mask_id:            Segment mask_id from segment_objects
-            user_id:            ID of requesting user
-            expand_mask_pixels: Mask dilation in pixels (default: 12)
-            use_edge_blending:  Apply edge blending (default: True)
-            ldm_steps:          LaMa diffusion steps (default: 25)
-            ldm_sampler:        LaMa sampler (default: 'plms')
-            hd_strategy:        LaMa HD strategy (default: 'CROP')
-
         Returns:
-            Dict: result_url, presigned_url, metrics, timestamp
+            Dict: result_url, presigned_url, metrics, timestamp, image_version_id
 
         Raises:
-            ValueError: If image not found, unauthorized, or segment not cached.
+            ValueError: If image not found, unauthorized, or mask not found.
         """
         with log_execution(
             "service_sam_remove_object",
@@ -263,8 +455,8 @@ class SegmentationService(BaseMLService):
             image_id=image_id,
             mask_id=mask_id,
         ):
-            image = await self._get_image_authorized(image_id, user_id)
-            segment = await self._get_segment_or_raise(image_id, mask_id)
+            image, version = await self._get_current_version_authorized(image_id, user_id)
+            segment = await self._get_segment_or_raise(version.content_id, mask_id, image_id)
 
             image_bytes = await self._get_current_image_bytes(image_id, image.storage_path)
             await self.redis_history.push_undo_state(
@@ -281,8 +473,6 @@ class SegmentationService(BaseMLService):
                 hd_strategy=hd_strategy,
             )
 
-            await self._save_current_state(image_id, result["result_bytes"])
-
             result_path = (
                 f"results/{user_id}/{image_id}/"
                 f"sam_remove_{mask_id}_{int(datetime.utcnow().timestamp())}.jpg"
@@ -291,11 +481,42 @@ class SegmentationService(BaseMLService):
                 result["result_bytes"], result_path
             )
 
+            new_version = await self._fork_version(image, result["result_bytes"], result_url)
+
+            affected_boxes = [segment["bbox"]]
+            await self._carry_forward_detections_by_overlap(version.content_id, new_version.content_id, affected_boxes)
+            await self._carry_forward_masks(version.content_id, new_version.content_id, affected_boxes)
+
+            await self._save_current_state(image_id, result["result_bytes"])
+
+            await self.edit_history_repo.create(
+                image_version_id=new_version.id,
+                operation=EditOperation.REMOVE,
+                engine=EngineType.LAMA,
+                parameters={
+                    "mask_id": mask_id,
+                    "expand_mask_pixels": expand_mask_pixels,
+                    "use_edge_blending": use_edge_blending,
+                    "ldm_steps": ldm_steps,
+                    "ldm_sampler": ldm_sampler,
+                    "hd_strategy": hd_strategy,
+                },
+                processing_time_ms=self._extract_processing_time_ms(result.get("metrics")),
+            )
+
+            logger.info(
+                "sam_object_removed",
+                image_id=image_id,
+                old_version_id=version.id,
+                new_version_id=new_version.id,
+            )
+
         return {
             "result_url": result_url,
             "presigned_url": presigned_url,
             "metrics": result["metrics"],
             "timestamp": result["timestamp"],
+            "image_version_id": new_version.id,
         }
 
     async def sam_replace_object(
@@ -316,32 +537,11 @@ class SegmentationService(BaseMLService):
         """
         Replace object selected by MobileSAM mask_id with a provided image.
 
-        Args:
-            image_id:                 ID of image to process
-            mask_id:                  Segment mask_id from segment_objects
-            replacement_image_bytes:  Replacement image bytes — a plain photo
-                                       when replacement_is_cutout is False, or
-                                       an already-transparent RGBA cutout
-                                       (e.g. from the asset library) when True
-            user_id:                  ID of requesting user
-            expand_mask_pixels:       Mask dilation in pixels (default: 8)
-            use_color_matching:       Apply color matching (default: True)
-            use_edge_blending:        Apply edge blending (default: False)
-            color_match_method:       Color match method (default: 'color_transfer')
-            ldm_steps:                LaMa diffusion steps (default: 25)
-            ldm_sampler:              LaMa sampler (default: 'plms')
-            hd_strategy:              LaMa HD strategy (default: 'CROP')
-            replacement_is_cutout:    True when replacement_image_bytes comes
-                                       from the asset library (already a
-                                       transparent RGBA cutout) instead of an
-                                       uploaded photo — skips rembg background
-                                       removal in the pipeline (default: False)
-
         Returns:
-            Dict: result_url, presigned_url, metrics, timestamp
+            Dict: result_url, presigned_url, metrics, timestamp, image_version_id
 
         Raises:
-            ValueError: If image not found, unauthorized, or segment not cached.
+            ValueError: If image not found, unauthorized, or mask not found.
         """
         with log_execution(
             "service_sam_replace_object",
@@ -351,8 +551,8 @@ class SegmentationService(BaseMLService):
             color_match_method=color_match_method,
             replacement_is_cutout=replacement_is_cutout,
         ):
-            image = await self._get_image_authorized(image_id, user_id)
-            segment = await self._get_segment_or_raise(image_id, mask_id)
+            image, version = await self._get_current_version_authorized(image_id, user_id)
+            segment = await self._get_segment_or_raise(version.content_id, mask_id, image_id)
 
             image_bytes = await self._get_current_image_bytes(image_id, image.storage_path)
             await self.redis_history.push_undo_state(
@@ -367,14 +567,12 @@ class SegmentationService(BaseMLService):
                 expand_mask_pixels=expand_mask_pixels,
                 use_color_matching=use_color_matching,
                 use_edge_blending=use_edge_blending,
-                color_match_method=color_match_method, # type: ignore
+                color_match_method=color_match_method,  # type: ignore
                 ldm_steps=ldm_steps,
                 ldm_sampler=ldm_sampler,
                 hd_strategy=hd_strategy,
                 replacement_is_cutout=replacement_is_cutout,
             )
-
-            await self._save_current_state(image_id, result["result_bytes"])
 
             result_path = (
                 f"results/{user_id}/{image_id}/"
@@ -384,127 +582,53 @@ class SegmentationService(BaseMLService):
                 result["result_bytes"], result_path
             )
 
+            new_version = await self._fork_version(image, result["result_bytes"], result_url)
+
+            affected_boxes = [segment["bbox"]]
+            await self._carry_forward_detections_by_overlap(version.content_id, new_version.content_id, affected_boxes)
+            await self._carry_forward_masks(version.content_id, new_version.content_id, affected_boxes)
+
+            await self._save_current_state(image_id, result["result_bytes"])
+
+            await self.edit_history_repo.create(
+                image_version_id=new_version.id,
+                operation=EditOperation.REPLACE,
+                engine=EngineType.LAMA,
+                parameters={
+                    "mask_id": mask_id,
+                    "expand_mask_pixels": expand_mask_pixels,
+                    "use_color_matching": use_color_matching,
+                    "use_edge_blending": use_edge_blending,
+                    "color_match_method": color_match_method,
+                    "ldm_steps": ldm_steps,
+                    "ldm_sampler": ldm_sampler,
+                    "hd_strategy": hd_strategy,
+                    "replacement_is_cutout": replacement_is_cutout,
+                },
+                processing_time_ms=self._extract_processing_time_ms(result.get("metrics")),
+            )
+
+            logger.info(
+                "sam_object_replaced",
+                image_id=image_id,
+                old_version_id=version.id,
+                new_version_id=new_version.id,
+            )
+
         return {
             "result_url": result_url,
             "presigned_url": presigned_url,
             "metrics": result["metrics"],
             "timestamp": result["timestamp"],
+            "image_version_id": new_version.id,
         }
-    
-    async def segment_hybrid(
-        self,
-        image_id: int,
-        user_id: int,
-        yolo_conf_threshold: float = 0.35,
-        yolo_classes: Optional[List[str]] = None,
-        fallback_min_area: int = 800,
-        fallback_max_segments: int = 50,
-        overlap_iou_thresh: float = 0.5,
-    ) -> Dict:
-        """
-        Hybrid segmentation: YOLO finds common objects first (cheap, fast),
-        then each YOLO bbox is segmented with MobileSAM as a prompt (cheap decoder
-        calls).
 
-        Args:
-            image_id:              ID of image to process
-            user_id:                ID of requesting user
-            yolo_conf_threshold:    YOLO confidence threshold (default: 0.35)
-            yolo_classes:           Optional YOLO class name filter
-            fallback_min_area:      Minimum area (px) for fallback MobileSAM auto
-                                    segments (default: 800)
-            fallback_max_segments:  Max segments returned by the fallback
-                                    MobileSAM auto pass (default: 50)
-            overlap_iou_thresh:     IoU threshold above which a fallback
-                                    segment is considered a duplicate of an
-                                    already-covered YOLO bbox (default: 0.5)
-
-        Returns:
-            Dict:
-                - segments:   List[Dict] — mask_id, bbox_id, bbox, area,
-                              stability_score, source ('yolo' | 'sam_auto')
-                - image_size: Tuple[int, int]
-                - timestamp:  str ISO
-
-        Raises:
-            ValueError: If image not found or unauthorized.
-        """
-        with log_execution(
-            "service_segment_hybrid",
-            logger=logger,
-            image_id=image_id,
-            yolo_conf_threshold=yolo_conf_threshold,
-        ):
-            image = await self._get_image_authorized(image_id, user_id)
-            image_bytes = await self._get_current_image_bytes(image_id, image.storage_path)
-
-            # 1. YOLO — fast pass (~50-100ms on CPU), not persisted to the
-            #    Detection table — this is an internal prompt source
-            detection_result = await self.pipeline.detect_objects(
-                image_bytes=image_bytes,
-                conf_threshold=yolo_conf_threshold,
-                classes=yolo_classes,
-            )
-
-            yolo_bboxes = [
-                {"x1": det["x1"], "y1": det["y1"], "x2": det["x2"], "y2": det["y2"]}
-                for det in detection_result["detections"]
-            ]
-
-            all_segments: List[Dict] = []
-            covered_bboxes: List[Dict] = []
-
-            #  2. MobileSAM for all YOLO bboxes in a single encoder pass — see. MobileSAMSegmentor.segment_with_prompts_batch.
-            if yolo_bboxes:
-                batch_result = await self.pipeline.sam_segment_with_prompts_batch(
-                    image_bytes=image_bytes,
-                    bboxes=yolo_bboxes,
-                )
-                for seg in batch_result["segments"]:
-                    seg["source"] = "yolo"
-                    all_segments.append(seg)
-                    covered_bboxes.append(seg["bbox"])
-
-            # 3. Sparse MobileSAM auto pass to catch whatever YOLO missed.
-            fallback = await self.pipeline.sam_segment_objects(
-                image_bytes=image_bytes,
-                min_area=fallback_min_area,
-                max_segments=fallback_max_segments,
-            )
-            for seg in fallback["segments"]:
-                if not self._overlaps_any(seg["bbox"], covered_bboxes, overlap_iou_thresh):
-                    seg["source"] = "sam_auto"
-                    all_segments.append(seg)
-
-            for idx, seg in enumerate(all_segments):
-                seg["mask_id"] = idx
-                seg["bbox_id"] = idx
-
-            await self.redis_storage.cache_segments(
-                image_id=image_id,
-                segments=all_segments,
-                ttl=7200,
-            )
-
-            segments_for_response = _segments_for_response(all_segments)
-
-            logger.info(
-                "hybrid_segments_cached",
-                image_id=image_id,
-                num_yolo=len(covered_bboxes),
-                num_sam_auto=len(all_segments) - len(covered_bboxes),
-                total=len(all_segments),
-            )
-
-        return {
-            "segments": segments_for_response,
-            "image_size": fallback["image_size"],
-            "timestamp": datetime.now().isoformat(),
-        }
+    def get_supported_classes(self) -> List[str]:
+        """Passthrough to the internal YOLO pass used by segment_hybrid."""
+        return self.pipeline.get_supported_classes()
 
     @staticmethod
     def _overlaps_any(bbox: Dict, existing_bboxes: List[Dict], iou_thresh: float) -> bool:
-        """Check whether bbox overlaps any of existing_bboxes above iou_thresh."""
         return any(
             SegmentationService._iou(bbox, eb) > iou_thresh
             for eb in existing_bboxes
@@ -512,7 +636,6 @@ class SegmentationService(BaseMLService):
 
     @staticmethod
     def _iou(a: Dict, b: Dict) -> float:
-        """Intersection-over-union of two {x1,y1,x2,y2} bounding boxes."""
         x1, y1 = max(a["x1"], b["x1"]), max(a["y1"], b["y1"])
         x2, y2 = min(a["x2"], b["x2"]), min(a["y2"], b["y2"])
         inter = max(0, x2 - x1) * max(0, y2 - y1)
@@ -520,6 +643,7 @@ class SegmentationService(BaseMLService):
         area_b = (b["x2"] - b["x1"]) * (b["y2"] - b["y1"])
         union = area_a + area_b - inter
         return inter / union if union > 0 else 0.0
+
 
 def _mask_to_data_url(mask_bytes: bytes) -> str:
     """PNG mask bytes -> base64 data URL the frontend can drop straight
@@ -530,10 +654,10 @@ def _mask_to_data_url(mask_bytes: bytes) -> str:
 
 def _segments_for_response(segments: List[Dict]) -> List[Dict]:
     """
-    Strip the raw mask_bytes (binary, not JSON-safe) from each segment
-    before sending it to the client, but keep a `mask_url` data-URL in its
-    place so the frontend can render the real mask contour instead of
-    falling back to a bbox rectangle."""
+    Strip the raw mask_bytes from each segment before sending it to the client,
+    but keep a `mask_url` data-URL in its place so the frontend can render the real mask
+    contour instead of falling back to a bbox rectangle.
+    """
     result = []
     for seg in segments:
         mask_bytes = seg.get("mask_bytes")

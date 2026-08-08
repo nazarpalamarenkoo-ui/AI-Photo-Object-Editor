@@ -4,7 +4,9 @@ from app.services.user_service import UserService
 
 
 def _make_service(db_session) -> UserService:
-    return UserService(db=db_session, user_repo=UserRepository(db_session))
+    """UserService.__init__ only takes user_repo (session-per-operation
+    repos, no db session on the service itself)."""
+    return UserService(user_repo=UserRepository(db_session))
 
 
 @pytest.mark.integration
@@ -77,6 +79,25 @@ async def test_get_user_not_found(db_session):
     service = _make_service(db_session)
     with pytest.raises(ValueError, match="not found"):
         await service.get_user(99999)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_update_user_username(db_session):
+    service = _make_service(db_session)
+    user = await service.create_user("iris", "iris@test.com", "Password1")
+    updated = await service.update_user(user.id, username="iris2")
+    assert updated.username == "iris2"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_update_user_username_conflict(db_session):
+    service = _make_service(db_session)
+    await service.create_user("owner", "owner@test.com", "Password1")
+    other = await service.create_user("other", "other@test.com", "Password1")
+    with pytest.raises(ValueError, match="already exists"):
+        await service.update_user(other.id, username="owner")
 
 
 @pytest.mark.integration

@@ -1,5 +1,4 @@
 from typing import Optional
-from sqlalchemy.ext.asyncio import AsyncSession
 from passlib.context import CryptContext
 
 from app.repository.user_repo import UserRepository
@@ -12,11 +11,8 @@ class UserService:
     
     def __init__(
         self,
-        db: AsyncSession,
         user_repo: UserRepository
     ):
-         
-        self.db = db
         self.user_repo = user_repo
         
         self.pwd_context = CryptContext(schemes = ['bcrypt'], deprecated = ['auto'])
@@ -133,9 +129,9 @@ class UserService:
         self._validate_password(new_password) 
         
         # Hash new password
-        user.password_hash = self.pwd_context.hash(new_password)
+        new_password_hash = self.pwd_context.hash(new_password)
         
-        await self.user_repo.update(user)
+        await self.user_repo.update_password(user, new_password_hash)
         
         logger.info('password_changed', user_id=user_id)
         

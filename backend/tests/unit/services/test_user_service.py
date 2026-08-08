@@ -6,12 +6,6 @@ from app.db.models.user import User
 
 
 @pytest.fixture
-def mock_db():
-    """Mock database session"""
-    return MagicMock()
-
-
-@pytest.fixture
 def mock_user_repo():
     """Mock User repository"""
     repo = MagicMock()
@@ -29,16 +23,20 @@ def mock_user_repo():
     repo.get_by_username = AsyncMock(return_value=None)
     repo.get_by_email = AsyncMock(return_value=None)
     repo.update = AsyncMock(return_value=mock_user)
+    repo.update_password = AsyncMock(return_value=None)
     repo.delete = AsyncMock(return_value=True)
     
     return repo
 
 
 @pytest.fixture
-def user_service(mock_db, mock_user_repo):
-    """User Service instance with mocked dependencies"""
+def user_service(mock_user_repo):
+    """User Service instance with mocked dependencies.
+
+    UserService.__init__ only takes user_repo (session-per-operation
+    repos, no db session on the service itself) — don't pass db here.
+    """
     return UserService(
-        db=mock_db,
         user_repo=mock_user_repo
     )
 
@@ -308,7 +306,7 @@ async def test_change_password_success(user_service, mock_user_repo):
     )
     
     assert result is True
-    mock_user_repo.update.assert_called_once()
+    mock_user_repo.update_password.assert_called_once()
 
 
 @pytest.mark.unit

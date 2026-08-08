@@ -1,23 +1,50 @@
+import uuid
 from datetime import datetime
+from io import BytesIO
 from typing import Dict, List, Optional
 
+from PIL import Image as PILImage
+
 from app.services.ml.base_ml_service import BaseMLService
-from app.storage.redis import redis_assets
-from app.storage.redis.redis_assets import RedisAssetsStorage
+from app.db.models.assets import Asset
+from app.db.schemas.assets import AssetCreate
 from app.core.logging import get_logger, log_execution
 
 logger = get_logger(__name__)
 
+THUMBNAIL_MAX_SIZE = 256
+
 
 class AssetService(BaseMLService):
     """
-    Handles extracted object assets: extract, paste, and the asset library
-    (Redis is the primary store, S3 is an optional long-term backup).
+    Handles extracted object assets: extract, paste, and the asset library.
+    Postgres is now the source of truth for metadata;
+    S3 holds the actual PNG bytes. No Redis involved
+    anymore — assets are permanent until deleted or evicted by the
+    per-user cap in AssetRepository.
     """
 
-    def __init__(self, redis_assets: RedisAssetsStorage, **kwargs):
-        super().__init__(redis_assets=redis_assets, **kwargs)
-        self.redis_assets = redis_assets
+    def _make_thumbnail(self, extracted_bytes: bytes, max_size: int = THUMBNAIL_MAX_SIZE) -> bytes:
+        img = PILImage.open(BytesIO(extracted_bytes)).convert("RGBA")
+        img.thumbnail((max_size, max_size))
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    async def _delete_asset_files(self, asset: Asset) -> None:
+        """Best-effort cleanup of S3 objects — logs and swallows failures so
+        a dangling S3 file never blocks a DB delete the user asked for."""
+        try:
+            await self.s3.delete(asset.storage_path)
+            if asset.thumbnail_path:
+                await self.s3.delete(asset.thumbnail_path)
+        except Exception as e:
+            logger.warning(
+                "asset_s3_delete_failed",
+                asset_id=asset.public_id,
+                storage_path=asset.storage_path,
+                exc_info=e,
+            )
 
     async def extract_object(
         self,
@@ -26,36 +53,23 @@ class AssetService(BaseMLService):
         user_id: int,
         padding_pixels: int = 8,
         label: Optional[str] = None,
-        persist_to_s3: bool = False,
+        persist_to_s3: bool = False,  # kept for API compat, no longer optional in practice
     ) -> Dict:
         """
-        Extract a MobileSAM-segmented object from an image as an RGBA PNG cutout
-        and save it into the user's asset library (Redis, optionally S3).
-
-        Args:
-            image_id: ID of the source image the segment belongs to.
-            mask_id: ID of the MobileSAM segment/mask to extract.
-            user_id: ID of the requesting user (used for authorization and
-                as the owner of the resulting asset).
-            padding_pixels: Extra padding (in pixels) added around the
-                segment's bounding box before cropping.
-            label: Optional human-readable label to store with the asset.
-            persist_to_s3: If True, also upload the extracted PNG to S3 and
-                return an S3 URL / presigned URL alongside the Redis copy.
-
-        Returns:
-            A dict with the new asset's ID, optional S3/presigned URLs,
-            object size, area in pixels, cropped bbox, and timestamp.
+        Extract a MobileSAM-segmented object from an image as an RGBA PNG
+        cutout, upload it (+ thumbnail) to S3, and persist metadata as an
+        Asset row.
         """
         with log_execution(
             "service_extract_object",
             logger=logger,
             image_id=image_id,
             mask_id=mask_id,
-            persist_to_s3=persist_to_s3,
         ):
-            image = await self._get_image_authorized(image_id, user_id)
-            segment = await self._get_segment_or_raise(image_id, mask_id)
+            image, version = await self._get_current_version_authorized(image_id, user_id)
+            segment = await self._get_segment_or_raise(
+                content_id=version.content_id, mask_id=mask_id, image_id=image_id
+            )
 
             image_bytes = await self._get_current_image_bytes(image_id, image.storage_path)
 
@@ -66,126 +80,96 @@ class AssetService(BaseMLService):
                 padding_pixels=padding_pixels,
             )
 
-            s3_url, presigned_url = None, None
-            if persist_to_s3:
-                extract_path = (
-                    f"extracted/{user_id}/{image_id}/"
-                    f"mask_{mask_id}_{int(datetime.utcnow().timestamp())}.png"
-                )
-                s3_url, presigned_url = await self._upload_result(
-                    result["extracted_bytes"], extract_path, content_type="image/png"
-                )
+            extracted_bytes = result["extracted_bytes"]
+            width, height = result["object_size"]
+            thumbnail_bytes = self._make_thumbnail(extracted_bytes)
 
-            asset_meta = await self.redis_assets.save_asset(
+            key_prefix = f"assets/{user_id}/{image_id}/{uuid.uuid4().hex}"
+            storage_path = f"{key_prefix}.png"
+            thumbnail_path = f"{key_prefix}_thumb.png"
+
+            await self.s3.upload_bytes(
+                data=extracted_bytes, path=storage_path, content_type="image/png"
+            )
+            await self.s3.upload_bytes(
+                data=thumbnail_bytes, path=thumbnail_path, content_type="image/png"
+            )
+
+            asset_create = AssetCreate(
                 user_id=user_id,
-                extracted_bytes=result["extracted_bytes"],
-                source_image_id=image_id,
-                object_size=result["object_size"],
+                storage_path=storage_path,
+                thumbnail_path=thumbnail_path,
+                content_type="image/png",
+                file_size=len(extracted_bytes),
+                width=width,
+                height=height,
                 area_pixels=result["area_pixels"],
                 label=label,
-                s3_url=s3_url,
+                source_image_version_id=version.id,
+                source_segmentation_mask_id=segment["id"],
             )
+            asset = await self.assets_repo.create(Asset(**asset_create.model_dump()))
+
+            # Evict oldest assets over the per-user cap — repo only tells us
+            # what to remove, service owns the S3 side effect.
+            evicted = await self.assets_repo.get_overflow(user_id)
+            for old_asset in evicted:
+                await self._delete_asset_files(old_asset)
+            if evicted:
+                await self.assets_repo.delete_many(evicted)
 
             logger.info(
                 "asset_extracted",
                 image_id=image_id,
                 mask_id=mask_id,
-                asset_id=asset_meta["asset_id"],
+                asset_id=asset.public_id,
                 user_id=user_id,
+                evicted_count=len(evicted),
             )
 
         return {
-            "asset_id": asset_meta["asset_id"],
-            "extracted_url": s3_url,
-            "presigned_url": presigned_url,
+            "asset_id": asset.public_id,
+            "storage_path": asset.storage_path,
+            "thumbnail_path": asset.thumbnail_path,
             "object_size": result["object_size"],
             "area_pixels": result["area_pixels"],
             "cropped_bbox": result["cropped_bbox"],
             "timestamp": result["timestamp"],
         }
 
-    async def list_assets(self, user_id: int, limit: int = 50, offset: int = 0) -> List[Dict]:
-        """
-        List the user's saved assets.
-
-        Args:
-            user_id: ID of the asset owner.
-            limit: Maximum number of assets to return.
-            offset: Number of most-recent assets to skip.
-
-        Returns:
-            A list of asset metadata dicts.
-        """
-        assets = await self.redis_assets.list_assets(user_id, limit=limit, offset=offset)
+    async def list_assets(self, user_id: int, limit: int = 50, offset: int = 0) -> List[Asset]:
+        assets = await self.assets_repo.list_by_user(user_id, limit=limit, offset=offset)
         logger.debug("assets_listed", user_id=user_id, count=len(assets))
         return assets
 
     async def get_asset_thumbnail(self, user_id: int, asset_id: str) -> Optional[bytes]:
-        """
-        Get the thumbnail PNG bytes for a single asset, for use in a
-        library panel/dropdown preview.
-
-        Args:
-            user_id: ID of the asset owner.
-            asset_id: ID of the asset.
-
-        Returns:
-            Thumbnail PNG bytes, or None if the asset/thumbnail doesn't exist.
-        """
-        return await self.redis_assets.get_thumbnail(user_id, asset_id)
+        asset = await self.assets_repo.get_by_public_id(user_id, asset_id)
+        if not asset or not asset.thumbnail_path:
+            return None
+        return await self.s3.download(asset.thumbnail_path)
 
     async def get_asset_image(self, user_id: int, asset_id: str) -> Optional[bytes]:
-        """
-        Get the full-resolution extracted object bytes (RGBA PNG) for an asset.
+        asset = await self.assets_repo.get_by_public_id(user_id, asset_id)
+        if not asset:
+            return None
+        return await self.s3.download(asset.storage_path)
 
-        Args:
-            user_id: ID of the asset owner.
-            asset_id: ID of the asset.
-
-        Returns:
-            Raw PNG bytes of the extracted object, or None if not found.
-        """
-        asset = await self.redis_assets.get_asset(user_id, asset_id, with_bytes=True)
-        return asset["extracted_bytes"] if asset else None
-
-    async def rename_asset(self, user_id: int, asset_id: str, label: str) -> Dict:
-        """
-        Update the label of an existing asset.
-
-        Args:
-            user_id: ID of the asset owner.
-            asset_id: ID of the asset to rename.
-            label: New label to assign to the asset.
-
-        Returns:
-            The updated asset metadata dict.
-
-        Raises:
-            ValueError: If the asset does not exist.
-        """
-        meta = await self.redis_assets.rename_asset(user_id, asset_id, label)
-        if not meta:
+    async def rename_asset(self, user_id: int, asset_id: str, label: str) -> Asset:
+        asset = await self.assets_repo.get_by_public_id(user_id, asset_id)
+        if not asset:
             logger.warning("asset_not_found", user_id=user_id, asset_id=asset_id)
             raise ValueError("Asset not found")
+        asset = await self.assets_repo.rename(asset, label)
         logger.info("asset_renamed", user_id=user_id, asset_id=asset_id, label=label)
-        return meta
+        return asset
 
     async def delete_asset(self, user_id: int, asset_id: str) -> None:
-        """
-        Delete an asset (metadata, extracted bytes, and thumbnail) from
-        the library.
-
-        Args:
-            user_id: ID of the asset owner.
-            asset_id: ID of the asset to delete.
-
-        Raises:
-            ValueError: If the asset does not exist.
-        """
-        deleted = await self.redis_assets.delete_asset(user_id, asset_id)
-        if not deleted:
+        asset = await self.assets_repo.get_by_public_id(user_id, asset_id)
+        if not asset:
             logger.warning("asset_not_found", user_id=user_id, asset_id=asset_id)
             raise ValueError("Asset not found")
+        await self._delete_asset_files(asset)
+        await self.assets_repo.delete(asset)
         logger.info("asset_deleted", user_id=user_id, asset_id=asset_id)
 
     async def paste_extracted_object(
@@ -201,28 +185,12 @@ class AssetService(BaseMLService):
         color_match_method: str = "color_transfer",
     ) -> Dict:
         """
-        Paste a previously extracted object (from the asset library or an
-        S3 URL) onto the current working state of an image.
-
-        Args:
-            image_id: ID of the target image to paste onto.
-            user_id: ID of the requesting user (used for authorization).
-            target_bbox: Destination bounding box (x1, y1, x2, y2) where
-                the object should be placed.
-            asset_id: ID of a saved asset in the user's library to paste.
-            extracted_url: S3 URL of a previously extracted object to
-                download and paste, used if `asset_id` is not provided.
-            scale: Scale factor applied to the extracted object before pasting.
-
-        Returns:
-            A dict with the result image URL, presigned URL, the bbox the
-            object was pasted into, its size, and a timestamp.
-
+        Paste a previously extracted object (from the asset library, by
+        public_id, or a raw S3 URL) onto the current working state of an
+        image.
         """
         if not asset_id and not extracted_url:
-            logger.warning(
-                "paste_missing_source", image_id=image_id, user_id=user_id
-            )
+            logger.warning("paste_missing_source", image_id=image_id, user_id=user_id)
             raise ValueError("Provide either asset_id or extracted_url")
 
         with log_execution(
@@ -236,13 +204,11 @@ class AssetService(BaseMLService):
             image_bytes = await self._get_current_image_bytes(image_id, image.storage_path)
 
             if asset_id:
-                asset = await self.redis_assets.get_asset(user_id, asset_id, with_bytes=True)
-                if not asset or not asset.get("extracted_bytes"):
-                    logger.warning(
-                        "asset_not_found_or_expired", user_id=user_id, asset_id=asset_id
-                    )
-                    raise ValueError("Asset not found or expired")
-                extracted_bytes = asset["extracted_bytes"]
+                asset = await self.assets_repo.get_by_public_id(user_id, asset_id)
+                if not asset:
+                    logger.warning("asset_not_found", user_id=user_id, asset_id=asset_id)
+                    raise ValueError("Asset not found")
+                extracted_bytes = await self.s3.download(asset.storage_path)
             else:
                 try:
                     extracted_bytes = await self.s3.download(extracted_url)
