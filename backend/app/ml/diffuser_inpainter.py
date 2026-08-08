@@ -74,7 +74,8 @@ class DiffusionReplacer:
         self.min_crop_size = getattr(settings, "DIFFUSION_MIN_CROP_SIZE", 256)
         self.mask_blur_radius = getattr(settings, "DIFFUSION_MASK_BLUR_RADIUS", 6)
         self.enable_cpu_offload = getattr(settings, "DIFFUSION_ENABLE_CPU_OFFLOAD", False)
-
+        self.model_name = "sd_inpaint_ip_adapter"
+        self.model_version = f"{self.model_id}+{self.ip_adapter_variant}"
         logger.info(
             "diffusion_replacer_configured",
             model=self.model_id,
@@ -428,6 +429,8 @@ class DiffusionReplacer:
             mask_size_pixels = int(np.sum(mask_array > 128))
 
             return {
+                "model_name": self.model_name,
+                "model_version": self.model_version,
                 "processing_time_ms": processing_time_ms,
                 "processing_time_s": processing_time_ms / 1000,
                 "mask_size_pixels": mask_size_pixels,
@@ -462,7 +465,7 @@ class DiffusionReplacer:
                     "image_width": metrics["image_size"][0],
                     "image_height": metrics["image_size"][1],
                 },
-                tags={"inpaint_model": "diffusion_replace", "operation": "inpaint"},
+                tags={"inpaint_model": "diffusion_replace", "operation": "inpaint_diffusion_replace"},
             )
 
         await asyncio.to_thread(log_sync)

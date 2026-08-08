@@ -253,7 +253,7 @@ class ExperimentTracker:
     ) -> Optional[Dict]:
         """
         Fetch the most recent run tagged with a given operation
-        (e.g. 'detect', 'inpaint', 'sam2_segment_auto').
+        (e.g. 'detect', 'inpaint_lama_remove', 'mobilesam_segment_auto').
 
         This is the source of truth for real, measured metrics — used by
         ModelManager.register_pipeline() so pipeline registration doesn't
@@ -265,7 +265,7 @@ class ExperimentTracker:
         Args:
             operation: Value of the 'operation' tag set by log_run()/
                        _track_metrics() in detector/inpainter/segmentor
-                       (e.g. 'detect', 'inpaint', 'sam2_segment_auto').
+                       (e.g. 'detect', 'inpaint_lama_remove', 'mobilesam_segment_auto').
 
         Returns:
             Dict with 'run_id', 'run_name', 'params', 'metrics', 'tags',

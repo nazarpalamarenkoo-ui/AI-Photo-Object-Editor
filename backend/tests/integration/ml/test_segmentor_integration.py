@@ -57,10 +57,6 @@ def two_squares_image_bytes():
     return buffer.getvalue()
 
 
-# --------------------------------------------------------------------------
-# segment_with_prompts_batch
-# --------------------------------------------------------------------------
-
 async def test_batch_recovers_each_of_two_distinct_squares(
     real_segmentor, two_squares_image_bytes
 ):
@@ -156,10 +152,6 @@ async def test_batch_empty_bboxes_returns_no_segments_end_to_end(
     assert result["metrics"]["num_segments"] == 0
 
 
-# --------------------------------------------------------------------------
-# segment_with_prompt (single point / single bbox)
-# --------------------------------------------------------------------------
-
 async def test_prompt_bbox_recovers_the_targeted_square(
     real_segmentor, two_squares_image_bytes
 ):
@@ -208,9 +200,6 @@ async def test_prompt_tracks_metrics_end_to_end(
     assert kwargs["metrics"]["num_segments"] >= 1
 
 
-# --------------------------------------------------------------------------
-# segment_auto
-# --------------------------------------------------------------------------
 
 async def test_auto_finds_at_least_one_segment_on_real_image(
     real_segmentor, two_squares_image_bytes

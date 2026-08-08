@@ -61,8 +61,8 @@ class SAMLamaMode:
     async def segment_objects(
         self,
         image_bytes: bytes,
-        min_area: int = 500,
-        max_segments: int = 50,
+        min_area: int = 550,
+        max_segments: int = 100,
         max_area_ratio: float = 0.85,
     ) -> Dict:
         """
@@ -275,7 +275,13 @@ class SAMLamaMode:
 
         return {
             "segments": [segment],
-            "metrics": {"num_segments": 1, "total_area_px": area},
+            "metrics": {
+                "model_name": "polygon_masker",
+                "model_version": "n/a",
+                "num_segments": 1,
+                "total_area_px": area,
+                "inference_time_ms": 0.0,
+            },
             "image_size": (W, H),
         }
 

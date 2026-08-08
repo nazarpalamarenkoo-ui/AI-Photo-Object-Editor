@@ -55,6 +55,8 @@ class YOLODetector:
             from ultralytics import YOLO
 
             self.model_path = model_path
+            self.model_name = Path(model_path).stem          
+            self.model_version = getattr(settings, "YOLO_MODEL_VERSION", "unknown")  
             self.device = device
             self.conf_threshold = conf_threshold
             self.tracker = tracker or get_tracker()
@@ -194,9 +196,13 @@ class YOLODetector:
         detections: List[Dict],
         inference_time_ms: float
     ) -> Dict:
-
+        base = {
+            'model_name': self.model_name,
+            'model_version': self.model_version,
+        }
         if not detections:
             return {
+                **base,
                 'num_detections': 0,
                 'avg_confidence': 0.0,
                 'inference_time_ms': inference_time_ms,
@@ -208,6 +214,7 @@ class YOLODetector:
         classes_detected = list(set(d['detected_class'] for d in detections))
 
         return {
+            **base,
             'num_detections': len(detections),
             'avg_confidence': avg_confidence,
             'inference_time_ms': inference_time_ms,
@@ -251,7 +258,7 @@ class YOLODetector:
                     "min_confidence": metrics.get("min_confidence"),
                     "max_confidence": metrics.get("max_confidence"),
                 },
-                tags={"model_name": self.model_path, "operation": "detect"},
+                tags={"model_name": self.model_name, "model_version": self.model_version, "operation": "detect"},
             )
 
         await asyncio.to_thread(log_sync)

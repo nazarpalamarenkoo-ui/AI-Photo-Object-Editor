@@ -382,7 +382,7 @@ async def test_track_metrics_logs_provided_overrides():
     assert kwargs['params']['guidance_scale'] == 8.0
     assert kwargs['params']['ip_adapter_scale'] == 0.7
     assert kwargs['metrics']['mask_size_pixels'] == 42
-    assert kwargs['tags']['operation'] == 'inpaint'
+    assert kwargs['tags']['operation'] == 'inpaint_diffusion_replace'
     assert kwargs['tags']['inpaint_model'] == 'diffusion_replace'
 
 

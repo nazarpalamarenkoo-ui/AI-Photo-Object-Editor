@@ -63,6 +63,9 @@ class LaMaInpainter:
 
             self.device = device
             self.tracker = tracker or get_tracker()
+            self.model_name = "lama"                                          
+            self.model_version = getattr(settings, "LAMA_MODEL_VERSION", "unknown")
+            self.tracker = tracker or get_tracker()
 
             logger.info("lama_model_loading", model="lama", device=device)
             self.model_manager = ModelManager(
@@ -554,6 +557,8 @@ class LaMaInpainter:
                 mask_size_pixels = 0
 
             return {
+                'model_name': self.model_name,        
+                'model_version': self.model_version,   
                 'processing_time_ms': processing_time_ms,
                 'processing_time_s': processing_time_ms / 1000,
                 'mask_size_pixels': mask_size_pixels,
@@ -599,7 +604,7 @@ class LaMaInpainter:
                     "image_width": metrics['image_size'][0],
                     "image_height": metrics['image_size'][1],
                 },
-                tags={"inpaint_model": f"lama_{mode}", "operation": "inpaint"},
+                tags={"inpaint_model": f"lama_{mode}", "operation": f"inpaint_lama_{mode}"},
             )
 
         await asyncio.to_thread(log_sync)

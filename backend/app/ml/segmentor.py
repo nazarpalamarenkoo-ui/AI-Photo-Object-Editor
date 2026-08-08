@@ -50,6 +50,7 @@ class MobileSAMSegmentor:
 
             self.model_path = model_path
             self.model_type = model_type
+            self.model_version = getattr(settings, "SAM_MODEL_VERSION", "unknown")  # NEW
             self.device = device
             self.tracker = tracker or get_tracker()
 
@@ -405,8 +406,13 @@ class MobileSAMSegmentor:
         return segments
 
     def _calculate_metrics(self, segments: List[Dict], inference_time_ms: float) -> Dict:
+        base = {
+            'model_name': self.model_type,        
+            'model_version': self.model_version,   
+        }
         if not segments:
             return {
+                **base,
                 "num_segments": 0,
                 "avg_stability": 0.0,
                 "inference_time_ms": inference_time_ms,
@@ -414,6 +420,7 @@ class MobileSAMSegmentor:
             }
         avg_stability = sum(s["stability_score"] for s in segments) / len(segments)
         return {
+            **base,
             "num_segments": len(segments),
             "avg_stability": avg_stability,
             "inference_time_ms": inference_time_ms,

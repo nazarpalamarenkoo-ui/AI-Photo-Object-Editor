@@ -115,7 +115,7 @@ class ModelManager:
     ) -> str:
         """
         Register ONE pipeline version instead of registering each model
-        (YOLO/LaMa/SAM2) separately with hand-typed metrics.
+        (YOLO/LaMa/MobileSAM) separately with hand-typed metrics.
         Pipeline:
             1. Pull latest real run for each stage in `operations`
             2. Merge into one namespaced metrics/params dict
@@ -130,8 +130,9 @@ class ModelManager:
             pipeline_name: Name to register the pipeline under
                            (default: 'ml-pipeline')
             operations:    Which stage tags to pull, in order
-                           (default: ['detect', 'inpaint',
-                           'sam2_segment_auto']).
+                           (default: ['detect', 'inpaint_lama_remove',
+                           'inpaint_lama_replace', 'inpaint_diffusion_replace',
+                           'mobilesam_segment_auto']).
             description:   Optional description tag
             tracker:       ExperimentTracker to read runs from
                            (default: auto-created)
@@ -145,7 +146,13 @@ class ModelManager:
             ValueError: If require_all=True and a stage has no run yet,
                         or if NO requested stage has any run at all.
         """
-        operations = operations or ["detect", "inpaint", "sam2_segment_auto"]
+        operations = operations or [
+            "detect",
+            "inpaint_lama_remove",
+            "inpaint_lama_replace",
+            "inpaint_diffusion_replace",
+            "mobilesam_segment_auto",
+        ]
         tracker = tracker or get_tracker()
 
         aggregated_metrics: Dict[str, float] = {}
