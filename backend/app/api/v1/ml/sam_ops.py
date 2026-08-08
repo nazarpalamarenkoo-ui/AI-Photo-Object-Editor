@@ -14,10 +14,13 @@ from app.db.schemas.ml import (
 )
 from app.services.ml.segmentation_service import SegmentationService
 from app.services.ml.assets_service import AssetService
+from app.services.ml_job_service import MLJobService
+from app.services.ml.tracked_runner import run_tracked
+from app.db.enums.ml_task_status import MLTaskType
 from app.core.logging import get_logger
 from app.core.tracing import inject_trace_context
 
-from .deps import get_segmentation, get_asset, get_arq_pool, _http_status
+from .deps import get_segmentation, get_asset, get_arq_pool, get_base_deps, get_mljob_service, _http_status
 
 logger = get_logger(__name__)
 
@@ -30,14 +33,15 @@ async def sam_remove_object(
     mask_id: int,
     body: SamRemoveRequest = SamRemoveRequest(),
     current_user: User = Depends(get_current_user),
-    service: SegmentationService = Depends(get_segmentation),
+    deps: dict = Depends(get_base_deps),
+    mljob_service: MLJobService = Depends(get_mljob_service),
 ):
     """Remove SAM-segmented object via LaMa inpainting."""
     try:
-        return await service.sam_remove_object(
-            image_id=image_id,
+        return await run_tracked(
+            SegmentationService, deps, mljob_service, "sam_remove_object",
+            image_id, current_user.id, MLTaskType.SAM_REMOVE_OBJECT,
             mask_id=mask_id,
-            user_id=current_user.id,
             expand_mask_pixels=body.expand_mask_pixels,
             use_edge_blending=body.use_edge_blending,
             ldm_steps=body.ldm.ldm_steps,
@@ -80,7 +84,8 @@ async def sam_replace_object(
     asset_id: Optional[str] = Query(None),
     body: SamReplaceRequest = Depends(),
     current_user: User = Depends(get_current_user),
-    service: SegmentationService = Depends(get_segmentation),
+    deps: dict = Depends(get_base_deps),
+    mljob_service: MLJobService = Depends(get_mljob_service),
     asset_service: AssetService = Depends(get_asset),
 ):
     """Replace SAM-segmented object with an uploaded image OR a saved asset."""
@@ -97,11 +102,11 @@ async def sam_replace_object(
             replacement_bytes = await replacement_file.read()
             replacement_is_cutout = False
 
-        return await service.sam_replace_object(
-            image_id=image_id,
+        return await run_tracked(
+            SegmentationService, deps, mljob_service, "sam_replace_object",
+            image_id, current_user.id, MLTaskType.SAM_REPLACE_OBJECT,
             mask_id=mask_id,
             replacement_image_bytes=replacement_bytes,
-            user_id=current_user.id,
             expand_mask_pixels=body.expand_mask_pixels,
             use_color_matching=body.use_color_matching,
             use_edge_blending=body.use_edge_blending,
@@ -167,14 +172,15 @@ async def extract_object(
     mask_id: int,
     body: ExtractRequest = ExtractRequest(),
     current_user: User = Depends(get_current_user),
-    service: AssetService = Depends(get_asset),
+    deps: dict = Depends(get_base_deps),
+    mljob_service: MLJobService = Depends(get_mljob_service),
 ):
     """Extract SAM-segmented object as RGBA PNG, save into asset library (Redis)."""
     try:
-        return await service.extract_object(
-            image_id=image_id,
+        return await run_tracked(
+            AssetService, deps, mljob_service, "extract_object",
+            image_id, current_user.id, MLTaskType.EXTRACT_OBJECT,
             mask_id=mask_id,
-            user_id=current_user.id,
             padding_pixels=body.padding_pixels,
             label=body.label,
             persist_to_s3=body.persist_to_s3,

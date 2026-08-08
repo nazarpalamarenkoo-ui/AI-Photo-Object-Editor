@@ -14,6 +14,8 @@ from app.api.v1.ml.editing import (
     sam_replace_object_diffusion_async,
     replace_object,
     replace_object_async,
+)
+from app.api.v1.ml.session import (
     get_current_state,
     reset_current_state,
     save_result,
@@ -50,23 +52,11 @@ from app.api.v1.ml.assets import (
 from app.api.v1.ml.jobs import get_job_status
 from app.api.v1.ml.deps import _http_status
 
-from app.db.schemas.ml import (
-    DetectRequest,
-    RemoveRequest,
-    RemoveMultipleRequest,
-    ReplaceRequest,
-    SamReplaceDiffusionRequest,
-    SegmentRequest,
-    SegmentWithPromptRequest,
-    SegmentByPolygonRequest,
-    SegmentHybridRequest,
-    SamRemoveRequest,
-    SamReplaceRequest,
-    ExtractRequest,
-    PasteRequest,
-    RenameAssetRequest,
-    BboxSchema,
-)
+from app.db.enums.ml_task_status import MLTaskType
+from app.services.ml.detector_service import DetectorService
+from app.services.ml.editing_service import EditingService
+from app.services.ml.segmentation_service import SegmentationService
+from app.services.ml.assets_service import AssetService
 
 try:
     from arq.jobs import JobStatus
@@ -78,22 +68,42 @@ except ImportError:  # pragma: no cover
 # Helpers
 # ---------------------------------------------------------------------------
 
-class _ResultObj(dict):
-    """
-    Dict subclass that also supports attribute access.
+def make_body(**attrs):
+    """MagicMock request body with only the attributes the endpoint touches."""
+    body = MagicMock()
+    for key, value in attrs.items():
+        setattr(body, key, value)
+    return body
 
-    EditingService.save_result() returns a model-like object; the endpoint
-    reads `result.id` (attribute access) for logging, while these tests
-    verify the payload via `result["id"]` (dict access, since that's what
-    the endpoint ultimately returns to the caller). A plain dict fails the
-    former, a plain object fails the latter, so we need both.
-    """
 
-    def __getattr__(self, item):
-        try:
-            return self[item]
-        except KeyError:
-            raise AttributeError(item)
+def make_ldm(ldm_steps=25, ldm_sampler="plms", hd_strategy="CROP"):
+    ldm = MagicMock()
+    ldm.ldm_steps = ldm_steps
+    ldm.ldm_sampler = ldm_sampler
+    ldm.hd_strategy = hd_strategy
+    return ldm
+
+
+def make_diffusion_body(**overrides):
+    defaults = dict(
+        bbox={"x1": 0, "y1": 0, "x2": 50, "y2": 50},
+        prompt="a red sports car",
+        use_color_matching=True,
+        color_match_method="color_transfer",
+        negative_prompt=None,
+        num_inference_steps=30,
+        guidance_scale=7.5,
+        ip_adapter_scale=0.6,
+        strength=0.8,
+        seed=42,
+    )
+    defaults.update(overrides)
+    return make_body(**defaults)
+
+
+def patched_run_tracked(module: str, return_value=None, side_effect=None):
+    mock = AsyncMock(return_value=return_value, side_effect=side_effect)
+    return patch(f"app.api.v1.ml.{module}.run_tracked", new=mock), mock
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +115,17 @@ def mock_user():
     user = MagicMock()
     user.id = 1
     return user
+
+
+@pytest.fixture
+def mock_deps():
+    """Sentinel deps dict passed straight through to run_tracked untouched."""
+    return {"marker": "deps"}
+
+
+@pytest.fixture
+def mock_mljob_service():
+    return MagicMock()
 
 
 @pytest.fixture
@@ -126,50 +147,40 @@ def mock_pool():
 @pytest.fixture
 def mock_detector_service():
     service = MagicMock()
-    service.detect_objects = AsyncMock(return_value={"detections": [], "count": 0})
     service.get_supported_classes = MagicMock(return_value=["person", "car", "dog"])
     return service
 
 
 @pytest.fixture
-def mock_editor_service():
-    service = MagicMock()
-    service.remove_object = AsyncMock(return_value={"result_url": "s3://bucket/result.jpg"})
-    service.remove_multiple_objects = AsyncMock(return_value={"result_url": "s3://bucket/result.jpg"})
-    service.replace_object = AsyncMock(return_value={"result_url": "s3://bucket/result.jpg"})
-    service.sam_replace_object_diffusion = AsyncMock(return_value={"result_url": "s3://bucket/diffusion.jpg"})
-    service.get_current_state = AsyncMock(return_value={"presigned_url": "https://presigned.url/current.jpg"})
-    service._get_image_authorized = AsyncMock()
-    service.reset_current_state = AsyncMock()
-    service.save_result = AsyncMock(return_value=_ResultObj(id=42, filename="edited.jpg"))
-    service.undo = AsyncMock(return_value={"detail": "Undone"})
-    service.redo = AsyncMock(return_value={"detail": "Redone"})
-    service.get_history = AsyncMock(return_value={"history": []})
-    return service
-
-
-@pytest.fixture
-def mock_segmentation_service():
-    service = MagicMock()
-    service.segment_objects = AsyncMock(return_value={"segments": []})
-    service.segment_with_prompt = AsyncMock(return_value={"segments": []})
-    service.segment_by_polygon = AsyncMock(return_value={"segments": []})
-    service.segment_hybrid = AsyncMock(return_value={"segments": []})
-    service.sam_remove_object = AsyncMock(return_value={"result_url": "s3://bucket/result.jpg"})
-    service.sam_replace_object = AsyncMock(return_value={"result_url": "s3://bucket/result.jpg"})
-    return service
-
-
-@pytest.fixture
 def mock_asset_service():
+    """Only what editing.py / sam_ops.py touch on the injected asset_service."""
     service = MagicMock()
     service.get_asset_image = AsyncMock(return_value=b"asset-bytes")
-    service.get_asset_thumbnail = AsyncMock(return_value=b"thumb-bytes")
+    return service
+
+
+@pytest.fixture
+def mock_asset_full_service():
+    """Full AssetService surface used directly by assets.py routes."""
+    service = MagicMock()
     service.list_assets = AsyncMock(return_value=[])
+    service.get_asset_thumbnail = AsyncMock(return_value=b"thumb-bytes")
+    service.get_asset_image = AsyncMock(return_value=b"asset-bytes")
     service.rename_asset = AsyncMock(return_value={"asset_id": "asset-1", "label": "new-name"})
     service.delete_asset = AsyncMock()
     service.paste_extracted_object = AsyncMock(return_value={"result_url": "s3://bucket/pasted.jpg"})
-    service.extract_object = AsyncMock(return_value={"asset_id": "asset-1", "extracted_url": "s3://bucket/obj.png"})
+    return service
+
+
+@pytest.fixture
+def mock_version_history_service():
+    service = MagicMock()
+    service.get_current_state = AsyncMock(return_value={"presigned_url": "https://presigned.url/current.jpg"})
+    service.reset_current_state = AsyncMock()
+    service.save_result = AsyncMock(return_value={"id": 42, "filename": "edited.jpg"})
+    service.undo = AsyncMock(return_value={"detail": "Undone"})
+    service.redo = AsyncMock(return_value={"detail": "Redone"})
+    service.get_history = AsyncMock(return_value={"history": []})
     return service
 
 
@@ -180,37 +191,49 @@ def mock_asset_service():
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestDetectObjects:
-    async def test_success(self, mock_user, mock_detector_service):
-        mock_detector_service.detect_objects.return_value = {"detections": [{"class": "person"}], "count": 1}
-        body = DetectRequest(conf_threshold=0.7, classes=["person"])
+    async def test_success(self, mock_user, mock_deps, mock_mljob_service):
+        body = make_body(conf_threshold=0.7, classes=["person"])
+        patcher, mock_run_tracked = patched_run_tracked(
+            "detect", return_value={"detections": [{"class": "person"}], "count": 1}
+        )
 
-        result = await detect_objects(image_id=1, body=body, current_user=mock_user, service=mock_detector_service)
+        with patcher:
+            result = await detect_objects(
+                image_id=1, body=body, current_user=mock_user,
+                deps=mock_deps, mljob_service=mock_mljob_service,
+            )
 
-        mock_detector_service.detect_objects.assert_awaited_once_with(
-            image_id=1, user_id=1, conf_threshold=0.7, classes=["person"]
+        mock_run_tracked.assert_awaited_once_with(
+            DetectorService, mock_deps, mock_mljob_service, "detect_objects",
+            1, 1, MLTaskType.DETECTION,
+            conf_threshold=0.7,
+            classes=["person"],
         )
         assert result["count"] == 1
 
-    async def test_default_body(self, mock_user, mock_detector_service):
-        await detect_objects(image_id=1, current_user=mock_user, service=mock_detector_service)
+    async def test_not_found(self, mock_user, mock_deps, mock_mljob_service):
+        body = make_body(conf_threshold=0.5, classes=None)
+        patcher, _ = patched_run_tracked("detect", side_effect=ValueError("Image not found"))
 
-        mock_detector_service.detect_objects.assert_awaited_once_with(
-            image_id=1, user_id=1, conf_threshold=0.5, classes=None
-        )
-
-    async def test_not_found(self, mock_user, mock_detector_service):
-        mock_detector_service.detect_objects.side_effect = ValueError("Image not found")
-
-        with pytest.raises(HTTPException) as exc:
-            await detect_objects(image_id=999, current_user=mock_user, service=mock_detector_service)
+        with patcher:
+            with pytest.raises(HTTPException) as exc:
+                await detect_objects(
+                    image_id=999, body=body, current_user=mock_user,
+                    deps=mock_deps, mljob_service=mock_mljob_service,
+                )
 
         assert exc.value.status_code == 404
 
-    async def test_unauthorized(self, mock_user, mock_detector_service):
-        mock_detector_service.detect_objects.side_effect = ValueError("unauthorized")
+    async def test_unauthorized(self, mock_user, mock_deps, mock_mljob_service):
+        body = make_body(conf_threshold=0.5, classes=None)
+        patcher, _ = patched_run_tracked("detect", side_effect=ValueError("unauthorized"))
 
-        with pytest.raises(HTTPException) as exc:
-            await detect_objects(image_id=1, current_user=mock_user, service=mock_detector_service)
+        with patcher:
+            with pytest.raises(HTTPException) as exc:
+                await detect_objects(
+                    image_id=1, body=body, current_user=mock_user,
+                    deps=mock_deps, mljob_service=mock_mljob_service,
+                )
 
         assert exc.value.status_code == 403
 
@@ -232,46 +255,40 @@ class TestGetSupportedClasses:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestRemoveObject:
-    async def test_success(self, mock_user, mock_editor_service):
-        # Non-default body: exercises that a custom expand_mask_pixels value
-        # is actually threaded through to the service call.
-        body = RemoveRequest(expand_mask_pixels=10)
-
-        result = await remove_object(
-            image_id=1, bbox_id=1, body=body, current_user=mock_user, service=mock_editor_service
+    async def test_success(self, mock_user, mock_deps, mock_mljob_service):
+        body = make_body(expand_mask_pixels=10, use_edge_blending=False, ldm=make_ldm())
+        patcher, mock_run_tracked = patched_run_tracked(
+            "editing", return_value={"result_url": "s3://bucket/result.jpg"}
         )
 
-        mock_editor_service.remove_object.assert_awaited_once_with(
-            image_id=1,
-            bbox_id=1,
-            user_id=1,
+        with patcher:
+            result = await remove_object(
+                image_id=1, bbox_id=2, body=body, current_user=mock_user,
+                deps=mock_deps, mljob_service=mock_mljob_service,
+            )
+
+        mock_run_tracked.assert_awaited_once_with(
+            EditingService, mock_deps, mock_mljob_service, "remove_object",
+            1, 1, MLTaskType.REMOVE_OBJECT,
+            bbox_id=2,
             expand_mask_pixels=10,
             use_edge_blending=False,
             ldm_steps=25,
-            ldm_sampler='plms',
-            hd_strategy='CROP',
+            ldm_sampler="plms",
+            hd_strategy="CROP",
         )
         assert result["result_url"] == "s3://bucket/result.jpg"
 
-    async def test_default_body(self, mock_user, mock_editor_service):
-        await remove_object(image_id=1, bbox_id=1, current_user=mock_user, service=mock_editor_service)
+    async def test_bbox_not_found(self, mock_user, mock_deps, mock_mljob_service):
+        body = make_body(expand_mask_pixels=5, use_edge_blending=False, ldm=make_ldm())
+        patcher, _ = patched_run_tracked("editing", side_effect=ValueError("bbox not found"))
 
-        mock_editor_service.remove_object.assert_awaited_once_with(
-            image_id=1,
-            bbox_id=1,
-            user_id=1,
-            expand_mask_pixels=5,
-            use_edge_blending=False,
-            ldm_steps=25,
-            ldm_sampler='plms',
-            hd_strategy='CROP',
-        )
-
-    async def test_bbox_not_found(self, mock_user, mock_editor_service):
-        mock_editor_service.remove_object.side_effect = ValueError("bbox not found")
-
-        with pytest.raises(HTTPException) as exc:
-            await remove_object(image_id=1, bbox_id=999, current_user=mock_user, service=mock_editor_service)
+        with patcher:
+            with pytest.raises(HTTPException) as exc:
+                await remove_object(
+                    image_id=1, bbox_id=999, body=body, current_user=mock_user,
+                    deps=mock_deps, mljob_service=mock_mljob_service,
+                )
 
         assert exc.value.status_code == 404
 
@@ -279,78 +296,70 @@ class TestRemoveObject:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestRemoveObjectAsync:
-    async def test_enqueues_job_default_body(self, mock_user, mock_pool):
-        result = await remove_object_async(image_id=1, bbox_id=2, current_user=mock_user, pool=mock_pool)
+    async def test_enqueues_job(self, mock_user, mock_pool):
+        body = make_body(
+            expand_mask_pixels=20, use_edge_blending=True,
+            ldm=make_ldm(ldm_steps=40, ldm_sampler="ddim", hd_strategy="RESIZE"),
+        )
+
+        result = await remove_object_async(
+            image_id=1, bbox_id=2, body=body, current_user=mock_user, pool=mock_pool,
+        )
 
         mock_pool.enqueue_job.assert_awaited_once_with(
             "remove_object_task",
             image_id=1,
             bbox_id=2,
             user_id=1,
-            expand_mask_pixels=5,
-            use_edge_blending=False,
-            ldm_steps=25,
-            ldm_sampler='plms',
-            hd_strategy='CROP',
+            expand_mask_pixels=20,
+            use_edge_blending=True,
+            ldm_steps=40,
+            ldm_sampler="ddim",
+            hd_strategy="RESIZE",
             _trace_carrier=ANY,
         )
         assert result == {"job_id": "job-123"}
-
-    async def test_enqueues_job_custom_body(self, mock_user, mock_pool):
-        body = RemoveRequest(
-            expand_mask_pixels=20,
-            use_edge_blending=True,
-            ldm_steps=40,
-            ldm_sampler="ddim",
-            hd_strategy="RESIZE",
-        )
-
-        await remove_object_async(image_id=1, bbox_id=2, body=body, current_user=mock_user, pool=mock_pool)
-
-        mock_pool.enqueue_job.assert_awaited_once_with(
-            "remove_object_task",
-            image_id=1,
-            bbox_id=2,
-            user_id=1,
-            expand_mask_pixels=20,
-            use_edge_blending=True,
-            ldm_steps=40,
-            ldm_sampler="ddim",
-            hd_strategy="RESIZE",
-            _trace_carrier=ANY,
-        )
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestRemoveMultipleObjects:
-    async def test_success(self, mock_user, mock_editor_service):
-        body = RemoveMultipleRequest(bbox_ids=[1, 2, 3])
-
-        result = await remove_multiple_objects(
-            image_id=1, body=body, current_user=mock_user, service=mock_editor_service
+    async def test_success(self, mock_user, mock_deps, mock_mljob_service):
+        body = make_body(
+            bbox_ids=[1, 2, 3], expand_mask_pixels=5, use_edge_blending=False, ldm=make_ldm(),
+        )
+        patcher, mock_run_tracked = patched_run_tracked(
+            "editing", return_value={"result_url": "s3://bucket/result.jpg"}
         )
 
-        mock_editor_service.remove_multiple_objects.assert_awaited_once_with(
-            image_id=1,
+        with patcher:
+            result = await remove_multiple_objects(
+                image_id=1, body=body, current_user=mock_user,
+                deps=mock_deps, mljob_service=mock_mljob_service,
+            )
+
+        mock_run_tracked.assert_awaited_once_with(
+            EditingService, mock_deps, mock_mljob_service, "remove_multiple_objects",
+            1, 1, MLTaskType.REMOVE_MULTIPLE_OBJECTS,
             bbox_ids=[1, 2, 3],
-            user_id=1,
             expand_mask_pixels=5,
             use_edge_blending=False,
             ldm_steps=25,
-            ldm_sampler='plms',
-            hd_strategy='CROP',
+            ldm_sampler="plms",
+            hd_strategy="CROP",
         )
         assert result["result_url"] == "s3://bucket/result.jpg"
 
-    async def test_unauthorized(self, mock_user, mock_editor_service):
-        mock_editor_service.remove_multiple_objects.side_effect = ValueError("unauthorized")
+    async def test_unauthorized(self, mock_user, mock_deps, mock_mljob_service):
+        body = make_body(bbox_ids=[1], expand_mask_pixels=5, use_edge_blending=False, ldm=make_ldm())
+        patcher, _ = patched_run_tracked("editing", side_effect=ValueError("unauthorized"))
 
-        with pytest.raises(HTTPException) as exc:
-            await remove_multiple_objects(
-                image_id=1, body=RemoveMultipleRequest(bbox_ids=[1]),
-                current_user=mock_user, service=mock_editor_service,
-            )
+        with patcher:
+            with pytest.raises(HTTPException) as exc:
+                await remove_multiple_objects(
+                    image_id=1, body=body, current_user=mock_user,
+                    deps=mock_deps, mljob_service=mock_mljob_service,
+                )
 
         assert exc.value.status_code == 403
 
@@ -359,10 +368,12 @@ class TestRemoveMultipleObjects:
 @pytest.mark.asyncio
 class TestRemoveMultipleObjectsAsync:
     async def test_enqueues_job(self, mock_user, mock_pool):
-        body = RemoveMultipleRequest(bbox_ids=[1, 2, 3])
+        body = make_body(
+            bbox_ids=[1, 2, 3], expand_mask_pixels=5, use_edge_blending=False, ldm=make_ldm(),
+        )
 
         result = await remove_multiple_objects_async(
-            image_id=1, body=body, current_user=mock_user, pool=mock_pool
+            image_id=1, body=body, current_user=mock_user, pool=mock_pool,
         )
 
         mock_pool.enqueue_job.assert_awaited_once_with(
@@ -373,8 +384,8 @@ class TestRemoveMultipleObjectsAsync:
             expand_mask_pixels=5,
             use_edge_blending=False,
             ldm_steps=25,
-            ldm_sampler='plms',
-            hd_strategy='CROP',
+            ldm_sampler="plms",
+            hd_strategy="CROP",
             _trace_carrier=ANY,
         )
         assert result == {"job_id": "job-123"}
@@ -384,133 +395,127 @@ class TestRemoveMultipleObjectsAsync:
 # editing.py - SAM diffusion replace
 # ---------------------------------------------------------------------------
 
-def _diffusion_body(**overrides):
-    # SamReplaceDiffusionRequest takes flat bbox_x1/y1/x2/y2 fields (not a
-    # nested `bbox` object) and `seed` is a plain `int` (default 0), per
-    # app/db/schemas/ml.py.
-    defaults = dict(
-        bbox_x1=0,
-        bbox_y1=0,
-        bbox_x2=50,
-        bbox_y2=50,
-        prompt="a red sports car",
-        use_color_matching=True,
-        color_match_method="color_transfer",
-        negative_prompt=None,
-        num_inference_steps=30,
-        guidance_scale=7.5,
-        ip_adapter_scale=0.6,
-        strength=0.8,
-        seed=42,
-    )
-    defaults.update(overrides)
-    return SamReplaceDiffusionRequest(**defaults)
-
-
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestSamReplaceObjectDiffusion:
-    async def test_success_with_reference_file(self, mock_user, mock_editor_service, mock_asset_service):
+    async def test_success_with_reference_file(self, mock_user, mock_deps, mock_mljob_service, mock_asset_service):
         mask_file = MagicMock(spec=UploadFile)
         mask_file.read = AsyncMock(return_value=b"mask-bytes")
         reference_file = MagicMock(spec=UploadFile)
         reference_file.read = AsyncMock(return_value=b"reference-bytes")
-
-        result = await sam_replace_object_diffusion(
-            image_id=1,
-            mask_file=mask_file,
-            reference_file=reference_file,
-            asset_id=None,
-            body=_diffusion_body(),
-            current_user=mock_user,
-            service=mock_editor_service,
-            asset_service=mock_asset_service,
+        body = make_diffusion_body()
+        patcher, mock_run_tracked = patched_run_tracked(
+            "editing", return_value={"result_url": "s3://bucket/diffusion.jpg"}
         )
 
-        mask_file.read.assert_awaited_once()
-        reference_file.read.assert_awaited_once()
-        _, kwargs = mock_editor_service.sam_replace_object_diffusion.await_args
-        assert kwargs["mask_bytes"] == b"mask-bytes"
-        assert kwargs["reference_image_bytes"] == b"reference-bytes"
-        assert kwargs["prompt"] == "a red sports car"
-        assert kwargs["bbox"] == {"x1": 0, "y1": 0, "x2": 50, "y2": 50}
+        with patcher:
+            result = await sam_replace_object_diffusion(
+                image_id=1, mask_file=mask_file, reference_file=reference_file, asset_id=None,
+                body=body, current_user=mock_user, deps=mock_deps,
+                mljob_service=mock_mljob_service, asset_service=mock_asset_service,
+            )
+
+        mock_asset_service.get_asset_image.assert_not_awaited()
+        mock_run_tracked.assert_awaited_once_with(
+            EditingService, mock_deps, mock_mljob_service, "sam_replace_object_diffusion",
+            1, 1, MLTaskType.DIFFUSION,
+            mask_bytes=b"mask-bytes",
+            bbox=body.bbox,
+            reference_image_bytes=b"reference-bytes",
+            prompt=body.prompt,
+            use_color_matching=body.use_color_matching,
+            color_match_method=body.color_match_method,
+            negative_prompt=body.negative_prompt,
+            num_inference_steps=body.num_inference_steps,
+            guidance_scale=body.guidance_scale,
+            ip_adapter_scale=body.ip_adapter_scale,
+            strength=body.strength,
+            seed=body.seed,
+        )
         assert result["result_url"] == "s3://bucket/diffusion.jpg"
 
-    async def test_success_with_asset_id(self, mock_user, mock_editor_service, mock_asset_service):
+    async def test_success_with_asset_id(self, mock_user, mock_deps, mock_mljob_service, mock_asset_service):
         mask_file = MagicMock(spec=UploadFile)
         mask_file.read = AsyncMock(return_value=b"mask-bytes")
-
-        await sam_replace_object_diffusion(
-            image_id=1,
-            mask_file=mask_file,
-            reference_file=None,
-            asset_id="asset-1",
-            body=_diffusion_body(),
-            current_user=mock_user,
-            service=mock_editor_service,
-            asset_service=mock_asset_service,
+        body = make_diffusion_body()
+        patcher, mock_run_tracked = patched_run_tracked(
+            "editing", return_value={"result_url": "s3://bucket/diffusion.jpg"}
         )
 
-        mock_asset_service.get_asset_image.assert_awaited_once_with(1, "asset-1")
-        _, kwargs = mock_editor_service.sam_replace_object_diffusion.await_args
-        assert kwargs["reference_image_bytes"] == b"asset-bytes"
+        with patcher:
+            result = await sam_replace_object_diffusion(
+                image_id=1, mask_file=mask_file, reference_file=None, asset_id="asset-1",
+                body=body, current_user=mock_user, deps=mock_deps,
+                mljob_service=mock_mljob_service, asset_service=mock_asset_service,
+            )
 
-    async def test_asset_not_found_returns_404(self, mock_user, mock_editor_service, mock_asset_service):
+        mock_asset_service.get_asset_image.assert_awaited_once_with(1, "asset-1")
+        assert mock_run_tracked.await_args.kwargs["reference_image_bytes"] == b"asset-bytes"
+        assert result["result_url"] == "s3://bucket/diffusion.jpg"
+
+    async def test_missing_reference_and_asset_id_returns_400(
+        self, mock_user, mock_deps, mock_mljob_service, mock_asset_service
+    ):
+        mask_file = MagicMock(spec=UploadFile)
+
+        with pytest.raises(HTTPException) as exc:
+            await sam_replace_object_diffusion(
+                image_id=1, mask_file=mask_file, reference_file=None, asset_id=None,
+                body=make_diffusion_body(), current_user=mock_user, deps=mock_deps,
+                mljob_service=mock_mljob_service, asset_service=mock_asset_service,
+            )
+
+        assert exc.value.status_code == 400
+
+    async def test_asset_not_found_returns_404(self, mock_user, mock_deps, mock_mljob_service, mock_asset_service):
         mock_asset_service.get_asset_image.return_value = None
         mask_file = MagicMock(spec=UploadFile)
         mask_file.read = AsyncMock(return_value=b"mask-bytes")
 
         with pytest.raises(HTTPException) as exc:
             await sam_replace_object_diffusion(
-                image_id=1,
-                mask_file=mask_file,
-                reference_file=None,
-                asset_id="missing",
-                body=_diffusion_body(),
-                current_user=mock_user,
-                service=mock_editor_service,
-                asset_service=mock_asset_service,
+                image_id=1, mask_file=mask_file, reference_file=None, asset_id="missing",
+                body=make_diffusion_body(), current_user=mock_user, deps=mock_deps,
+                mljob_service=mock_mljob_service, asset_service=mock_asset_service,
             )
 
         assert exc.value.status_code == 404
 
-    async def test_missing_reference_and_asset_id_returns_400(self, mock_user, mock_editor_service, mock_asset_service):
-        mask_file = MagicMock(spec=UploadFile)
-
-        with pytest.raises(HTTPException) as exc:
-            await sam_replace_object_diffusion(
-                image_id=1,
-                mask_file=mask_file,
-                reference_file=None,
-                asset_id=None,
-                body=_diffusion_body(),
-                current_user=mock_user,
-                service=mock_editor_service,
-                asset_service=mock_asset_service,
-            )
-
-        assert exc.value.status_code == 400
-
-    async def test_service_value_error(self, mock_user, mock_editor_service, mock_asset_service):
-        mock_editor_service.sam_replace_object_diffusion.side_effect = ValueError("image not found")
+    async def test_service_value_error(self, mock_user, mock_deps, mock_mljob_service, mock_asset_service):
         mask_file = MagicMock(spec=UploadFile)
         mask_file.read = AsyncMock(return_value=b"mask-bytes")
         reference_file = MagicMock(spec=UploadFile)
         reference_file.read = AsyncMock(return_value=b"reference-bytes")
+        patcher, _ = patched_run_tracked("editing", side_effect=ValueError("image not found"))
 
-        with pytest.raises(HTTPException) as exc:
-            await sam_replace_object_diffusion(
-                image_id=999,
-                mask_file=mask_file,
-                reference_file=reference_file,
-                asset_id=None,
-                body=_diffusion_body(),
-                current_user=mock_user,
-                service=mock_editor_service,
-                asset_service=mock_asset_service,
-            )
+        with patcher:
+            with pytest.raises(HTTPException) as exc:
+                await sam_replace_object_diffusion(
+                    image_id=999, mask_file=mask_file, reference_file=reference_file, asset_id=None,
+                    body=make_diffusion_body(), current_user=mock_user, deps=mock_deps,
+                    mljob_service=mock_mljob_service, asset_service=mock_asset_service,
+                )
 
         assert exc.value.status_code == 404
+
+    async def test_diffusion_runtime_error_returns_502(
+        self, mock_user, mock_deps, mock_mljob_service, mock_asset_service
+    ):
+        mask_file = MagicMock(spec=UploadFile)
+        mask_file.read = AsyncMock(return_value=b"mask-bytes")
+        reference_file = MagicMock(spec=UploadFile)
+        reference_file.read = AsyncMock(return_value=b"reference-bytes")
+        patcher, _ = patched_run_tracked("editing", side_effect=RuntimeError("NaN in output"))
+
+        with patcher:
+            with pytest.raises(HTTPException) as exc:
+                await sam_replace_object_diffusion(
+                    image_id=1, mask_file=mask_file, reference_file=reference_file, asset_id=None,
+                    body=make_diffusion_body(), current_user=mock_user, deps=mock_deps,
+                    mljob_service=mock_mljob_service, asset_service=mock_asset_service,
+                )
+
+        assert exc.value.status_code == 502
 
 
 @pytest.mark.unit
@@ -523,14 +528,9 @@ class TestSamReplaceObjectDiffusionAsync:
         reference_file.read = AsyncMock(return_value=b"reference-bytes")
 
         result = await sam_replace_object_diffusion_async(
-            image_id=1,
-            mask_file=mask_file,
-            reference_file=reference_file,
-            asset_id=None,
-            body=_diffusion_body(),
-            current_user=mock_user,
-            asset_service=mock_asset_service,
-            pool=mock_pool,
+            image_id=1, mask_file=mask_file, reference_file=reference_file, asset_id=None,
+            body=make_diffusion_body(), current_user=mock_user,
+            asset_service=mock_asset_service, pool=mock_pool,
         )
 
         mock_pool.enqueue_job.assert_awaited_once()
@@ -545,14 +545,9 @@ class TestSamReplaceObjectDiffusionAsync:
 
         with pytest.raises(HTTPException) as exc:
             await sam_replace_object_diffusion_async(
-                image_id=1,
-                mask_file=mask_file,
-                reference_file=None,
-                asset_id=None,
-                body=_diffusion_body(),
-                current_user=mock_user,
-                asset_service=mock_asset_service,
-                pool=mock_pool,
+                image_id=1, mask_file=mask_file, reference_file=None, asset_id=None,
+                body=make_diffusion_body(), current_user=mock_user,
+                asset_service=mock_asset_service, pool=mock_pool,
             )
 
         assert exc.value.status_code == 400
@@ -565,14 +560,9 @@ class TestSamReplaceObjectDiffusionAsync:
 
         with pytest.raises(HTTPException) as exc:
             await sam_replace_object_diffusion_async(
-                image_id=1,
-                mask_file=mask_file,
-                reference_file=None,
-                asset_id="missing",
-                body=_diffusion_body(),
-                current_user=mock_user,
-                asset_service=mock_asset_service,
-                pool=mock_pool,
+                image_id=1, mask_file=mask_file, reference_file=None, asset_id="missing",
+                body=make_diffusion_body(), current_user=mock_user,
+                asset_service=mock_asset_service, pool=mock_pool,
             )
 
         assert exc.value.status_code == 404
@@ -586,29 +576,50 @@ class TestSamReplaceObjectDiffusionAsync:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestReplaceObject:
-    async def test_success(self, mock_user, mock_editor_service, mock_file):
-        body = ReplaceRequest(color_match_method="histogram", expand_mask_pixels=12)
-
-        result = await replace_object(
-            image_id=1, bbox_id=1, replacement_file=mock_file, body=body,
-            current_user=mock_user, service=mock_editor_service,
+    async def test_success(self, mock_user, mock_deps, mock_mljob_service, mock_file):
+        body = make_body(
+            expand_mask_pixels=12, use_color_matching=True, use_edge_blending=False,
+            color_match_method="histogram", ldm=make_ldm(),
+        )
+        patcher, mock_run_tracked = patched_run_tracked(
+            "editing", return_value={"result_url": "s3://bucket/result.jpg"}
         )
 
+        with patcher:
+            result = await replace_object(
+                image_id=1, bbox_id=1, replacement_file=mock_file, body=body,
+                current_user=mock_user, deps=mock_deps, mljob_service=mock_mljob_service,
+            )
+
         mock_file.read.assert_awaited_once()
-        _, kwargs = mock_editor_service.replace_object.await_args
-        assert kwargs["replace_image_bytes"] == b"image-bytes"
-        assert kwargs["color_match_method"] == "histogram"
-        assert kwargs["expand_mask_pixels"] == 12
+        mock_run_tracked.assert_awaited_once_with(
+            EditingService, mock_deps, mock_mljob_service, "replace_object",
+            1, 1, MLTaskType.REPLACE_OBJECT,
+            bbox_id=1,
+            replace_image_bytes=b"image-bytes",
+            expand_mask_pixels=12,
+            use_color_matching=True,
+            use_edge_blending=False,
+            color_match_method="histogram",
+            ldm_steps=25,
+            ldm_sampler="plms",
+            hd_strategy="CROP",
+        )
         assert result["result_url"] == "s3://bucket/result.jpg"
 
-    async def test_generic_error_returns_400(self, mock_user, mock_editor_service, mock_file):
-        mock_editor_service.replace_object.side_effect = ValueError("invalid replacement image")
+    async def test_generic_error_returns_400(self, mock_user, mock_deps, mock_mljob_service, mock_file):
+        body = make_body(
+            expand_mask_pixels=5, use_color_matching=False, use_edge_blending=False,
+            color_match_method="color_transfer", ldm=make_ldm(),
+        )
+        patcher, _ = patched_run_tracked("editing", side_effect=ValueError("invalid replacement image"))
 
-        with pytest.raises(HTTPException) as exc:
-            await replace_object(
-                image_id=1, bbox_id=1, replacement_file=mock_file, body=ReplaceRequest(),
-                current_user=mock_user, service=mock_editor_service,
-            )
+        with patcher:
+            with pytest.raises(HTTPException) as exc:
+                await replace_object(
+                    image_id=1, bbox_id=1, replacement_file=mock_file, body=body,
+                    current_user=mock_user, deps=mock_deps, mljob_service=mock_mljob_service,
+                )
 
         assert exc.value.status_code == 400
 
@@ -617,11 +628,9 @@ class TestReplaceObject:
 @pytest.mark.asyncio
 class TestReplaceObjectAsync:
     async def test_reads_file_and_enqueues_job(self, mock_user, mock_pool, mock_file):
-        body = ReplaceRequest(
-            expand_mask_pixels=15,
-            use_color_matching=True,
-            use_edge_blending=True,
-            color_match_method="histogram",
+        body = make_body(
+            expand_mask_pixels=15, use_color_matching=True, use_edge_blending=True,
+            color_match_method="histogram", ldm=make_ldm(),
         )
 
         result = await replace_object_async(
@@ -641,31 +650,31 @@ class TestReplaceObjectAsync:
             use_edge_blending=True,
             color_match_method="histogram",
             ldm_steps=25,
-            ldm_sampler='plms',
-            hd_strategy='CROP',
+            ldm_sampler="plms",
+            hd_strategy="CROP",
             _trace_carrier=ANY,
         )
         assert result == {"job_id": "job-123"}
 
 
 # ---------------------------------------------------------------------------
-# editing.py - state management
+# session.py - working-state management
 # ---------------------------------------------------------------------------
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestGetCurrentState:
-    async def test_success(self, mock_user, mock_editor_service):
-        result = await get_current_state(image_id=1, current_user=mock_user, service=mock_editor_service)
+    async def test_success(self, mock_user, mock_version_history_service):
+        result = await get_current_state(image_id=1, current_user=mock_user, service=mock_version_history_service)
 
-        mock_editor_service.get_current_state.assert_awaited_once_with(image_id=1, user_id=1)
+        mock_version_history_service.get_current_state.assert_awaited_once_with(image_id=1, user_id=1)
         assert result["presigned_url"] == "https://presigned.url/current.jpg"
 
-    async def test_not_found(self, mock_user, mock_editor_service):
-        mock_editor_service.get_current_state.side_effect = ValueError("not found")
+    async def test_not_found(self, mock_user, mock_version_history_service):
+        mock_version_history_service.get_current_state.side_effect = ValueError("not found")
 
         with pytest.raises(HTTPException) as exc:
-            await get_current_state(image_id=999, current_user=mock_user, service=mock_editor_service)
+            await get_current_state(image_id=999, current_user=mock_user, service=mock_version_history_service)
 
         assert exc.value.status_code == 404
 
@@ -673,18 +682,17 @@ class TestGetCurrentState:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestResetCurrentState:
-    async def test_success(self, mock_user, mock_editor_service):
-        result = await reset_current_state(image_id=1, current_user=mock_user, service=mock_editor_service)
+    async def test_success(self, mock_user, mock_version_history_service):
+        result = await reset_current_state(image_id=1, current_user=mock_user, service=mock_version_history_service)
 
-        mock_editor_service._get_image_authorized.assert_awaited_once_with(1, 1)
-        mock_editor_service.reset_current_state.assert_awaited_once_with(1)
+        mock_version_history_service.reset_current_state.assert_awaited_once_with(1, 1)
         assert result == {"detail": "State reset to original image"}
 
-    async def test_not_found(self, mock_user, mock_editor_service):
-        mock_editor_service._get_image_authorized.side_effect = ValueError("not found")
+    async def test_not_found(self, mock_user, mock_version_history_service):
+        mock_version_history_service.reset_current_state.side_effect = ValueError("not found")
 
         with pytest.raises(HTTPException) as exc:
-            await reset_current_state(image_id=999, current_user=mock_user, service=mock_editor_service)
+            await reset_current_state(image_id=999, current_user=mock_user, service=mock_version_history_service)
 
         assert exc.value.status_code == 404
 
@@ -692,45 +700,35 @@ class TestResetCurrentState:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestSaveResult:
-    async def test_success(self, mock_user, mock_editor_service):
-        result = await save_result(image_id=1, current_user=mock_user, service=mock_editor_service)
+    async def test_success(self, mock_user, mock_version_history_service):
+        result = await save_result(image_id=1, current_user=mock_user, service=mock_version_history_service)
 
-        mock_editor_service.save_result.assert_awaited_once_with(image_id=1, user_id=1)
+        mock_version_history_service.save_result.assert_awaited_once_with(image_id=1, user_id=1)
         assert result["id"] == 42
 
-    async def test_no_processed_state(self, mock_user, mock_editor_service):
-        mock_editor_service.save_result.side_effect = ValueError(
-            "No processed result to save. Run remove/replace first."
-        )
+    async def test_not_found(self, mock_user, mock_version_history_service):
+        mock_version_history_service.save_result.side_effect = ValueError("not found")
 
         with pytest.raises(HTTPException) as exc:
-            await save_result(image_id=1, current_user=mock_user, service=mock_editor_service)
+            await save_result(image_id=999, current_user=mock_user, service=mock_version_history_service)
 
-        assert exc.value.status_code == 400
-
-    async def test_unauthorized(self, mock_user, mock_editor_service):
-        mock_editor_service.save_result.side_effect = ValueError("unauthorized")
-
-        with pytest.raises(HTTPException) as exc:
-            await save_result(image_id=1, current_user=mock_user, service=mock_editor_service)
-
-        assert exc.value.status_code == 403
+        assert exc.value.status_code == 404
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestUndo:
-    async def test_success(self, mock_user, mock_editor_service):
-        result = await undo(image_id=1, current_user=mock_user, service=mock_editor_service)
+    async def test_success(self, mock_user, mock_version_history_service):
+        result = await undo(image_id=1, current_user=mock_user, service=mock_version_history_service)
 
-        mock_editor_service.undo.assert_awaited_once_with(1, 1)
+        mock_version_history_service.undo.assert_awaited_once_with(1, 1)
         assert result == {"detail": "Undone"}
 
-    async def test_nothing_to_undo(self, mock_user, mock_editor_service):
-        mock_editor_service.undo.side_effect = ValueError("Nothing to undo")
+    async def test_not_found(self, mock_user, mock_version_history_service):
+        mock_version_history_service.undo.side_effect = ValueError("nothing to undo")
 
         with pytest.raises(HTTPException) as exc:
-            await undo(image_id=1, current_user=mock_user, service=mock_editor_service)
+            await undo(image_id=1, current_user=mock_user, service=mock_version_history_service)
 
         assert exc.value.status_code == 400
 
@@ -738,17 +736,17 @@ class TestUndo:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestRedo:
-    async def test_success(self, mock_user, mock_editor_service):
-        result = await redo(image_id=1, current_user=mock_user, service=mock_editor_service)
+    async def test_success(self, mock_user, mock_version_history_service):
+        result = await redo(image_id=1, current_user=mock_user, service=mock_version_history_service)
 
-        mock_editor_service.redo.assert_awaited_once_with(1, 1)
+        mock_version_history_service.redo.assert_awaited_once_with(1, 1)
         assert result == {"detail": "Redone"}
 
-    async def test_nothing_to_redo(self, mock_user, mock_editor_service):
-        mock_editor_service.redo.side_effect = ValueError("Nothing to redo")
+    async def test_not_found(self, mock_user, mock_version_history_service):
+        mock_version_history_service.redo.side_effect = ValueError("nothing to redo")
 
         with pytest.raises(HTTPException) as exc:
-            await redo(image_id=1, current_user=mock_user, service=mock_editor_service)
+            await redo(image_id=1, current_user=mock_user, service=mock_version_history_service)
 
         assert exc.value.status_code == 400
 
@@ -756,20 +754,19 @@ class TestRedo:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestGetHistory:
-    async def test_success(self, mock_user, mock_editor_service):
-        mock_editor_service.get_history.return_value = {"history": ["remove bbox_id=0"]}
+    async def test_success(self, mock_user, mock_version_history_service):
+        result = await get_history(image_id=1, current_user=mock_user, service=mock_version_history_service)
 
-        result = await get_history(image_id=1, current_user=mock_user, service=mock_editor_service)
+        mock_version_history_service.get_history.assert_awaited_once_with(1, 1)
+        assert result == {"history": []}
 
-        assert result == {"history": ["remove bbox_id=0"]}
-
-    async def test_unauthorized(self, mock_user, mock_editor_service):
-        mock_editor_service.get_history.side_effect = ValueError("unauthorized")
+    async def test_not_found(self, mock_user, mock_version_history_service):
+        mock_version_history_service.get_history.side_effect = ValueError("not found")
 
         with pytest.raises(HTTPException) as exc:
-            await get_history(image_id=1, current_user=mock_user, service=mock_editor_service)
+            await get_history(image_id=999, current_user=mock_user, service=mock_version_history_service)
 
-        assert exc.value.status_code == 403
+        assert exc.value.status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -779,27 +776,34 @@ class TestGetHistory:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestSegmentObjects:
-    async def test_success(self, mock_user, mock_segmentation_service):
-        body = SegmentRequest(min_area=200, max_segments=20)
+    async def test_success(self, mock_user, mock_deps, mock_mljob_service):
+        body = make_body(min_area=100, max_segments=50)
+        patcher, mock_run_tracked = patched_run_tracked("segmentation", return_value={"segments": []})
 
-        await segment_objects(image_id=1, body=body, current_user=mock_user, service=mock_segmentation_service)
+        with patcher:
+            result = await segment_objects(
+                image_id=1, body=body, current_user=mock_user,
+                deps=mock_deps, mljob_service=mock_mljob_service,
+            )
 
-        mock_segmentation_service.segment_objects.assert_awaited_once_with(
-            image_id=1, user_id=1, min_area=200, max_segments=20
+        mock_run_tracked.assert_awaited_once_with(
+            SegmentationService, mock_deps, mock_mljob_service, "segment_objects",
+            1, 1, MLTaskType.SEGMENTATION,
+            min_area=100,
+            max_segments=50,
         )
+        assert result == {"segments": []}
 
-    async def test_default_body(self, mock_user, mock_segmentation_service):
-        await segment_objects(image_id=1, current_user=mock_user, service=mock_segmentation_service)
+    async def test_not_found(self, mock_user, mock_deps, mock_mljob_service):
+        body = make_body(min_area=100, max_segments=50)
+        patcher, _ = patched_run_tracked("segmentation", side_effect=ValueError("not found"))
 
-        mock_segmentation_service.segment_objects.assert_awaited_once_with(
-            image_id=1, user_id=1, min_area=500, max_segments=50
-        )
-
-    async def test_not_found(self, mock_user, mock_segmentation_service):
-        mock_segmentation_service.segment_objects.side_effect = ValueError("image not found")
-
-        with pytest.raises(HTTPException) as exc:
-            await segment_objects(image_id=999, current_user=mock_user, service=mock_segmentation_service)
+        with patcher:
+            with pytest.raises(HTTPException) as exc:
+                await segment_objects(
+                    image_id=999, body=body, current_user=mock_user,
+                    deps=mock_deps, mljob_service=mock_mljob_service,
+                )
 
         assert exc.value.status_code == 404
 
@@ -807,61 +811,80 @@ class TestSegmentObjects:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestSegmentObjectsAsync:
-    async def test_enqueues_job_default_body(self, mock_user, mock_pool):
-        result = await segment_objects_async(image_id=1, current_user=mock_user, pool=mock_pool)
+    async def test_enqueues_job(self, mock_user, mock_pool):
+        body = make_body(min_area=100, max_segments=50)
+
+        result = await segment_objects_async(image_id=1, body=body, current_user=mock_user, pool=mock_pool)
 
         mock_pool.enqueue_job.assert_awaited_once_with(
-            "segment_objects_task", image_id=1, user_id=1, min_area=500, max_segments=50, _trace_carrier=ANY,
+            "segment_objects_task",
+            image_id=1,
+            user_id=1,
+            min_area=100,
+            max_segments=50,
+            _trace_carrier=ANY,
         )
         assert result == {"job_id": "job-123"}
-
-    async def test_enqueues_job_custom_body(self, mock_user, mock_pool):
-        body = SegmentRequest(min_area=100, max_segments=10)
-
-        await segment_objects_async(image_id=1, body=body, current_user=mock_user, pool=mock_pool)
-
-        mock_pool.enqueue_job.assert_awaited_once_with(
-            "segment_objects_task", image_id=1, user_id=1, min_area=100, max_segments=10, _trace_carrier=ANY,
-        )
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestSegmentWithPrompt:
-    async def test_success_with_points(self, mock_user, mock_segmentation_service):
-        body = SegmentWithPromptRequest(point_coords=[(10, 20)], point_labels=[1])
+    async def test_success_with_bbox(self, mock_user, mock_deps, mock_mljob_service):
+        bbox = MagicMock()
+        bbox.model_dump = MagicMock(return_value={"x1": 0, "y1": 0, "x2": 10, "y2": 10})
+        body = make_body(point_coords=[[1, 2]], point_labels=[1], bbox=bbox, multimask_output=True)
+        patcher, mock_run_tracked = patched_run_tracked("segmentation", return_value={"segments": []})
 
-        await segment_with_prompt(image_id=1, body=body, current_user=mock_user, service=mock_segmentation_service)
-
-        mock_segmentation_service.segment_with_prompt.assert_awaited_once_with(
-            image_id=1, user_id=1, point_coords=[(10, 20)], point_labels=[1], bbox=None, multimask_output=None,
-        )
-
-    async def test_success_with_bbox(self, mock_user, mock_segmentation_service):
-        bbox = BboxSchema(x1=0, y1=0, x2=50, y2=50)
-        body = SegmentWithPromptRequest(bbox=bbox)
-
-        await segment_with_prompt(image_id=1, body=body, current_user=mock_user, service=mock_segmentation_service)
-
-        _, kwargs = mock_segmentation_service.segment_with_prompt.await_args
-        assert kwargs["bbox"] == bbox.model_dump()
-
-    async def test_no_valid_detections(self, mock_user, mock_segmentation_service):
-        mock_segmentation_service.segment_with_prompt.side_effect = ValueError("no valid detections")
-
-        with pytest.raises(HTTPException) as exc:
-            await segment_with_prompt(
-                image_id=1, body=SegmentWithPromptRequest(), current_user=mock_user, service=mock_segmentation_service
+        with patcher:
+            result = await segment_with_prompt(
+                image_id=1, body=body, current_user=mock_user,
+                deps=mock_deps, mljob_service=mock_mljob_service,
             )
 
-        assert exc.value.status_code == 404
+        mock_run_tracked.assert_awaited_once_with(
+            SegmentationService, mock_deps, mock_mljob_service, "segment_with_prompt",
+            1, 1, MLTaskType.SEGMENTATION_PROMPT,
+            point_coords=[[1, 2]],
+            point_labels=[1],
+            bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+            multimask_output=True,
+        )
+        assert result == {"segments": []}
+
+    async def test_success_without_bbox(self, mock_user, mock_deps, mock_mljob_service):
+        body = make_body(point_coords=[[1, 2]], point_labels=[1], bbox=None, multimask_output=False)
+        patcher, mock_run_tracked = patched_run_tracked("segmentation", return_value={"segments": []})
+
+        with patcher:
+            await segment_with_prompt(
+                image_id=1, body=body, current_user=mock_user,
+                deps=mock_deps, mljob_service=mock_mljob_service,
+            )
+
+        assert mock_run_tracked.await_args.kwargs["bbox"] is None
+
+    async def test_unauthorized(self, mock_user, mock_deps, mock_mljob_service):
+        body = make_body(point_coords=[[1, 2]], point_labels=[1], bbox=None, multimask_output=False)
+        patcher, _ = patched_run_tracked("segmentation", side_effect=ValueError("unauthorized"))
+
+        with patcher:
+            with pytest.raises(HTTPException) as exc:
+                await segment_with_prompt(
+                    image_id=1, body=body, current_user=mock_user,
+                    deps=mock_deps, mljob_service=mock_mljob_service,
+                )
+
+        assert exc.value.status_code == 403
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestSegmentWithPromptAsync:
-    async def test_enqueues_job_with_points(self, mock_user, mock_pool):
-        body = SegmentWithPromptRequest(point_coords=[(10, 20)], point_labels=[1])
+    async def test_enqueues_job(self, mock_user, mock_pool):
+        bbox = MagicMock()
+        bbox.model_dump = MagicMock(return_value={"x1": 0, "y1": 0, "x2": 10, "y2": 10})
+        body = make_body(point_coords=[[1, 2]], point_labels=[1], bbox=bbox, multimask_output=True)
 
         result = await segment_with_prompt_async(image_id=1, body=body, current_user=mock_user, pool=mock_pool)
 
@@ -869,62 +892,48 @@ class TestSegmentWithPromptAsync:
             "segment_with_prompt_task",
             image_id=1,
             user_id=1,
-            point_coords=[(10, 20)],
+            point_coords=[[1, 2]],
             point_labels=[1],
-            bbox=None,
-            multimask_output=None,
+            bbox={"x1": 0, "y1": 0, "x2": 10, "y2": 10},
+            multimask_output=True,
             _trace_carrier=ANY,
         )
         assert result == {"job_id": "job-123"}
-
-    async def test_enqueues_job_with_bbox(self, mock_user, mock_pool):
-        bbox = BboxSchema(x1=0, y1=0, x2=50, y2=50)
-        body = SegmentWithPromptRequest(bbox=bbox)
-
-        await segment_with_prompt_async(image_id=1, body=body, current_user=mock_user, pool=mock_pool)
-
-        _, kwargs = mock_pool.enqueue_job.call_args
-        assert kwargs["bbox"] == bbox.model_dump()
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestSegmentByPolygon:
-    async def test_success(self, mock_user, mock_segmentation_service):
-        mock_segmentation_service.segment_by_polygon.return_value = {"segments": []}
-        body = SegmentByPolygonRequest(
-            points=[(0, 0), (10, 0), (10, 10), (0, 10)], smooth=True, smoothing_factor=0.5, feather_px=3,
-        )
+    async def test_success(self, mock_user, mock_deps, mock_mljob_service):
+        body = make_body(points=[[0, 0], [10, 0], [10, 10]], smooth=True, smoothing_factor=0.5, feather_px=3)
+        patcher, mock_run_tracked = patched_run_tracked("segmentation", return_value={"segments": []})
 
-        result = await segment_by_polygon(
-            image_id=1, body=body, current_user=mock_user, service=mock_segmentation_service
-        )
+        with patcher:
+            result = await segment_by_polygon(
+                image_id=1, body=body, current_user=mock_user,
+                deps=mock_deps, mljob_service=mock_mljob_service,
+            )
 
-        mock_segmentation_service.segment_by_polygon.assert_called_once_with(
-            image_id=1,
-            user_id=1,
-            points=[(0, 0), (10, 0), (10, 10), (0, 10)],
+        mock_run_tracked.assert_awaited_once_with(
+            SegmentationService, mock_deps, mock_mljob_service, "segment_by_polygon",
+            1, 1, MLTaskType.SEGMENTATION_POLYGON,
+            points=[[0, 0], [10, 0], [10, 10]],
             smooth=True,
             smoothing_factor=0.5,
             feather_px=3,
         )
         assert result == {"segments": []}
 
-    async def test_not_found(self, mock_user, mock_segmentation_service):
-        mock_segmentation_service.segment_by_polygon.side_effect = ValueError("image not found")
-        body = SegmentByPolygonRequest(points=[(0, 0), (10, 0), (10, 10)])
+    async def test_generic_error_returns_400(self, mock_user, mock_deps, mock_mljob_service):
+        body = make_body(points=[[0, 0]], smooth=False, smoothing_factor=0.0, feather_px=0)
+        patcher, _ = patched_run_tracked("segmentation", side_effect=ValueError("too few points"))
 
-        with pytest.raises(HTTPException) as exc:
-            await segment_by_polygon(image_id=1, body=body, current_user=mock_user, service=mock_segmentation_service)
-
-        assert exc.value.status_code == 404
-
-    async def test_generic_error(self, mock_user, mock_segmentation_service):
-        mock_segmentation_service.segment_by_polygon.side_effect = ValueError("polygon self-intersects")
-        body = SegmentByPolygonRequest(points=[(0, 0), (10, 0), (10, 10)])
-
-        with pytest.raises(HTTPException) as exc:
-            await segment_by_polygon(image_id=1, body=body, current_user=mock_user, service=mock_segmentation_service)
+        with patcher:
+            with pytest.raises(HTTPException) as exc:
+                await segment_by_polygon(
+                    image_id=1, body=body, current_user=mock_user,
+                    deps=mock_deps, mljob_service=mock_mljob_service,
+                )
 
         assert exc.value.status_code == 400
 
@@ -933,9 +942,7 @@ class TestSegmentByPolygon:
 @pytest.mark.asyncio
 class TestSegmentByPolygonAsync:
     async def test_enqueues_job(self, mock_user, mock_pool):
-        body = SegmentByPolygonRequest(
-            points=[(0, 0), (10, 0), (10, 10), (0, 10)], smooth=False, smoothing_factor=0.2, feather_px=0,
-        )
+        body = make_body(points=[[0, 0], [10, 0], [10, 10]], smooth=True, smoothing_factor=0.5, feather_px=3)
 
         result = await segment_by_polygon_async(image_id=1, body=body, current_user=mock_user, pool=mock_pool)
 
@@ -943,10 +950,10 @@ class TestSegmentByPolygonAsync:
             "segment_by_polygon_task",
             image_id=1,
             user_id=1,
-            points=[(0, 0), (10, 0), (10, 10), (0, 10)],
-            smooth=False,
-            smoothing_factor=0.2,
-            feather_px=0,
+            points=[[0, 0], [10, 0], [10, 10]],
+            smooth=True,
+            smoothing_factor=0.5,
+            feather_px=3,
             _trace_carrier=ANY,
         )
         assert result == {"job_id": "job-123"}
@@ -955,60 +962,54 @@ class TestSegmentByPolygonAsync:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestSegmentHybrid:
-    async def test_success_custom_body(self, mock_user, mock_segmentation_service):
-        mock_segmentation_service.segment_hybrid.return_value = {"segments": []}
-        body = SegmentHybridRequest(
-            yolo_conf_threshold=0.4,
-            yolo_classes=["person", "car"],
-            fallback_min_area=200,
-            fallback_max_segments=20,
-            overlap_iou_thresh=0.3,
+    async def test_success(self, mock_user, mock_deps, mock_mljob_service):
+        body = make_body(
+            yolo_conf_threshold=0.6, yolo_classes=["person"],
+            fallback_min_area=200, fallback_max_segments=30, overlap_iou_thresh=0.4,
         )
+        patcher, mock_run_tracked = patched_run_tracked("segmentation", return_value={"segments": []})
 
-        result = await segment_hybrid(image_id=1, body=body, current_user=mock_user, service=mock_segmentation_service)
+        with patcher:
+            result = await segment_hybrid(
+                image_id=1, body=body, current_user=mock_user,
+                deps=mock_deps, mljob_service=mock_mljob_service,
+            )
 
-        mock_segmentation_service.segment_hybrid.assert_called_once_with(
-            image_id=1,
-            user_id=1,
-            yolo_conf_threshold=0.4,
-            yolo_classes=["person", "car"],
+        mock_run_tracked.assert_awaited_once_with(
+            SegmentationService, mock_deps, mock_mljob_service, "segment_hybrid",
+            1, 1, MLTaskType.SEGMENTATION_HYBRID,
+            yolo_conf_threshold=0.6,
+            yolo_classes=["person"],
             fallback_min_area=200,
-            fallback_max_segments=20,
-            overlap_iou_thresh=0.3,
+            fallback_max_segments=30,
+            overlap_iou_thresh=0.4,
         )
         assert result == {"segments": []}
 
-    async def test_not_found(self, mock_user, mock_segmentation_service):
-        mock_segmentation_service.segment_hybrid.side_effect = ValueError("image not found")
+    async def test_not_found(self, mock_user, mock_deps, mock_mljob_service):
+        body = make_body(
+            yolo_conf_threshold=0.5, yolo_classes=None,
+            fallback_min_area=100, fallback_max_segments=50, overlap_iou_thresh=0.3,
+        )
+        patcher, _ = patched_run_tracked("segmentation", side_effect=ValueError("not found"))
 
-        with pytest.raises(HTTPException) as exc:
-            await segment_hybrid(
-                image_id=1, body=SegmentHybridRequest(), current_user=mock_user, service=mock_segmentation_service
-            )
+        with patcher:
+            with pytest.raises(HTTPException) as exc:
+                await segment_hybrid(
+                    image_id=999, body=body, current_user=mock_user,
+                    deps=mock_deps, mljob_service=mock_mljob_service,
+                )
 
         assert exc.value.status_code == 404
-
-    async def test_generic_error(self, mock_user, mock_segmentation_service):
-        mock_segmentation_service.segment_hybrid.side_effect = ValueError("YOLO model failed")
-
-        with pytest.raises(HTTPException) as exc:
-            await segment_hybrid(
-                image_id=1, body=SegmentHybridRequest(), current_user=mock_user, service=mock_segmentation_service
-            )
-
-        assert exc.value.status_code == 400
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestSegmentHybridAsync:
     async def test_enqueues_job(self, mock_user, mock_pool):
-        body = SegmentHybridRequest(
-            yolo_conf_threshold=0.4,
-            yolo_classes=["person"],
-            fallback_min_area=200,
-            fallback_max_segments=20,
-            overlap_iou_thresh=0.3,
+        body = make_body(
+            yolo_conf_threshold=0.6, yolo_classes=["person"],
+            fallback_min_area=200, fallback_max_segments=30, overlap_iou_thresh=0.4,
         )
 
         result = await segment_hybrid_async(image_id=1, body=body, current_user=mock_user, pool=mock_pool)
@@ -1017,11 +1018,11 @@ class TestSegmentHybridAsync:
             "segment_hybrid_task",
             image_id=1,
             user_id=1,
-            yolo_conf_threshold=0.4,
+            yolo_conf_threshold=0.6,
             yolo_classes=["person"],
             fallback_min_area=200,
-            fallback_max_segments=20,
-            overlap_iou_thresh=0.3,
+            fallback_max_segments=30,
+            overlap_iou_thresh=0.4,
             _trace_carrier=ANY,
         )
         assert result == {"job_id": "job-123"}
@@ -1034,20 +1035,40 @@ class TestSegmentHybridAsync:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestSamRemoveObject:
-    async def test_success_default_body(self, mock_user, mock_segmentation_service):
-        await sam_remove_object(image_id=1, mask_id=3, current_user=mock_user, service=mock_segmentation_service)
-
-        mock_segmentation_service.sam_remove_object.assert_awaited_once_with(
-            image_id=1, mask_id=3, user_id=1,
-            expand_mask_pixels=12, use_edge_blending=False,
-            ldm_steps=25, ldm_sampler='plms', hd_strategy='CROP',
+    async def test_success(self, mock_user, mock_deps, mock_mljob_service):
+        body = make_body(expand_mask_pixels=8, use_edge_blending=True, ldm=make_ldm())
+        patcher, mock_run_tracked = patched_run_tracked(
+            "sam_ops", return_value={"result_url": "s3://bucket/result.jpg"}
         )
 
-    async def test_mask_not_found(self, mock_user, mock_segmentation_service):
-        mock_segmentation_service.sam_remove_object.side_effect = ValueError("mask not found")
+        with patcher:
+            result = await sam_remove_object(
+                image_id=1, mask_id=3, body=body, current_user=mock_user,
+                deps=mock_deps, mljob_service=mock_mljob_service,
+            )
 
-        with pytest.raises(HTTPException) as exc:
-            await sam_remove_object(image_id=1, mask_id=999, current_user=mock_user, service=mock_segmentation_service)
+        mock_run_tracked.assert_awaited_once_with(
+            SegmentationService, mock_deps, mock_mljob_service, "sam_remove_object",
+            1, 1, MLTaskType.SAM_REMOVE_OBJECT,
+            mask_id=3,
+            expand_mask_pixels=8,
+            use_edge_blending=True,
+            ldm_steps=25,
+            ldm_sampler="plms",
+            hd_strategy="CROP",
+        )
+        assert result["result_url"] == "s3://bucket/result.jpg"
+
+    async def test_not_found(self, mock_user, mock_deps, mock_mljob_service):
+        body = make_body(expand_mask_pixels=5, use_edge_blending=False, ldm=make_ldm())
+        patcher, _ = patched_run_tracked("sam_ops", side_effect=ValueError("mask not found"))
+
+        with patcher:
+            with pytest.raises(HTTPException) as exc:
+                await sam_remove_object(
+                    image_id=1, mask_id=999, body=body, current_user=mock_user,
+                    deps=mock_deps, mljob_service=mock_mljob_service,
+                )
 
         assert exc.value.status_code == 404
 
@@ -1055,19 +1076,23 @@ class TestSamRemoveObject:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestSamRemoveObjectAsync:
-    async def test_enqueues_job_default_body(self, mock_user, mock_pool):
-        result = await sam_remove_object_async(image_id=1, mask_id=3, current_user=mock_user, pool=mock_pool)
+    async def test_enqueues_job(self, mock_user, mock_pool):
+        body = make_body(expand_mask_pixels=8, use_edge_blending=True, ldm=make_ldm())
+
+        result = await sam_remove_object_async(
+            image_id=1, mask_id=3, body=body, current_user=mock_user, pool=mock_pool,
+        )
 
         mock_pool.enqueue_job.assert_awaited_once_with(
             "sam_remove_object_task",
             image_id=1,
             mask_id=3,
             user_id=1,
-            expand_mask_pixels=12,
-            use_edge_blending=False,
+            expand_mask_pixels=8,
+            use_edge_blending=True,
             ldm_steps=25,
-            ldm_sampler='plms',
-            hd_strategy='CROP',
+            ldm_sampler="plms",
+            hd_strategy="CROP",
             _trace_carrier=ANY,
         )
         assert result == {"job_id": "job-123"}
@@ -1076,62 +1101,100 @@ class TestSamRemoveObjectAsync:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestSamReplaceObject:
-    async def test_success_with_file(self, mock_user, mock_segmentation_service, mock_asset_service, mock_file):
-        result = await sam_replace_object(
-            image_id=1, mask_id=3, replacement_file=mock_file, asset_id=None,
-            body=SamReplaceRequest(), current_user=mock_user,
-            service=mock_segmentation_service, asset_service=mock_asset_service,
+    async def test_success_with_replacement_file(self, mock_user, mock_deps, mock_mljob_service, mock_asset_service, mock_file):
+        body = make_body(
+            expand_mask_pixels=5, use_color_matching=True, use_edge_blending=False,
+            color_match_method="color_transfer", ldm=make_ldm(),
         )
+        patcher, mock_run_tracked = patched_run_tracked(
+            "sam_ops", return_value={"result_url": "s3://bucket/result.jpg"}
+        )
+
+        with patcher:
+            result = await sam_replace_object(
+                image_id=1, mask_id=3, replacement_file=mock_file, asset_id=None, body=body,
+                current_user=mock_user, deps=mock_deps, mljob_service=mock_mljob_service,
+                asset_service=mock_asset_service,
+            )
 
         mock_file.read.assert_awaited_once()
-        _, kwargs = mock_segmentation_service.sam_replace_object.await_args
-        assert kwargs["replacement_image_bytes"] == b"image-bytes"
-        assert kwargs["replacement_is_cutout"] is False
+        mock_run_tracked.assert_awaited_once_with(
+            SegmentationService, mock_deps, mock_mljob_service, "sam_replace_object",
+            1, 1, MLTaskType.SAM_REPLACE_OBJECT,
+            mask_id=3,
+            replacement_image_bytes=b"image-bytes",
+            expand_mask_pixels=5,
+            use_color_matching=True,
+            use_edge_blending=False,
+            color_match_method="color_transfer",
+            ldm_steps=25,
+            ldm_sampler="plms",
+            hd_strategy="CROP",
+            replacement_is_cutout=False,
+        )
         assert result["result_url"] == "s3://bucket/result.jpg"
 
-    async def test_success_with_asset_id(self, mock_user, mock_segmentation_service, mock_asset_service):
-        await sam_replace_object(
-            image_id=1, mask_id=3, replacement_file=None, asset_id="asset-1",
-            body=SamReplaceRequest(), current_user=mock_user,
-            service=mock_segmentation_service, asset_service=mock_asset_service,
+    async def test_success_with_asset_id(self, mock_user, mock_deps, mock_mljob_service, mock_asset_service):
+        body = make_body(
+            expand_mask_pixels=5, use_color_matching=False, use_edge_blending=False,
+            color_match_method="color_transfer", ldm=make_ldm(),
+        )
+        patcher, mock_run_tracked = patched_run_tracked(
+            "sam_ops", return_value={"result_url": "s3://bucket/result.jpg"}
         )
 
-        _, kwargs = mock_segmentation_service.sam_replace_object.await_args
-        assert kwargs["replacement_image_bytes"] == b"asset-bytes"
-        assert kwargs["replacement_is_cutout"] is True
+        with patcher:
+            await sam_replace_object(
+                image_id=1, mask_id=3, replacement_file=None, asset_id="asset-1", body=body,
+                current_user=mock_user, deps=mock_deps, mljob_service=mock_mljob_service,
+                asset_service=mock_asset_service,
+            )
 
-    async def test_asset_not_found_returns_404(self, mock_user, mock_segmentation_service, mock_asset_service):
+        mock_asset_service.get_asset_image.assert_awaited_once_with(1, "asset-1")
+        assert mock_run_tracked.await_args.kwargs["replacement_image_bytes"] == b"asset-bytes"
+        assert mock_run_tracked.await_args.kwargs["replacement_is_cutout"] is True
+
+    async def test_missing_replacement_and_asset_id_returns_400(
+        self, mock_user, mock_deps, mock_mljob_service, mock_asset_service
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await sam_replace_object(
+                image_id=1, mask_id=3, replacement_file=None, asset_id=None,
+                body=make_body(expand_mask_pixels=5, use_color_matching=False, use_edge_blending=False,
+                                color_match_method="color_transfer", ldm=make_ldm()),
+                current_user=mock_user, deps=mock_deps, mljob_service=mock_mljob_service,
+                asset_service=mock_asset_service,
+            )
+
+        assert exc.value.status_code == 400
+
+    async def test_asset_not_found_returns_404(self, mock_user, mock_deps, mock_mljob_service, mock_asset_service):
         mock_asset_service.get_asset_image.return_value = None
 
         with pytest.raises(HTTPException) as exc:
             await sam_replace_object(
                 image_id=1, mask_id=3, replacement_file=None, asset_id="missing",
-                body=SamReplaceRequest(), current_user=mock_user,
-                service=mock_segmentation_service, asset_service=mock_asset_service,
+                body=make_body(expand_mask_pixels=5, use_color_matching=False, use_edge_blending=False,
+                                color_match_method="color_transfer", ldm=make_ldm()),
+                current_user=mock_user, deps=mock_deps, mljob_service=mock_mljob_service,
+                asset_service=mock_asset_service,
             )
 
         assert exc.value.status_code == 404
-
-    async def test_missing_file_and_asset_id_returns_400(self, mock_user, mock_segmentation_service, mock_asset_service):
-        with pytest.raises(HTTPException) as exc:
-            await sam_replace_object(
-                image_id=1, mask_id=3, replacement_file=None, asset_id=None,
-                body=SamReplaceRequest(), current_user=mock_user,
-                service=mock_segmentation_service, asset_service=mock_asset_service,
-            )
-
-        assert exc.value.status_code == 400
-        assert exc.value.detail == "Provide replacement_file or asset_id"
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestSamReplaceObjectAsync:
-    async def test_enqueues_job_with_file(self, mock_user, mock_pool, mock_file, mock_asset_service):
+    async def test_enqueues_job_with_replacement_file(self, mock_user, mock_pool, mock_asset_service, mock_file):
+        body = make_body(
+            expand_mask_pixels=5, use_color_matching=True, use_edge_blending=False,
+            color_match_method="color_transfer", ldm=make_ldm(),
+        )
+
         result = await sam_replace_object_async(
-            image_id=1, mask_id=3, replacement_file=mock_file, asset_id=None,
-            body=SamReplaceRequest(), current_user=mock_user,
-            asset_service=mock_asset_service, pool=mock_pool,
+            image_id=1, mask_id=3, replacement_file=mock_file, asset_id=None, body=body,
+            current_user=mock_user, asset_service=mock_asset_service, pool=mock_pool,
         )
 
         mock_file.read.assert_awaited_once()
@@ -1141,31 +1204,29 @@ class TestSamReplaceObjectAsync:
             mask_id=3,
             replacement_image_bytes=b"image-bytes",
             user_id=1,
-            expand_mask_pixels=8,
-            use_color_matching=False,
+            expand_mask_pixels=5,
+            use_color_matching=True,
             use_edge_blending=False,
-            color_match_method='color_transfer',
+            color_match_method="color_transfer",
             ldm_steps=25,
-            ldm_sampler='plms',
-            hd_strategy='CROP',
+            ldm_sampler="plms",
+            hd_strategy="CROP",
             replacement_is_cutout=False,
             _trace_carrier=ANY,
         )
         assert result == {"job_id": "job-123"}
 
-    async def test_enqueues_job_with_asset_id(self, mock_user, mock_pool, mock_asset_service):
-        mock_asset_service.get_asset_image.return_value = b"asset-bytes"
+    async def test_missing_replacement_and_asset_id_returns_400(self, mock_user, mock_pool, mock_asset_service):
+        with pytest.raises(HTTPException) as exc:
+            await sam_replace_object_async(
+                image_id=1, mask_id=3, replacement_file=None, asset_id=None,
+                body=make_body(expand_mask_pixels=5, use_color_matching=False, use_edge_blending=False,
+                                color_match_method="color_transfer", ldm=make_ldm()),
+                current_user=mock_user, asset_service=mock_asset_service, pool=mock_pool,
+            )
 
-        await sam_replace_object_async(
-            image_id=1, mask_id=3, replacement_file=None, asset_id="asset-1",
-            body=SamReplaceRequest(), current_user=mock_user,
-            asset_service=mock_asset_service, pool=mock_pool,
-        )
-
-        mock_asset_service.get_asset_image.assert_awaited_once_with(1, "asset-1")
-        _, kwargs = mock_pool.enqueue_job.call_args
-        assert kwargs["replacement_image_bytes"] == b"asset-bytes"
-        assert kwargs["replacement_is_cutout"] is True
+        assert exc.value.status_code == 400
+        mock_pool.enqueue_job.assert_not_awaited()
 
     async def test_asset_not_found_returns_404(self, mock_user, mock_pool, mock_asset_service):
         mock_asset_service.get_asset_image.return_value = None
@@ -1173,51 +1234,50 @@ class TestSamReplaceObjectAsync:
         with pytest.raises(HTTPException) as exc:
             await sam_replace_object_async(
                 image_id=1, mask_id=3, replacement_file=None, asset_id="missing",
-                body=SamReplaceRequest(), current_user=mock_user,
-                asset_service=mock_asset_service, pool=mock_pool,
+                body=make_body(expand_mask_pixels=5, use_color_matching=False, use_edge_blending=False,
+                                color_match_method="color_transfer", ldm=make_ldm()),
+                current_user=mock_user, asset_service=mock_asset_service, pool=mock_pool,
             )
 
         assert exc.value.status_code == 404
-        mock_pool.enqueue_job.assert_not_awaited()
-
-    async def test_missing_file_and_asset_id_returns_400(self, mock_user, mock_pool, mock_asset_service):
-        with pytest.raises(HTTPException) as exc:
-            await sam_replace_object_async(
-                image_id=1, mask_id=3, replacement_file=None, asset_id=None,
-                body=SamReplaceRequest(), current_user=mock_user,
-                asset_service=mock_asset_service, pool=mock_pool,
-            )
-
-        assert exc.value.status_code == 400
-        assert exc.value.detail == "Provide replacement_file or asset_id"
         mock_pool.enqueue_job.assert_not_awaited()
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestExtractObject:
-    async def test_success(self, mock_user, mock_asset_service):
-        body = ExtractRequest(padding_pixels=20)
-
-        result = await extract_object(image_id=1, mask_id=3, body=body, current_user=mock_user, service=mock_asset_service)
-
-        mock_asset_service.extract_object.assert_awaited_once_with(
-            image_id=1, mask_id=3, user_id=1, padding_pixels=20, label=None, persist_to_s3=False,
-        )
-        assert result["extracted_url"] == "s3://bucket/obj.png"
-
-    async def test_default_body(self, mock_user, mock_asset_service):
-        await extract_object(image_id=1, mask_id=3, current_user=mock_user, service=mock_asset_service)
-
-        mock_asset_service.extract_object.assert_awaited_once_with(
-            image_id=1, mask_id=3, user_id=1, padding_pixels=8, label=None, persist_to_s3=False,
+    async def test_success(self, mock_user, mock_deps, mock_mljob_service):
+        body = make_body(padding_pixels=4, label="cutout", persist_to_s3=True)
+        patcher, mock_run_tracked = patched_run_tracked(
+            "sam_ops", return_value={"asset_id": "asset-1", "extracted_url": "s3://bucket/obj.png"}
         )
 
-    async def test_mask_not_found(self, mock_user, mock_asset_service):
-        mock_asset_service.extract_object.side_effect = ValueError("mask not found")
+        with patcher:
+            result = await extract_object(
+                image_id=1, mask_id=3, body=body, current_user=mock_user,
+                deps=mock_deps, mljob_service=mock_mljob_service,
+            )
 
-        with pytest.raises(HTTPException) as exc:
-            await extract_object(image_id=1, mask_id=999, current_user=mock_user, service=mock_asset_service)
+        mock_run_tracked.assert_awaited_once_with(
+            AssetService, mock_deps, mock_mljob_service, "extract_object",
+            1, 1, MLTaskType.EXTRACT_OBJECT,
+            mask_id=3,
+            padding_pixels=4,
+            label="cutout",
+            persist_to_s3=True,
+        )
+        assert result["asset_id"] == "asset-1"
+
+    async def test_not_found(self, mock_user, mock_deps, mock_mljob_service):
+        body = make_body(padding_pixels=4, label=None, persist_to_s3=False)
+        patcher, _ = patched_run_tracked("sam_ops", side_effect=ValueError("mask not found"))
+
+        with patcher:
+            with pytest.raises(HTTPException) as exc:
+                await extract_object(
+                    image_id=1, mask_id=999, body=body, current_user=mock_user,
+                    deps=mock_deps, mljob_service=mock_mljob_service,
+                )
 
         assert exc.value.status_code == 404
 
@@ -1225,36 +1285,22 @@ class TestExtractObject:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestExtractObjectAsync:
-    async def test_enqueues_job_default_body(self, mock_user, mock_pool):
-        result = await extract_object_async(image_id=1, mask_id=3, current_user=mock_user, pool=mock_pool)
+    async def test_enqueues_job(self, mock_user, mock_pool):
+        body = make_body(padding_pixels=4, label="cutout", persist_to_s3=True)
+
+        result = await extract_object_async(image_id=1, mask_id=3, body=body, current_user=mock_user, pool=mock_pool)
 
         mock_pool.enqueue_job.assert_awaited_once_with(
             "sam_extract_object_task",
             image_id=1,
             mask_id=3,
             user_id=1,
-            padding_pixels=8,
-            label=None,
-            persist_to_s3=False,
-            _trace_carrier=ANY,
-        )
-        assert result == {"job_id": "job-123"}
-
-    async def test_enqueues_job_custom_body(self, mock_user, mock_pool):
-        body = ExtractRequest(padding_pixels=20, label="my-object", persist_to_s3=True)
-
-        await extract_object_async(image_id=1, mask_id=3, body=body, current_user=mock_user, pool=mock_pool)
-
-        mock_pool.enqueue_job.assert_awaited_once_with(
-            "sam_extract_object_task",
-            image_id=1,
-            mask_id=3,
-            user_id=1,
-            padding_pixels=20,
-            label="my-object",
+            padding_pixels=4,
+            label="cutout",
             persist_to_s3=True,
             _trace_carrier=ANY,
         )
+        assert result == {"job_id": "job-123"}
 
 
 # ---------------------------------------------------------------------------
@@ -1264,32 +1310,29 @@ class TestExtractObjectAsync:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestListAssets:
-    async def test_default_pagination(self, mock_user, mock_asset_service):
-        # Calling the endpoint function directly bypasses FastAPI's dependency
-        # injection, so `Query(...)` defaults are never resolved to plain
-        # ints unless we pass the resolved values ourselves.
-        await list_assets(limit=50, offset=0, current_user=mock_user, service=mock_asset_service)
-        mock_asset_service.list_assets.assert_awaited_once_with(1, limit=50, offset=0)
+    async def test_success(self, mock_user, mock_asset_full_service):
+        mock_asset_full_service.list_assets.return_value = [{"asset_id": "a1"}, {"asset_id": "a2"}]
 
-    async def test_custom_pagination(self, mock_user, mock_asset_service):
-        await list_assets(limit=10, offset=5, current_user=mock_user, service=mock_asset_service)
-        mock_asset_service.list_assets.assert_awaited_once_with(1, limit=10, offset=5)
+        result = await list_assets(limit=10, offset=5, current_user=mock_user, service=mock_asset_full_service)
+
+        mock_asset_full_service.list_assets.assert_awaited_once_with(1, limit=10, offset=5)
+        assert len(result) == 2
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestGetAssetThumbnail:
-    async def test_success(self, mock_user, mock_asset_service):
-        result = await get_asset_thumbnail(asset_id="asset-1", current_user=mock_user, service=mock_asset_service)
+    async def test_success(self, mock_user, mock_asset_full_service):
+        result = await get_asset_thumbnail(asset_id="asset-1", current_user=mock_user, service=mock_asset_full_service)
 
         assert result.body == b"thumb-bytes"
         assert result.media_type == "image/png"
 
-    async def test_not_found(self, mock_user, mock_asset_service):
-        mock_asset_service.get_asset_thumbnail.return_value = None
+    async def test_not_found(self, mock_user, mock_asset_full_service):
+        mock_asset_full_service.get_asset_thumbnail.return_value = None
 
         with pytest.raises(HTTPException) as exc:
-            await get_asset_thumbnail(asset_id="missing", current_user=mock_user, service=mock_asset_service)
+            await get_asset_thumbnail(asset_id="missing", current_user=mock_user, service=mock_asset_full_service)
 
         assert exc.value.status_code == 404
 
@@ -1297,16 +1340,17 @@ class TestGetAssetThumbnail:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestGetAssetImage:
-    async def test_success(self, mock_user, mock_asset_service):
-        result = await get_asset_image(asset_id="asset-1", current_user=mock_user, service=mock_asset_service)
+    async def test_success(self, mock_user, mock_asset_full_service):
+        result = await get_asset_image(asset_id="asset-1", current_user=mock_user, service=mock_asset_full_service)
 
         assert result.body == b"asset-bytes"
+        assert result.media_type == "image/png"
 
-    async def test_not_found(self, mock_user, mock_asset_service):
-        mock_asset_service.get_asset_image.return_value = None
+    async def test_not_found(self, mock_user, mock_asset_full_service):
+        mock_asset_full_service.get_asset_image.return_value = None
 
         with pytest.raises(HTTPException) as exc:
-            await get_asset_image(asset_id="missing", current_user=mock_user, service=mock_asset_service)
+            await get_asset_image(asset_id="missing", current_user=mock_user, service=mock_asset_full_service)
 
         assert exc.value.status_code == 404
 
@@ -1314,21 +1358,23 @@ class TestGetAssetImage:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestRenameAsset:
-    async def test_success(self, mock_user, mock_asset_service):
-        body = RenameAssetRequest(label="new-name")
+    async def test_success(self, mock_user, mock_asset_full_service):
+        body = make_body(label="new-name")
 
-        result = await rename_asset(asset_id="asset-1", body=body, current_user=mock_user, service=mock_asset_service)
+        result = await rename_asset(
+            asset_id="asset-1", body=body, current_user=mock_user, service=mock_asset_full_service,
+        )
 
-        mock_asset_service.rename_asset.assert_awaited_once_with(1, "asset-1", "new-name")
+        mock_asset_full_service.rename_asset.assert_awaited_once_with(1, "asset-1", "new-name")
         assert result["label"] == "new-name"
 
-    async def test_not_found(self, mock_user, mock_asset_service):
-        mock_asset_service.rename_asset.side_effect = ValueError("asset not found")
+    async def test_not_found(self, mock_user, mock_asset_full_service):
+        mock_asset_full_service.rename_asset.side_effect = ValueError("asset not found")
 
         with pytest.raises(HTTPException) as exc:
             await rename_asset(
-                asset_id="missing", body=RenameAssetRequest(label="x"),
-                current_user=mock_user, service=mock_asset_service,
+                asset_id="missing", body=make_body(label="x"),
+                current_user=mock_user, service=mock_asset_full_service,
             )
 
         assert exc.value.status_code == 404
@@ -1337,17 +1383,17 @@ class TestRenameAsset:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestDeleteAsset:
-    async def test_success(self, mock_user, mock_asset_service):
-        result = await delete_asset(asset_id="asset-1", current_user=mock_user, service=mock_asset_service)
+    async def test_success(self, mock_user, mock_asset_full_service):
+        result = await delete_asset(asset_id="asset-1", current_user=mock_user, service=mock_asset_full_service)
 
-        mock_asset_service.delete_asset.assert_awaited_once_with(1, "asset-1")
+        mock_asset_full_service.delete_asset.assert_awaited_once_with(1, "asset-1")
         assert result == {"detail": "Asset deleted"}
 
-    async def test_not_found(self, mock_user, mock_asset_service):
-        mock_asset_service.delete_asset.side_effect = ValueError("asset not found")
+    async def test_not_found(self, mock_user, mock_asset_full_service):
+        mock_asset_full_service.delete_asset.side_effect = ValueError("asset not found")
 
         with pytest.raises(HTTPException) as exc:
-            await delete_asset(asset_id="missing", current_user=mock_user, service=mock_asset_service)
+            await delete_asset(asset_id="missing", current_user=mock_user, service=mock_asset_full_service)
 
         assert exc.value.status_code == 404
 
@@ -1355,16 +1401,24 @@ class TestDeleteAsset:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestPasteExtractedObject:
-    async def test_success(self, mock_user, mock_asset_service):
-        body = PasteRequest(
+    async def test_success(self, mock_user, mock_asset_full_service):
+        target_bbox = MagicMock()
+        target_bbox.model_dump = MagicMock(return_value={"x1": 0, "y1": 0, "x2": 50, "y2": 50})
+        body = make_body(
+            asset_id=None,
             extracted_url="s3://bucket/obj.png",
-            target_bbox=BboxSchema(x1=0, y1=0, x2=50, y2=50),
+            target_bbox=target_bbox,
             scale=1.5,
+            use_color_matching=False,
+            use_edge_blending=False,
+            color_match_method="color_transfer",
         )
 
-        result = await paste_extracted_object(image_id=1, body=body, current_user=mock_user, service=mock_asset_service)
+        result = await paste_extracted_object(
+            image_id=1, body=body, current_user=mock_user, service=mock_asset_full_service,
+        )
 
-        mock_asset_service.paste_extracted_object.assert_awaited_once_with(
+        mock_asset_full_service.paste_extracted_object.assert_awaited_once_with(
             image_id=1,
             user_id=1,
             asset_id=None,
@@ -1373,22 +1427,27 @@ class TestPasteExtractedObject:
             scale=1.5,
             use_color_matching=False,
             use_edge_blending=False,
-            color_match_method='color_transfer',
+            color_match_method="color_transfer",
         )
         assert result["result_url"] == "s3://bucket/pasted.jpg"
 
-    async def test_not_found(self, mock_user, mock_asset_service):
-        mock_asset_service.paste_extracted_object.side_effect = ValueError("extracted object not found")
+    async def test_not_found(self, mock_user, mock_asset_full_service):
+        mock_asset_full_service.paste_extracted_object.side_effect = ValueError("extracted object not found")
+        target_bbox = MagicMock()
+        target_bbox.model_dump = MagicMock(return_value={"x1": 0, "y1": 0, "x2": 10, "y2": 10})
+        body = make_body(
+            asset_id=None,
+            extracted_url="s3://bucket/missing.png",
+            target_bbox=target_bbox,
+            scale=1.0,
+            use_color_matching=False,
+            use_edge_blending=False,
+            color_match_method="color_transfer",
+        )
 
         with pytest.raises(HTTPException) as exc:
             await paste_extracted_object(
-                image_id=1,
-                body=PasteRequest(
-                    extracted_url="s3://bucket/missing.png",
-                    target_bbox=BboxSchema(x1=0, y1=0, x2=10, y2=10),
-                ),
-                current_user=mock_user,
-                service=mock_asset_service,
+                image_id=1, body=body, current_user=mock_user, service=mock_asset_full_service,
             )
 
         assert exc.value.status_code == 404

@@ -10,13 +10,19 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def _make_app(db_session):
     from fastapi import FastAPI
-    from app.api.v1.user import router as user_router
-    from app.api.auth.auth import get_current_user
+    from app.api.v1.user import router as user_router, get_user_service
     from app.db.db_connect import get_db
+    from app.services.user_service import UserService
+    from app.repository.user_repo import UserRepository
 
     app = FastAPI()
     app.include_router(user_router)
     app.dependency_overrides[get_db] = lambda: db_session
+
+    def override_service():
+        return UserService(user_repo=UserRepository(db_session))
+
+    app.dependency_overrides[get_user_service] = override_service
     return app
 
 

@@ -4,32 +4,36 @@ from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth.auth import get_current_user
-from app.db.db_connect import get_db
+from app.db.db_connect import get_db_session
 from app.db.models.user import User
 from app.db.schemas.image import ImageResponse
 from app.repository.image_repo import ImageRepository
+from app.repository.image_version_repo import ImageVersionRepository
+from app.repository.image_content_repo import ImageContentRepository
 from app.services.image_service import ImageService
 from app.storage.s3_storage import S3Storage
 from app.storage.redis.redis_storage import RedisStorage
 from app.core.logging import get_logger
 
+
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/images", tags=["Images"])
 
-def get_image_service(db: AsyncSession = Depends(get_db)) -> ImageService:
+def get_image_service() -> ImageService:
     return ImageService(
-        db=db,
         s3=S3Storage(),
         redis_cache=RedisStorage(),
-        image_repo=ImageRepository(db)
+        image_repo=ImageRepository(get_db_session),
+        image_version_repo=ImageVersionRepository(get_db_session),
+        image_content_repo=ImageContentRepository(get_db_session),
     )
 
 @router.post("/upload", response_model=ImageResponse, status_code=201)
 async def upload_image(
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
-    service: ImageService = Depends(get_image_service)
+    service: ImageService = Depends(get_image_service),
 ):
     """Upload image to S3 and save metadata to DB."""
     try:
@@ -46,27 +50,26 @@ async def get_user_images(
     limit: Optional[int] = Query(None, ge=1, le=100),
     offset: Optional[int] = Query(None, ge=0),
     current_user: User = Depends(get_current_user),
-    service: ImageService = Depends(get_image_service)
+    service: ImageService = Depends(get_image_service),
 ):
+
     """Get all images for current user with optional pagination."""
-    images = await service.get_user_image(
+    return await service.get_user_image(
         user_id=current_user.id,
         limit=limit,
-        offset=offset
+        offset=offset,
     )
-    return images
 
 
 @router.get("/{image_id}", response_model=ImageResponse)
 async def get_image(
     image_id: int,
     current_user: User = Depends(get_current_user),
-    service: ImageService = Depends(get_image_service)
+    service: ImageService = Depends(get_image_service),
 ):
     """Get image metadata by ID."""
     try:
-        image = await service.get_image(image_id=image_id, user_id=current_user.id)
-        return image
+        return await service.get_image(image_id=image_id, user_id=current_user.id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -75,18 +78,18 @@ async def get_image(
 async def download_image(
     image_id: int,
     current_user: User = Depends(get_current_user),
-    service: ImageService = Depends(get_image_service)
+    service: ImageService = Depends(get_image_service),
 ):
     """Download image bytes directly from S3."""
     try:
         image_bytes = await service.download_image(
             image_id=image_id,
-            user_id=current_user.id
+            user_id=current_user.id,
         )
         return Response(
             content=image_bytes,
             media_type="image/jpeg",
-            headers={"Content-Disposition": f"attachment; filename={image_id}.jpg"}
+            headers={"Content-Disposition": f"attachment; filename={image_id}.jpg"},
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -97,14 +100,14 @@ async def get_presigned_url(
     image_id: int,
     expiration: int = Query(3600, ge=60, le=86400),
     current_user: User = Depends(get_current_user),
-    service: ImageService = Depends(get_image_service)
+    service: ImageService = Depends(get_image_service),
 ):
     """Get temporary presigned URL for image download."""
     try:
         url = await service.get_presigned_url(
             image_id=image_id,
             user_id=current_user.id,
-            expiration=expiration
+            expiration=expiration,
         )
         return {"url": url, "expires_in": expiration}
     except ValueError as e:
@@ -115,7 +118,7 @@ async def get_presigned_url(
 async def delete_image(
     image_id: int,
     current_user: User = Depends(get_current_user),
-    service: ImageService = Depends(get_image_service)
+    service: ImageService = Depends(get_image_service),
 ):
     """Delete image from S3, Redis cache and DB."""
     try:

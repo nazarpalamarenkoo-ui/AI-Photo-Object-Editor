@@ -13,6 +13,8 @@ def _make_app(db_session, mock_s3, mock_redis):
     from app.db.db_connect import get_db
     from app.services.image_service import ImageService
     from app.repository.image_repo import ImageRepository
+    from app.repository.image_version_repo import ImageVersionRepository
+    from app.repository.image_content_repo import ImageContentRepository
 
     app = FastAPI()
     app.include_router(image_router)
@@ -20,10 +22,11 @@ def _make_app(db_session, mock_s3, mock_redis):
 
     def override_service():
         return ImageService(
-            db=db_session,
             s3=mock_s3,
             redis_cache=mock_redis,
-            image_repo=ImageRepository(db_session)
+            image_repo=ImageRepository(db_session),
+            image_version_repo=ImageVersionRepository(db_session),
+            image_content_repo=ImageContentRepository(db_session),
         )
 
     app.dependency_overrides[get_image_service] = override_service
@@ -37,13 +40,13 @@ def _auth_headers(user):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_upload_image(db_session, sample_user, mock_s3_storage, mock_redis_cache):
+async def test_upload_image(db_session, sample_user, mock_s3_storage, mock_redis_cache, image_bytes):
     app = _make_app(db_session, mock_s3_storage, mock_redis_cache)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
             "/images/upload",
-            files={"file": ("test.jpg", BytesIO(b"fake image"), "image/jpeg")},
+            files={"file": ("test.jpg", BytesIO(image_bytes), "image/jpeg")},
             headers=_auth_headers(sample_user)
         )
 

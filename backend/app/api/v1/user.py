@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth.auth import get_current_user
-from app.db.db_connect import get_db
+from app.db.db_connect import get_db_session
 from app.db.models.user import User
 from app.db.schemas.user import UserResponse, UserUpdate, ChangePassword
 from app.repository.user_repo import UserRepository
@@ -14,8 +14,8 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/users", tags=["Users"])
 
 
-def get_user_service(db: AsyncSession = Depends(get_db)) -> UserService:
-    return UserService(db=db, user_repo=UserRepository(db))
+def get_user_service() -> UserService:
+    return UserService(user_repo=UserRepository(get_db_session))
 
 
 @router.get("/me", response_model=UserResponse)

@@ -1,15 +1,15 @@
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth.auth import get_current_user
-from app.db.db_connect import get_db
+from app.db.db_connect import get_db_session
 from app.db.models.user import User
 from app.db.schemas.detection import DetectionResponse
 from app.repository.detection_repo import DetectionRepository
 from app.repository.image_repo import ImageRepository
+from app.repository.image_version_repo import ImageVersionRepository
 from app.services.detection_service import DetectionService
-from app.storage.redis.redis_storage import RedisStorage
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -17,12 +17,11 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/detections", tags=["Detections"])
 
 
-def get_detection_service(db: AsyncSession = Depends(get_db)) -> DetectionService:
+def get_detection_service() -> DetectionService:
     return DetectionService(
-        db=db,
-        redis_cache=RedisStorage(),
-        detection_repo=DetectionRepository(db),
-        image_repo=ImageRepository(db)
+        detection_repo=DetectionRepository(get_db_session),
+        image_repo=ImageRepository(get_db_session),
+        image_version_repo=ImageVersionRepository(get_db_session),
     )
 
 
@@ -34,16 +33,18 @@ def _status_for(e: ValueError) -> int:
 @router.get("/images/{image_id}", response_model=List[DetectionResponse])
 async def get_image_detections(
     image_id: int,
-    use_cache: bool = True,
+    version_id: Optional[int] = None,
+    active_only: bool = True,
     current_user: User = Depends(get_current_user),
     service: DetectionService = Depends(get_detection_service)
 ):
-    """Get all detections for an image. Tries Redis cache first."""
+    """Get detections for an image's current (or a specific) version."""
     try:
-        return await service.get_image_detections(
+        return await service.get_detections(
             image_id=image_id,
             user_id=current_user.id,
-            use_cache=use_cache
+            version_id=version_id,
+            active_only=active_only,
         )
     except ValueError as e:
         raise HTTPException(status_code=_status_for(e), detail=str(e))
@@ -53,6 +54,7 @@ async def get_image_detections(
 async def get_detection_by_bbox(
     image_id: int,
     bbox_id: int,
+    version_id: Optional[int] = None,
     current_user: User = Depends(get_current_user),
     service: DetectionService = Depends(get_detection_service)
 ):
@@ -61,7 +63,8 @@ async def get_detection_by_bbox(
         return await service.get_detection_by_bbox_id(
             image_id=image_id,
             bbox_id=bbox_id,
-            user_id=current_user.id
+            user_id=current_user.id,
+            version_id=version_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=_status_for(e), detail=str(e))
@@ -89,9 +92,9 @@ async def delete_image_detections(
     current_user: User = Depends(get_current_user),
     service: DetectionService = Depends(get_detection_service)
 ):
-    """Delete all detections for an image and invalidate Redis cache."""
+    """Delete all detections for an image's current version."""
     try:
-        count = await service.delete_image_detections(
+        count = await service.delete_version_detections(
             image_id=image_id,
             user_id=current_user.id
         )

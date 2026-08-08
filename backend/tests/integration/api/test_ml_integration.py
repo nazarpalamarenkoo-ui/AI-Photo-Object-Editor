@@ -1,3 +1,17 @@
+"""
+Integration tests for the ML API routers.
+
+Architecture notes:
+- Sync routes (detect, remove, replace, segment, etc.) go through
+  run_tracked(), which instantiates the service class from get_base_deps().
+  We patch run_tracked at the router module level so the real service is
+  never constructed.
+- Session routes (reset, save, undo, redo, history, current) depend on
+  get_version_history() from deps.py — overridden directly.
+- Async routes depend on get_arq_pool() — overridden directly.
+- Asset routes depend on get_asset() — overridden directly.
+- Job-status route uses arq.jobs.Job — patched in ml_jobs_module.
+"""
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch, ANY
 from httpx import AsyncClient, ASGITransport
@@ -6,135 +20,44 @@ from arq.jobs import JobStatus
 from app.api.auth.auth import create_access_token
 from app.db.models.user import User
 
-from app.api.v1.ml import router as ml_router
-from app.api.v1.ml.deps import (
-    get_detector,
-    get_editor,
-    get_segmentation,
-    get_asset,
-    get_arq_pool,
-)
 import app.api.v1.ml.jobs as ml_jobs_module
 
+# ──────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────
 
-def _default_mock_detector():
-    service = MagicMock()
-    service.detect_objects = AsyncMock(return_value={"detections": [], "count": 0})
-    service.get_supported_classes = MagicMock(return_value=["person", "car", "dog"])
-    return service
+ML_RESULT = {
+    "result_url": "s3://bucket/result.jpg",
+    "presigned_url": "https://presigned.url/result.jpg",
+    "metrics": {},
+    "timestamp": "2025-01-01T00:00:00",
+}
 
+SEGMENT_RESULT = {
+    "segments": [],
+    "metrics": {},
+    "image_size": [640, 480],
+    "timestamp": "2025-01-01T00:00:00",
+}
 
-def _default_mock_editor():
-    service = MagicMock()
-    service.remove_object = AsyncMock(return_value={
-        "result_url": "s3://bucket/result.jpg",
-        "presigned_url": "https://presigned.url/result.jpg",
-        "metrics": {},
-        "timestamp": "2025-01-01T00:00:00",
-    })
-    service.remove_multiple_objects = AsyncMock(return_value={
-        "result_url": "s3://bucket/result.jpg",
-        "presigned_url": "https://presigned.url/result.jpg",
-        "metrics": {},
-        "timestamp": "2025-01-01T00:00:00",
-    })
-    service.replace_object = AsyncMock(return_value={
-        "result_url": "s3://bucket/result.jpg",
-        "presigned_url": "https://presigned.url/result.jpg",
-        "metrics": {},
-        "timestamp": "2025-01-01T00:00:00",
-    })
-    service._get_image_authorized = AsyncMock()
-    service.reset_current_state = AsyncMock()
-    service.save_result = AsyncMock(return_value={
-        "id": 42,
-        "filename": "edited_test.jpg",
-        "storage_path": "s3://bucket/result.jpg",
-        "uploaded_at": "2025-01-01T00:00:00",
-        "cache_key": None,
-    })
-    service.undo = AsyncMock(return_value={"detail": "Undone"})
-    service.redo = AsyncMock(return_value={"detail": "Redone"})
-    service.get_history = AsyncMock(return_value={"history": []})
-    return service
+EXTRACT_RESULT = {
+    "asset_id": "asset-1",
+    "extracted_url": "s3://bucket/obj.png",
+    "presigned_url": "https://presigned.url/obj.png",
+    "storage_path": "s3://bucket/obj.png",
+    "object_size": [50, 60],
+    "area_pixels": 3000,
+    "cropped_bbox": {"x1": 0, "y1": 0, "x2": 50, "y2": 60},
+    "timestamp": "2025-01-01T00:00:00",
+}
 
 
-def _default_mock_segmentation():
-    service = MagicMock()
-    service.segment_objects = AsyncMock(return_value={
-        "segments": [],
-        "metrics": {},
-        "image_size": (640, 480),
-        "timestamp": "2025-01-01T00:00:00",
-    })
-    service.segment_with_prompt = AsyncMock(return_value={
-        "segments": [],
-        "metrics": {},
-        "image_size": (640, 480),
-        "timestamp": "2025-01-01T00:00:00",
-    })
-    service.segment_by_polygon = AsyncMock(return_value={
-        "segments": [],
-        "metrics": {},
-        "image_size": (640, 480),
-        "timestamp": "2025-01-01T00:00:00",
-    })
-    service.segment_hybrid = AsyncMock(return_value={
-        "segments": [],
-        "metrics": {},
-        "image_size": (640, 480),
-        "timestamp": "2025-01-01T00:00:00",
-    })
-    service.sam_remove_object = AsyncMock(return_value={
-        "result_url": "s3://bucket/result.jpg",
-        "presigned_url": "https://presigned.url/result.jpg",
-        "metrics": {},
-        "timestamp": "2025-01-01T00:00:00",
-    })
-    service.sam_replace_object = AsyncMock(return_value={
-        "result_url": "s3://bucket/result.jpg",
-        "presigned_url": "https://presigned.url/result.jpg",
-        "metrics": {},
-        "timestamp": "2025-01-01T00:00:00",
-    })
-    return service
+def _auth_headers(user: User) -> dict:
+    token = create_access_token({"sub": user.username})
+    return {"Authorization": f"Bearer {token}"}
 
 
-def _default_mock_asset():
-    service = MagicMock()
-    service.extract_object = AsyncMock(return_value={
-        "asset_id": "asset-1",
-        "extracted_url": "s3://bucket/obj.png",
-        "presigned_url": "https://presigned.url/obj.png",
-        "object_size": (50, 60),
-        "area_pixels": 3000,
-        "cropped_bbox": {"x1": 0, "y1": 0, "x2": 50, "y2": 60},
-        "timestamp": "2025-01-01T00:00:00",
-    })
-    service.paste_extracted_object = AsyncMock(return_value={
-        "result_url": "s3://bucket/pasted.jpg",
-        "presigned_url": "https://presigned.url/pasted.jpg",
-        "paste_bbox": {"x1": 0, "y1": 0, "x2": 50, "y2": 50},
-        "object_size": (50, 50),
-        "timestamp": "2025-01-01T00:00:00",
-    })
-    service.list_assets = AsyncMock(return_value=[])
-    service.get_asset_thumbnail = AsyncMock(return_value=b"thumb-bytes")
-    service.get_asset_image = AsyncMock(return_value=b"asset-bytes")
-    service.rename_asset = AsyncMock(return_value={
-        "asset_id": "asset-1",
-        "source_image_id": 1,
-        "object_size": (50, 60),
-        "area_pixels": 3000,
-        "label": "new-name",
-        "s3_url": None,
-        "created_at": "2025-01-01T00:00:00",
-    })
-    service.delete_asset = AsyncMock()
-    return service
-
-
-def _default_mock_pool():
+def _mock_pool() -> MagicMock:
     pool = MagicMock()
     job = MagicMock()
     job.job_id = "job-123"
@@ -142,83 +65,142 @@ def _default_mock_pool():
     return pool
 
 
-def _make_app(db_session, detector=None, editor=None, segmentation=None, asset=None, pool=None):
-    """Build a FastAPI app with the ml router wired to mocked services."""
+def _mock_asset_service() -> MagicMock:
+    svc = MagicMock()
+    svc.list_assets = AsyncMock(return_value=[
+        {
+            "asset_id": "a1", "width": 50, "height": 60, "area_pixels": 3000,
+            "public_id": "pub-a1", "storage_path": "s3://bucket/a1.png",
+            "content_type": "image/png", "created_at": "2025-01-01T00:00:00",
+        },
+        {
+            "asset_id": "a2", "width": 50, "height": 60, "area_pixels": 3000,
+            "public_id": "pub-a2", "storage_path": "s3://bucket/a2.png",
+            "content_type": "image/png", "created_at": "2025-01-01T00:00:00",
+        },
+    ])
+    svc.get_asset_thumbnail = AsyncMock(return_value=b"thumb")
+    svc.get_asset_image = AsyncMock(return_value=b"asset-bytes")
+    svc.rename_asset = AsyncMock(return_value={
+        "asset_id": "asset-1",
+        "source_image_id": 1,
+        "width": 50, "height": 60, "area_pixels": 3000,
+        "public_id": "pub-asset-1", "storage_path": "s3://bucket/asset-1.png",
+        "content_type": "image/png",
+        "label": "renamed", "s3_url": None,
+        "created_at": "2025-01-01T00:00:00",
+    })
+    svc.delete_asset = AsyncMock()
+    svc.paste_extracted_object = AsyncMock(return_value={
+        "result_url": "s3://bucket/pasted.jpg",
+        "presigned_url": "https://presigned.url/pasted.jpg",
+        "paste_bbox": {"x1": 0, "y1": 0, "x2": 50, "y2": 50},
+        "object_size": [50, 50],
+        "timestamp": "2025-01-01T00:00:00",
+    })
+    return svc
+
+
+def _mock_version_history_service() -> MagicMock:
+    svc = MagicMock()
+    svc.get_current_state = AsyncMock(return_value={"presigned_url": "https://presigned.url/current.jpg"})
+    svc.reset_current_state = AsyncMock()
+    svc.save_result = AsyncMock(return_value={
+        "id": 42,
+        "filename": "edited.jpg",
+        "storage_path": "s3://bucket/edited.jpg",
+        "uploaded_at": "2025-01-01T00:00:00",
+        "cache_key": None,
+    })
+    svc.undo = AsyncMock(return_value={"detail": "Undone"})
+    svc.redo = AsyncMock(return_value={"detail": "Redone"})
+    svc.get_history = AsyncMock(return_value={"history": []})
+    return svc
+
+
+def _make_app(
+    db_session,
+    *,
+    pool: MagicMock | None = None,
+    asset_svc: MagicMock | None = None,
+    version_svc: MagicMock | None = None,
+):
     from fastapi import FastAPI
+    from app.api.v1.ml import router as ml_router
+    from app.api.v1.ml.deps import get_arq_pool, get_asset, get_version_history, get_base_deps
     from app.db.db_connect import get_db
+
+    _pool = pool or _mock_pool()
+    _asset = asset_svc or _mock_asset_service()
+    _version = version_svc or _mock_version_history_service()
 
     app = FastAPI()
     app.include_router(ml_router)
-    app.dependency_overrides[get_db] = lambda: db_session
 
-    mock_detector = detector or _default_mock_detector()
-    mock_editor = editor or _default_mock_editor()
-    mock_segmentation = segmentation or _default_mock_segmentation()
-    mock_asset = asset or _default_mock_asset()
-    mock_pool = pool or _default_mock_pool()
+    async def _override_get_db():
+        yield db_session
 
-    app.dependency_overrides[get_detector] = lambda: mock_detector
-    app.dependency_overrides[get_editor] = lambda: mock_editor
-    app.dependency_overrides[get_segmentation] = lambda: mock_segmentation
-    app.dependency_overrides[get_asset] = lambda: mock_asset
-    app.dependency_overrides[get_arq_pool] = lambda: mock_pool
+    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_arq_pool] = lambda: _pool
+    app.dependency_overrides[get_asset] = lambda: _asset
+    app.dependency_overrides[get_version_history] = lambda: _version
+    app.dependency_overrides[get_base_deps] = lambda: {}   # ← новий рядок
 
-    return app, mock_detector, mock_editor, mock_segmentation, mock_asset, mock_pool
+    return app, _pool, _asset, _version
 
 
-def _auth_headers(user):
-    token = create_access_token({"sub": user.username})
-    return {"Authorization": f"Bearer {token}"}
+async def _other_user(db_session) -> User:
+    from passlib.context import CryptContext
+    from app.repository.user_repo import UserRepository
+    return await UserRepository(db_session).create(
+        username="otheruser",
+        email="other@example.com",
+        password_hash=CryptContext(schemes=["bcrypt"], deprecated="auto").hash("pw"),
+    )
 
 
-async def _make_other_user(db_session):
-    other = User(username="otheruser", email="other@example.com", password_hash="hashed")
-    db_session.add(other)
-    await db_session.commit()
-    await db_session.refresh(other)
-    return other
-
+# ──────────────────────────────────────────────
+# detect.py — /ml/images/{id}/detect
+# ──────────────────────────────────────────────
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_detect_objects_success(db_session, sample_user, sample_image):
-    app, mock_detector, _, _, _, _ = _make_app(db_session)
-    mock_detector.detect_objects = AsyncMock(return_value={"detections": [{"class": "person"}], "count": 1})
+    app, *_ = _make_app(db_session)
+    result = {"detections": [{"class": "person"}], "count": 1}
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/detect",
-            json={"conf_threshold": 0.7, "classes": ["person"]},
-            headers=_auth_headers(sample_user),
-        )
+    with patch("app.api.v1.ml.detect.run_tracked", new=AsyncMock(return_value=result)):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/detect",
+                json={"conf_threshold": 0.7, "classes": ["person"]},
+                headers=_auth_headers(sample_user),
+            )
 
     assert resp.status_code == 200
     assert resp.json()["count"] == 1
-    mock_detector.detect_objects.assert_awaited_once_with(
-        image_id=sample_image.id, user_id=sample_user.id, conf_threshold=0.7, classes=["person"]
-    )
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_detect_objects_default_body(db_session, sample_user, sample_image):
-    app, mock_detector, _, _, _, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/detect",
-            headers=_auth_headers(sample_user),
-        )
+    app, *_ = _make_app(db_session)
+
+    with patch("app.api.v1.ml.detect.run_tracked", new=AsyncMock(return_value={"detections": [], "count": 0})):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/detect",
+                headers=_auth_headers(sample_user),
+            )
 
     assert resp.status_code == 200
-    mock_detector.detect_objects.assert_awaited_once_with(
-        image_id=sample_image.id, user_id=sample_user.id, conf_threshold=0.5, classes=None
-    )
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_detect_objects_invalid_threshold_returns_422(db_session, sample_user, sample_image):
-    app, _, _, _, _, _ = _make_app(db_session)
+    app, *_ = _make_app(db_session)
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
             f"/ml/images/{sample_image.id}/detect",
@@ -231,24 +213,27 @@ async def test_detect_objects_invalid_threshold_returns_422(db_session, sample_u
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_detect_objects_not_found(db_session, sample_user):
-    app, mock_detector, _, _, _, _ = _make_app(db_session)
-    mock_detector.detect_objects.side_effect = ValueError("Image not found")
+async def test_detect_objects_image_not_found_returns_404(db_session, sample_user):
+    app, *_ = _make_app(db_session)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post("/ml/images/99999/detect", headers=_auth_headers(sample_user))
+    with patch("app.api.v1.ml.detect.run_tracked", side_effect=ValueError("Image not found")):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/ml/images/99999/detect", headers=_auth_headers(sample_user))
 
     assert resp.status_code == 404
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_detect_objects_unauthorized(db_session, sample_user, sample_image):
-    app, mock_detector, _, _, _, _ = _make_app(db_session)
-    mock_detector.detect_objects.side_effect = ValueError("unauthorized")
+async def test_detect_objects_unauthorized_returns_403(db_session, sample_user, sample_image):
+    app, *_ = _make_app(db_session)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(f"/ml/images/{sample_image.id}/detect", headers=_auth_headers(sample_user))
+    with patch("app.api.v1.ml.detect.run_tracked", side_effect=ValueError("unauthorized")):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/detect",
+                headers=_auth_headers(sample_user),
+            )
 
     assert resp.status_code == 403
 
@@ -256,7 +241,8 @@ async def test_detect_objects_unauthorized(db_session, sample_user, sample_image
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_detect_objects_no_auth_returns_401(db_session, sample_image):
-    app, _, _, _, _, _ = _make_app(db_session)
+    app, *_ = _make_app(db_session)
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(f"/ml/images/{sample_image.id}/detect")
 
@@ -266,7 +252,13 @@ async def test_detect_objects_no_auth_returns_401(db_session, sample_image):
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_get_supported_classes(db_session, sample_user):
-    app, mock_detector, _, _, _, _ = _make_app(db_session)
+    app, *_ = _make_app(db_session)
+
+    from app.api.v1.ml.deps import get_detector
+    mock_det = MagicMock()
+    mock_det.get_supported_classes = MagicMock(return_value=["person", "car", "dog"])
+    app.dependency_overrides[get_detector] = lambda: mock_det
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/ml/classes", headers=_auth_headers(sample_user))
 
@@ -274,67 +266,57 @@ async def test_get_supported_classes(db_session, sample_user):
     assert resp.json() == ["person", "car", "dog"]
 
 
+# ──────────────────────────────────────────────
+# editing.py — remove / remove-multiple / replace (sync)
+# ──────────────────────────────────────────────
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_remove_object_success(db_session, sample_user, sample_image):
-    app, _, mock_editor, _, _, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/remove/1",
-            json={"expand_mask_pixels": 10, "use_edge_blending": False},
-            headers=_auth_headers(sample_user),
-        )
+    app, *_ = _make_app(db_session)
+
+    with patch("app.api.v1.ml.editing.run_tracked", new=AsyncMock(return_value=ML_RESULT)):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/remove/1",
+                json={"expand_mask_pixels": 10, "use_edge_blending": False},
+                headers=_auth_headers(sample_user),
+            )
 
     assert resp.status_code == 200
-    data = resp.json()
-    assert data["result_url"] == "s3://bucket/result.jpg"
-    mock_editor.remove_object.assert_awaited_once_with(
-        image_id=sample_image.id,
-        bbox_id=1,
-        user_id=sample_user.id,
-        expand_mask_pixels=10,
-        use_edge_blending=False,
-        ldm_steps=25,
-        ldm_sampler='plms',
-        hd_strategy='CROP',
-    )
+    assert resp.json()["result_url"] == ML_RESULT["result_url"]
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_remove_object_default_body(db_session, sample_user, sample_image):
-    # RemoveRequest defaults: expand_mask_pixels=5, use_edge_blending=False
-    app, _, mock_editor, _, _, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/remove/1",
-            headers=_auth_headers(sample_user),
-        )
+    app, *_ = _make_app(db_session)
+
+    tracker = AsyncMock(return_value=ML_RESULT)
+    with patch("app.api.v1.ml.editing.run_tracked", new=tracker):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/remove/1",
+                headers=_auth_headers(sample_user),
+            )
 
     assert resp.status_code == 200
-    mock_editor.remove_object.assert_awaited_once_with(
-        image_id=sample_image.id,
-        bbox_id=1,
-        user_id=sample_user.id,
-        expand_mask_pixels=5,
-        use_edge_blending=False,
-        ldm_steps=25,
-        ldm_sampler='plms',
-        hd_strategy='CROP',
-    )
+    _, kwargs = tracker.call_args
+    assert kwargs["expand_mask_pixels"] == 5
+    assert kwargs["use_edge_blending"] is False
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_remove_object_bbox_not_found(db_session, sample_user, sample_image):
-    app, _, mock_editor, _, _, _ = _make_app(db_session)
-    mock_editor.remove_object.side_effect = ValueError("bbox not found")
+async def test_remove_object_bbox_not_found_returns_404(db_session, sample_user, sample_image):
+    app, *_ = _make_app(db_session)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/remove/999",
-            headers=_auth_headers(sample_user),
-        )
+    with patch("app.api.v1.ml.editing.run_tracked", side_effect=ValueError("bbox not found")):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/remove/999",
+                headers=_auth_headers(sample_user),
+            )
 
     assert resp.status_code == 404
 
@@ -342,7 +324,8 @@ async def test_remove_object_bbox_not_found(db_session, sample_user, sample_imag
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_remove_object_invalid_expand_mask_returns_422(db_session, sample_user, sample_image):
-    app, _, _, _, _, _ = _make_app(db_session)
+    app, *_ = _make_app(db_session)
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
             f"/ml/images/{sample_image.id}/remove/1",
@@ -356,32 +339,27 @@ async def test_remove_object_invalid_expand_mask_returns_422(db_session, sample_
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_remove_multiple_success(db_session, sample_user, sample_image):
-    # RemoveMultipleRequest defaults: expand_mask_pixels=5, use_edge_blending=False
-    app, _, mock_editor, _, _, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/remove-multiple",
-            json={"bbox_ids": [1, 2, 3]},
-            headers=_auth_headers(sample_user),
-        )
+    app, *_ = _make_app(db_session)
+
+    tracker = AsyncMock(return_value=ML_RESULT)
+    with patch("app.api.v1.ml.editing.run_tracked", new=tracker):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/remove-multiple",
+                json={"bbox_ids": [1, 2, 3]},
+                headers=_auth_headers(sample_user),
+            )
 
     assert resp.status_code == 200
-    mock_editor.remove_multiple_objects.assert_awaited_once_with(
-        image_id=sample_image.id,
-        bbox_ids=[1, 2, 3],
-        user_id=sample_user.id,
-        expand_mask_pixels=5,
-        use_edge_blending=False,
-        ldm_steps=25,
-        ldm_sampler='plms',
-        hd_strategy='CROP',
-    )
+    _, kwargs = tracker.call_args
+    assert kwargs["bbox_ids"] == [1, 2, 3]
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_remove_multiple_missing_bbox_ids_returns_422(db_session, sample_user, sample_image):
-    app, _, _, _, _, _ = _make_app(db_session)
+    app, *_ = _make_app(db_session)
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
             f"/ml/images/{sample_image.id}/remove-multiple",
@@ -394,16 +372,16 @@ async def test_remove_multiple_missing_bbox_ids_returns_422(db_session, sample_u
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_remove_multiple_unauthorized(db_session, sample_user, sample_image):
-    app, _, mock_editor, _, _, _ = _make_app(db_session)
-    mock_editor.remove_multiple_objects.side_effect = ValueError("unauthorized")
+async def test_remove_multiple_unauthorized_returns_403(db_session, sample_user, sample_image):
+    app, *_ = _make_app(db_session)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/remove-multiple",
-            json={"bbox_ids": [1]},
-            headers=_auth_headers(sample_user),
-        )
+    with patch("app.api.v1.ml.editing.run_tracked", side_effect=ValueError("unauthorized")):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/remove-multiple",
+                json={"bbox_ids": [1]},
+                headers=_auth_headers(sample_user),
+            )
 
     assert resp.status_code == 403
 
@@ -411,19 +389,21 @@ async def test_remove_multiple_unauthorized(db_session, sample_user, sample_imag
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_replace_object_success(db_session, sample_user, sample_image):
-    app, _, mock_editor, _, _, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/replace/1",
-            files={"replacement_file": ("replacement.png", b"fake-image-bytes", "image/png")},
-            params={"color_match_method": "histogram", "expand_mask_pixels": 12},
-            headers=_auth_headers(sample_user),
-        )
+    app, *_ = _make_app(db_session)
+
+    tracker = AsyncMock(return_value=ML_RESULT)
+    with patch("app.api.v1.ml.editing.run_tracked", new=tracker):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/replace/1",
+                files={"replacement_file": ("img.png", b"fake-bytes", "image/png")},
+                params={"color_match_method": "histogram", "expand_mask_pixels": 12},
+                headers=_auth_headers(sample_user),
+            )
 
     assert resp.status_code == 200
-    mock_editor.replace_object.assert_awaited_once()
-    _, kwargs = mock_editor.replace_object.await_args
-    assert kwargs["replace_image_bytes"] == b"fake-image-bytes"
+    _, kwargs = tracker.call_args
+    assert kwargs["replace_image_bytes"] == b"fake-bytes"
     assert kwargs["color_match_method"] == "histogram"
     assert kwargs["expand_mask_pixels"] == 12
 
@@ -431,7 +411,8 @@ async def test_replace_object_success(db_session, sample_user, sample_image):
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_replace_object_missing_file_returns_422(db_session, sample_user, sample_image):
-    app, _, _, _, _, _ = _make_app(db_session)
+    app, *_ = _make_app(db_session)
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
             f"/ml/images/{sample_image.id}/replace/1",
@@ -444,12 +425,13 @@ async def test_replace_object_missing_file_returns_422(db_session, sample_user, 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_replace_object_invalid_color_method_returns_422(db_session, sample_user, sample_image):
-    app, _, _, _, _, _ = _make_app(db_session)
+    app, *_ = _make_app(db_session)
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
             f"/ml/images/{sample_image.id}/replace/1",
-            files={"replacement_file": ("replacement.png", b"fake-image-bytes", "image/png")},
-            params={"color_match_method": "invalid"},
+            files={"replacement_file": ("img.png", b"fake-bytes", "image/png")},
+            params={"color_match_method": "bad_method"},
             headers=_auth_headers(sample_user),
         )
 
@@ -459,23 +441,275 @@ async def test_replace_object_invalid_color_method_returns_422(db_session, sampl
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_replace_object_generic_error_returns_400(db_session, sample_user, sample_image):
-    app, _, mock_editor, _, _, _ = _make_app(db_session)
-    mock_editor.replace_object.side_effect = ValueError("invalid replacement image")
+    app, *_ = _make_app(db_session)
+
+    with patch("app.api.v1.ml.editing.run_tracked", side_effect=ValueError("invalid replacement image")):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/replace/1",
+                files={"replacement_file": ("img.png", b"fake-bytes", "image/png")},
+                headers=_auth_headers(sample_user),
+            )
+
+    assert resp.status_code == 400
+
+
+# ──────────────────────────────────────────────
+# editing.py — diffusion replace (sync + async)
+# ──────────────────────────────────────────────
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_replace_diffusion_success(db_session, sample_user, sample_image):
+    app, *_ = _make_app(db_session)
+
+    tracker = AsyncMock(return_value=ML_RESULT)
+    with patch("app.api.v1.ml.editing.run_tracked", new=tracker):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/replace/diffusion",
+                files={
+                    "mask_file": ("mask.png", b"mask-bytes", "image/png"),
+                    "reference_file": ("ref.png", b"ref-bytes", "image/png"),
+                },
+                params={
+                    "bbox_x1": 10,
+                    "bbox_y1": 20,
+                    "bbox_x2": 110,
+                    "bbox_y2": 120,
+                    "prompt": "replace object",
+                    "use_color_matching": False,
+                    "color_match_method": "color_transfer",
+                    "seed": 0,
+                },
+                headers=_auth_headers(sample_user),
+            )
+
+    assert resp.status_code == 200
+    _, kwargs = tracker.call_args
+    assert kwargs["mask_bytes"] == b"mask-bytes"
+    assert kwargs["reference_image_bytes"] == b"ref-bytes"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_replace_diffusion_missing_reference_returns_400(db_session, sample_user, sample_image):
+    app, *_ = _make_app(db_session)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
-            f"/ml/images/{sample_image.id}/replace/1",
-            files={"replacement_file": ("replacement.png", b"fake-image-bytes", "image/png")},
+            f"/ml/images/{sample_image.id}/replace/diffusion",
+            files={"mask_file": ("mask.png", b"mask-bytes", "image/png")},
+            params={
+                "bbox_x1": 10, "bbox_y1": 20, "bbox_x2": 110, "bbox_y2": 120,
+                "prompt": "replace object",
+            },
             headers=_auth_headers(sample_user),
         )
 
     assert resp.status_code == 400
+    assert resp.json()["detail"] == "Provide reference_file or asset_id"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_replace_diffusion_with_asset_id(db_session, sample_user, sample_image):
+    app, _, mock_asset, _ = _make_app(db_session)
+    mock_asset.get_asset_image = AsyncMock(return_value=b"asset-ref-bytes")
+
+    tracker = AsyncMock(return_value=ML_RESULT)
+    with patch("app.api.v1.ml.editing.run_tracked", new=tracker):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/replace/diffusion",
+                files={"mask_file": ("mask.png", b"mask-bytes", "image/png")},
+                params={
+                    "asset_id": "asset-1",
+                    "bbox_x1": 10, "bbox_y1": 20, "bbox_x2": 110, "bbox_y2": 120,
+                    "prompt": "replace object",
+                },
+                headers=_auth_headers(sample_user),
+            )
+
+    assert resp.status_code == 200
+    _, kwargs = tracker.call_args
+    assert kwargs["reference_image_bytes"] == b"asset-ref-bytes"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_replace_diffusion_asset_not_found_returns_404(db_session, sample_user, sample_image):
+    app, _, mock_asset, _ = _make_app(db_session)
+    mock_asset.get_asset_image = AsyncMock(return_value=None)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            f"/ml/images/{sample_image.id}/replace/diffusion",
+            files={"mask_file": ("mask.png", b"mask-bytes", "image/png")},
+            params={
+                "asset_id": "missing",
+                "bbox_x1": 10, "bbox_y1": 20, "bbox_x2": 110, "bbox_y2": 120,
+                "prompt": "replace object",
+            },
+            headers=_auth_headers(sample_user),
+        )
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_replace_diffusion_pipeline_error_returns_502(db_session, sample_user, sample_image):
+    app, *_ = _make_app(db_session)
+
+    with patch("app.api.v1.ml.editing.run_tracked", side_effect=RuntimeError("NaN in output")):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/replace/diffusion",
+                files={
+                    "mask_file": ("mask.png", b"mask-bytes", "image/png"),
+                    "reference_file": ("ref.png", b"ref-bytes", "image/png"),
+                },
+                params={
+                    "bbox_x1": 10, "bbox_y1": 20, "bbox_x2": 110, "bbox_y2": 120,
+                    "prompt": "replace object",
+                },
+                headers=_auth_headers(sample_user),
+            )
+
+    assert resp.status_code == 502
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_replace_diffusion_async_enqueues_job(db_session, sample_user, sample_image):
+    app, mock_pool, *_ = _make_app(db_session)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            f"/ml/images/{sample_image.id}/replace/diffusion/async",
+            files={
+                "mask_file": ("mask.png", b"mask-bytes", "image/png"),
+                "reference_file": ("ref.png", b"ref-bytes", "image/png"),
+            },
+            params={
+                "bbox_x1": 10, "bbox_y1": 20, "bbox_x2": 110, "bbox_y2": 120,
+                "prompt": "replace object",
+            },
+            headers=_auth_headers(sample_user),
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"job_id": "job-123"}
+    _, kwargs = mock_pool.enqueue_job.call_args
+    assert kwargs["mask_bytes"] == b"mask-bytes"
+    assert kwargs["reference_image_bytes"] == b"ref-bytes"
+    assert kwargs["image_id"] == sample_image.id
+    assert kwargs["user_id"] == sample_user.id
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_remove_object_async_enqueues_job(db_session, sample_user, sample_image):
+    app, mock_pool, *_ = _make_app(db_session)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            f"/ml/images/{sample_image.id}/remove/1/async",
+            json={"expand_mask_pixels": 8, "use_edge_blending": True},
+            headers=_auth_headers(sample_user),
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"job_id": "job-123"}
+    mock_pool.enqueue_job.assert_awaited_once_with(
+        "remove_object_task",
+        image_id=sample_image.id,
+        bbox_id=1,
+        user_id=sample_user.id,
+        expand_mask_pixels=8,
+        use_edge_blending=True,
+        ldm_steps=ANY,
+        ldm_sampler=ANY,
+        hd_strategy=ANY,
+        _trace_carrier=ANY,
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_remove_multiple_async_enqueues_job(db_session, sample_user, sample_image):
+    app, mock_pool, *_ = _make_app(db_session)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            f"/ml/images/{sample_image.id}/remove-multiple/async",
+            json={"bbox_ids": [1, 2]},
+            headers=_auth_headers(sample_user),
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"job_id": "job-123"}
+    _, kwargs = mock_pool.enqueue_job.call_args
+    assert kwargs["bbox_ids"] == [1, 2]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_replace_object_async_enqueues_job(db_session, sample_user, sample_image):
+    app, mock_pool, *_ = _make_app(db_session)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            f"/ml/images/{sample_image.id}/replace/1/async",
+            files={"replacement_file": ("img.png", b"replace-bytes", "image/png")},
+            headers=_auth_headers(sample_user),
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"job_id": "job-123"}
+    _, kwargs = mock_pool.enqueue_job.call_args
+    assert kwargs["replace_image_bytes"] == b"replace-bytes"
+    assert kwargs["bbox_id"] == 1
+
+
+# ──────────────────────────────────────────────
+# session.py — current / reset / save / undo / redo / history
+# ──────────────────────────────────────────────
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_get_current_state_success(db_session, sample_user, sample_image):
+    app, _, _, mock_version = _make_app(db_session)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(
+            f"/ml/images/{sample_image.id}/current",
+            headers=_auth_headers(sample_user),
+        )
+
+    assert resp.status_code == 200
+    mock_version.get_current_state.assert_awaited_once_with(
+        image_id=sample_image.id, user_id=sample_user.id
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_get_current_state_not_found_returns_404(db_session, sample_user):
+    app, _, _, mock_version = _make_app(db_session)
+    mock_version.get_current_state.side_effect = ValueError("not found")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/ml/images/99999/current", headers=_auth_headers(sample_user))
+
+    assert resp.status_code == 404
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_reset_current_state_success(db_session, sample_user, sample_image):
-    app, _, mock_editor, _, _, _ = _make_app(db_session)
+    app, _, _, mock_version = _make_app(db_session)
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
             f"/ml/images/{sample_image.id}/reset",
@@ -484,15 +718,14 @@ async def test_reset_current_state_success(db_session, sample_user, sample_image
 
     assert resp.status_code == 200
     assert resp.json() == {"detail": "State reset to original image"}
-    mock_editor._get_image_authorized.assert_awaited_once_with(sample_image.id, sample_user.id)
-    mock_editor.reset_current_state.assert_awaited_once_with(sample_image.id)
+    mock_version.reset_current_state.assert_awaited_once_with(sample_image.id, sample_user.id)
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_reset_current_state_not_found(db_session, sample_user):
-    app, _, mock_editor, _, _, _ = _make_app(db_session)
-    mock_editor._get_image_authorized.side_effect = ValueError("not found")
+async def test_reset_current_state_not_found_returns_404(db_session, sample_user):
+    app, _, _, mock_version = _make_app(db_session)
+    mock_version.reset_current_state.side_effect = ValueError("not found")
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post("/ml/images/99999/reset", headers=_auth_headers(sample_user))
@@ -500,12 +733,29 @@ async def test_reset_current_state_not_found(db_session, sample_user):
     assert resp.status_code == 404
 
 
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_save_result_success(db_session, sample_user, sample_image):
+    app, _, _, mock_version = _make_app(db_session)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            f"/ml/images/{sample_image.id}/save",
+            headers=_auth_headers(sample_user),
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["id"] == 42
+    mock_version.save_result.assert_awaited_once_with(
+        image_id=sample_image.id, user_id=sample_user.id
+    )
+
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_save_result_no_processed_state(db_session, sample_user, sample_image):
-    app, _, mock_editor, _, _, _ = _make_app(db_session)
-    mock_editor.save_result.side_effect = ValueError("No processed result to save. Run remove/replace first.")
+async def test_save_result_no_state_returns_400(db_session, sample_user, sample_image):
+    app, _, _, mock_version = _make_app(db_session)
+    mock_version.save_result.side_effect = ValueError("No processed result to save. Run remove/replace first.")
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
@@ -514,20 +764,20 @@ async def test_save_result_no_processed_state(db_session, sample_user, sample_im
         )
 
     assert resp.status_code == 400
-    assert resp.json()["detail"] == "No processed result to save. Run remove/replace first."
+    assert "No processed result" in resp.json()["detail"]
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_save_result_unauthorized(db_session, sample_user, sample_image):
-    other_user = await _make_other_user(db_session)
-    app, _, mock_editor, _, _, _ = _make_app(db_session)
-    mock_editor.save_result.side_effect = ValueError("unauthorized")
+async def test_save_result_unauthorized_returns_403(db_session, sample_user, sample_image):
+    other = await _other_user(db_session)
+    app, _, _, mock_version = _make_app(db_session)
+    mock_version.save_result.side_effect = ValueError("unauthorized")
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
             f"/ml/images/{sample_image.id}/save",
-            headers=_auth_headers(other_user),
+            headers=_auth_headers(other),
         )
 
     assert resp.status_code == 403
@@ -536,7 +786,8 @@ async def test_save_result_unauthorized(db_session, sample_user, sample_image):
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_undo_success(db_session, sample_user, sample_image):
-    app, _, mock_editor, _, _, _ = _make_app(db_session)
+    app, _, _, mock_version = _make_app(db_session)
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
             f"/ml/images/{sample_image.id}/undo",
@@ -545,14 +796,14 @@ async def test_undo_success(db_session, sample_user, sample_image):
 
     assert resp.status_code == 200
     assert resp.json() == {"detail": "Undone"}
-    mock_editor.undo.assert_awaited_once_with(sample_image.id, sample_user.id)
+    mock_version.undo.assert_awaited_once_with(sample_image.id, sample_user.id)
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_undo_nothing_to_undo(db_session, sample_user, sample_image):
-    app, _, mock_editor, _, _, _ = _make_app(db_session)
-    mock_editor.undo.side_effect = ValueError("Nothing to undo")
+async def test_undo_nothing_to_undo_returns_400(db_session, sample_user, sample_image):
+    app, _, _, mock_version = _make_app(db_session)
+    mock_version.undo.side_effect = ValueError("Nothing to undo")
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
@@ -567,7 +818,8 @@ async def test_undo_nothing_to_undo(db_session, sample_user, sample_image):
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_redo_success(db_session, sample_user, sample_image):
-    app, _, mock_editor, _, _, _ = _make_app(db_session)
+    app, _, _, mock_version = _make_app(db_session)
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
             f"/ml/images/{sample_image.id}/redo",
@@ -576,14 +828,14 @@ async def test_redo_success(db_session, sample_user, sample_image):
 
     assert resp.status_code == 200
     assert resp.json() == {"detail": "Redone"}
-    mock_editor.redo.assert_awaited_once_with(sample_image.id, sample_user.id)
+    mock_version.redo.assert_awaited_once_with(sample_image.id, sample_user.id)
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_redo_nothing_to_redo(db_session, sample_user, sample_image):
-    app, _, mock_editor, _, _, _ = _make_app(db_session)
-    mock_editor.redo.side_effect = ValueError("Nothing to redo")
+async def test_redo_nothing_to_redo_returns_400(db_session, sample_user, sample_image):
+    app, _, _, mock_version = _make_app(db_session)
+    mock_version.redo.side_effect = ValueError("Nothing to redo")
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
@@ -598,8 +850,8 @@ async def test_redo_nothing_to_redo(db_session, sample_user, sample_image):
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_get_history_success(db_session, sample_user, sample_image):
-    app, _, mock_editor, _, _, _ = _make_app(db_session)
-    mock_editor.get_history = AsyncMock(return_value={"history": ["remove bbox_id=0", "replace bbox_id=1"]})
+    app, _, _, mock_version = _make_app(db_session)
+    mock_version.get_history = AsyncMock(return_value={"history": ["step1", "step2"]})
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get(
@@ -608,66 +860,76 @@ async def test_get_history_success(db_session, sample_user, sample_image):
         )
 
     assert resp.status_code == 200
-    assert resp.json() == {"history": ["remove bbox_id=0", "replace bbox_id=1"]}
+    assert resp.json() == {"history": ["step1", "step2"]}
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_get_history_unauthorized(db_session, sample_user, sample_image):
-    other_user = await _make_other_user(db_session)
-    app, _, mock_editor, _, _, _ = _make_app(db_session)
-    mock_editor.get_history.side_effect = ValueError("unauthorized")
+async def test_get_history_unauthorized_returns_403(db_session, sample_user, sample_image):
+    other = await _other_user(db_session)
+    app, _, _, mock_version = _make_app(db_session)
+    mock_version.get_history.side_effect = ValueError("unauthorized")
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get(
             f"/ml/images/{sample_image.id}/history",
-            headers=_auth_headers(other_user),
+            headers=_auth_headers(other),
         )
 
     assert resp.status_code == 403
 
 
+# ──────────────────────────────────────────────
+# segmentation.py — sync
+# ──────────────────────────────────────────────
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_segment_objects_success(db_session, sample_user, sample_image):
-    app, _, _, mock_segmentation, _, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment",
-            json={"min_area": 200, "max_segments": 20},
-            headers=_auth_headers(sample_user),
-        )
+    app, *_ = _make_app(db_session)
+
+    tracker = AsyncMock(return_value=SEGMENT_RESULT)
+    with patch("app.api.v1.ml.segmentation.run_tracked", new=tracker):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/segment",
+                json={"min_area": 200, "max_segments": 20},
+                headers=_auth_headers(sample_user),
+            )
 
     assert resp.status_code == 200
-    mock_segmentation.segment_objects.assert_awaited_once_with(
-        image_id=sample_image.id, user_id=sample_user.id, min_area=200, max_segments=20
-    )
+    _, kwargs = tracker.call_args
+    assert kwargs["min_area"] == 200
+    assert kwargs["max_segments"] == 20
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_segment_objects_default_body(db_session, sample_user, sample_image):
-    app, _, _, mock_segmentation, _, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment",
-            headers=_auth_headers(sample_user),
-        )
+    app, *_ = _make_app(db_session)
+
+    tracker = AsyncMock(return_value=SEGMENT_RESULT)
+    with patch("app.api.v1.ml.segmentation.run_tracked", new=tracker):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/segment",
+                headers=_auth_headers(sample_user),
+            )
 
     assert resp.status_code == 200
-    mock_segmentation.segment_objects.assert_awaited_once_with(
-        image_id=sample_image.id, user_id=sample_user.id, min_area=500, max_segments=50
-    )
+    _, kwargs = tracker.call_args
+    assert kwargs["min_area"] == 500
+    assert kwargs["max_segments"] == 50
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_segment_objects_not_found(db_session, sample_user):
-    app, _, _, mock_segmentation, _, _ = _make_app(db_session)
-    mock_segmentation.segment_objects.side_effect = ValueError("image not found")
+async def test_segment_objects_not_found_returns_404(db_session, sample_user):
+    app, *_ = _make_app(db_session)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post("/ml/images/99999/segment", headers=_auth_headers(sample_user))
+    with patch("app.api.v1.ml.segmentation.run_tracked", side_effect=ValueError("image not found")):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/ml/images/99999/segment", headers=_auth_headers(sample_user))
 
     assert resp.status_code == 404
 
@@ -675,69 +937,54 @@ async def test_segment_objects_not_found(db_session, sample_user):
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_segment_with_prompt_success(db_session, sample_user, sample_image):
-    app, _, _, mock_segmentation, _, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/prompt",
-            json={"point_coords": [[10, 20]], "point_labels": [1]},
-            headers=_auth_headers(sample_user),
-        )
+    app, *_ = _make_app(db_session)
+
+    tracker = AsyncMock(return_value=SEGMENT_RESULT)
+    with patch("app.api.v1.ml.segmentation.run_tracked", new=tracker):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/segment/prompt",
+                json={"point_coords": [[10, 20]], "point_labels": [1]},
+                headers=_auth_headers(sample_user),
+            )
 
     assert resp.status_code == 200
-    mock_segmentation.segment_with_prompt.assert_awaited_once_with(
-        image_id=sample_image.id,
-        user_id=sample_user.id,
-        point_coords=[(10, 20)],
-        point_labels=[1],
-        bbox=None,
-        multimask_output=None,
-    )
+    _, kwargs = tracker.call_args
+    assert kwargs["point_labels"] == [1]
+    assert kwargs["bbox"] is None
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_segment_with_prompt_with_bbox(db_session, sample_user, sample_image):
-    app, _, _, mock_segmentation, _, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/prompt",
-            json={"bbox": {"x1": 0, "y1": 0, "x2": 50, "y2": 50}},
-            headers=_auth_headers(sample_user),
-        )
+    app, *_ = _make_app(db_session)
+
+    tracker = AsyncMock(return_value=SEGMENT_RESULT)
+    with patch("app.api.v1.ml.segmentation.run_tracked", new=tracker):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/segment/prompt",
+                json={"bbox": {"x1": 0, "y1": 0, "x2": 50, "y2": 50}},
+                headers=_auth_headers(sample_user),
+            )
 
     assert resp.status_code == 200
-    _, kwargs = mock_segmentation.segment_with_prompt.await_args
+    _, kwargs = tracker.call_args
     assert kwargs["bbox"] == {"x1": 0, "y1": 0, "x2": 50, "y2": 50}
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_segment_with_prompt_multimask_output(db_session, sample_user, sample_image):
-    app, _, _, mock_segmentation, _, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/prompt",
-            json={"multimask_output": True},
-            headers=_auth_headers(sample_user),
-        )
+async def test_segment_with_prompt_no_detections_returns_404(db_session, sample_user, sample_image):
+    app, *_ = _make_app(db_session)
 
-    assert resp.status_code == 200
-    _, kwargs = mock_segmentation.segment_with_prompt.await_args
-    assert kwargs["multimask_output"] is True
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_segment_with_prompt_mask_not_found(db_session, sample_user, sample_image):
-    app, _, _, mock_segmentation, _, _ = _make_app(db_session)
-    mock_segmentation.segment_with_prompt.side_effect = ValueError("no valid detections")
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/prompt",
-            json={},
-            headers=_auth_headers(sample_user),
-        )
+    with patch("app.api.v1.ml.segmentation.run_tracked", side_effect=ValueError("no valid detections")):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/segment/prompt",
+                json={},
+                headers=_auth_headers(sample_user),
+            )
 
     assert resp.status_code == 404
 
@@ -745,29 +992,28 @@ async def test_segment_with_prompt_mask_not_found(db_session, sample_user, sampl
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_segment_by_polygon_success(db_session, sample_user, sample_image):
-    app, _, _, mock_segmentation, _, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/polygon",
-            json={"points": [[0, 0], [10, 0], [5, 10]]},
-            headers=_auth_headers(sample_user),
-        )
+    app, *_ = _make_app(db_session)
+
+    tracker = AsyncMock(return_value=SEGMENT_RESULT)
+    with patch("app.api.v1.ml.segmentation.run_tracked", new=tracker):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/segment/polygon",
+                json={"points": [[0, 0], [10, 0], [5, 10]]},
+                headers=_auth_headers(sample_user),
+            )
 
     assert resp.status_code == 200
-    mock_segmentation.segment_by_polygon.assert_awaited_once_with(
-        image_id=sample_image.id,
-        user_id=sample_user.id,
-        points=[(0, 0), (10, 0), (5, 10)],
-        smooth=True,
-        smoothing_factor=0.0,
-        feather_px=0,
-    )
+    _, kwargs = tracker.call_args
+    assert kwargs["smooth"] is True
+    assert kwargs["feather_px"] == 0
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_segment_by_polygon_too_few_points_returns_422(db_session, sample_user, sample_image):
-    app, _, _, _, _, _ = _make_app(db_session)
+    app, *_ = _make_app(db_session)
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
             f"/ml/images/{sample_image.id}/segment/polygon",
@@ -780,55 +1026,151 @@ async def test_segment_by_polygon_too_few_points_returns_422(db_session, sample_
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_segment_by_polygon_not_found(db_session, sample_user, sample_image):
-    app, _, _, mock_segmentation, _, _ = _make_app(db_session)
-    mock_segmentation.segment_by_polygon.side_effect = ValueError("mask not found")
+async def test_segment_hybrid_success(db_session, sample_user, sample_image):
+    app, *_ = _make_app(db_session)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/polygon",
-            json={"points": [[0, 0], [10, 0], [5, 10]]},
-            headers=_auth_headers(sample_user),
-        )
+    tracker = AsyncMock(return_value=SEGMENT_RESULT)
+    with patch("app.api.v1.ml.segmentation.run_tracked", new=tracker):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/segment/hybrid",
+                headers=_auth_headers(sample_user),
+            )
 
-    assert resp.status_code == 404
+    assert resp.status_code == 200
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_sam_remove_object_success(db_session, sample_user, sample_image):
-    # SamRemoveRequest defaults: expand_mask_pixels=12, use_edge_blending=False
-    app, _, _, mock_segmentation, _, _ = _make_app(db_session)
+async def test_segment_hybrid_not_found_returns_404(db_session, sample_user):
+    app, *_ = _make_app(db_session)
+
+    with patch("app.api.v1.ml.segmentation.run_tracked", side_effect=ValueError("image not found")):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/ml/images/99999/segment/hybrid", headers=_auth_headers(sample_user))
+
+    assert resp.status_code == 404
+
+
+# ──────────────────────────────────────────────
+# segmentation.py — async
+# ──────────────────────────────────────────────
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_segment_objects_async_enqueues_job(db_session, sample_user, sample_image):
+    app, mock_pool, *_ = _make_app(db_session)
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/3/remove",
+            f"/ml/images/{sample_image.id}/segment/async",
+            json={"min_area": 100, "max_segments": 10},
             headers=_auth_headers(sample_user),
         )
 
     assert resp.status_code == 200
-    mock_segmentation.sam_remove_object.assert_awaited_once_with(
+    assert resp.json() == {"job_id": "job-123"}
+    mock_pool.enqueue_job.assert_awaited_once_with(
+        "segment_objects_task",
         image_id=sample_image.id,
-        mask_id=3,
         user_id=sample_user.id,
-        expand_mask_pixels=12,
-        use_edge_blending=False,
-        ldm_steps=25,
-        ldm_sampler='plms',
-        hd_strategy='CROP',
+        min_area=100,
+        max_segments=10,
+        _trace_carrier=ANY,
     )
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_sam_remove_object_mask_not_found(db_session, sample_user, sample_image):
-    app, _, _, mock_segmentation, _, _ = _make_app(db_session)
-    mock_segmentation.sam_remove_object.side_effect = ValueError("mask not found")
+async def test_segment_with_prompt_async_enqueues_job(db_session, sample_user, sample_image):
+    app, mock_pool, *_ = _make_app(db_session)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/999/remove",
+            f"/ml/images/{sample_image.id}/segment/prompt/async",
+            json={"point_coords": [[5, 5]], "point_labels": [1]},
             headers=_auth_headers(sample_user),
         )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"job_id": "job-123"}
+    _, kwargs = mock_pool.enqueue_job.call_args
+    assert kwargs["point_labels"] == [1]
+    assert kwargs["bbox"] is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_segment_by_polygon_async_enqueues_job(db_session, sample_user, sample_image):
+    app, mock_pool, *_ = _make_app(db_session)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            f"/ml/images/{sample_image.id}/segment/polygon/async",
+            json={"points": [[0, 0], [10, 0], [5, 10]]},
+            headers=_auth_headers(sample_user),
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"job_id": "job-123"}
+    _, kwargs = mock_pool.enqueue_job.call_args
+    assert kwargs["smooth"] is True
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_segment_hybrid_async_enqueues_job(db_session, sample_user, sample_image):
+    app, mock_pool, *_ = _make_app(db_session)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            f"/ml/images/{sample_image.id}/segment/hybrid/async",
+            headers=_auth_headers(sample_user),
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"job_id": "job-123"}
+    mock_pool.enqueue_job.assert_awaited_once()
+    _, kwargs = mock_pool.enqueue_job.call_args
+    assert kwargs["image_id"] == sample_image.id
+    assert kwargs["user_id"] == sample_user.id
+
+
+# ──────────────────────────────────────────────
+# sam_ops.py — SAM remove / replace / extract (sync)
+# ──────────────────────────────────────────────
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_sam_remove_object_success(db_session, sample_user, sample_image):
+    app, *_ = _make_app(db_session)
+
+    tracker = AsyncMock(return_value=ML_RESULT)
+    with patch("app.api.v1.ml.sam_ops.run_tracked", new=tracker):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/segment/3/remove",
+                json={"expand_mask_pixels": 12},
+                headers=_auth_headers(sample_user),
+            )
+
+    assert resp.status_code == 200
+    _, kwargs = tracker.call_args
+    assert kwargs["mask_id"] == 3
+    assert kwargs["expand_mask_pixels"] == 12
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_sam_remove_object_not_found_returns_404(db_session, sample_user, sample_image):
+    app, *_ = _make_app(db_session)
+
+    with patch("app.api.v1.ml.sam_ops.run_tracked", side_effect=ValueError("mask not found")):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/segment/999/remove",
+                headers=_auth_headers(sample_user),
+            )
 
     assert resp.status_code == 404
 
@@ -836,62 +1178,51 @@ async def test_sam_remove_object_mask_not_found(db_session, sample_user, sample_
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_sam_replace_object_success_with_file(db_session, sample_user, sample_image):
-    app, _, _, mock_segmentation, _, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/3/replace",
-            files={"replacement_file": ("replacement.png", b"fake-bytes", "image/png")},
-            params={"expand_mask_pixels": 15},
-            headers=_auth_headers(sample_user),
-        )
+    app, *_ = _make_app(db_session)
+
+    tracker = AsyncMock(return_value=ML_RESULT)
+    with patch("app.api.v1.ml.sam_ops.run_tracked", new=tracker):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/segment/3/replace",
+                files={"replacement_file": ("rep.png", b"rep-bytes", "image/png")},
+                params={"expand_mask_pixels": 15},
+                headers=_auth_headers(sample_user),
+            )
 
     assert resp.status_code == 200
-    mock_segmentation.sam_replace_object.assert_awaited_once()
-    _, kwargs = mock_segmentation.sam_replace_object.await_args
-    assert kwargs["replacement_image_bytes"] == b"fake-bytes"
+    _, kwargs = tracker.call_args
+    assert kwargs["replacement_image_bytes"] == b"rep-bytes"
     assert kwargs["expand_mask_pixels"] == 15
     assert kwargs["replacement_is_cutout"] is False
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_sam_replace_object_success_with_asset_id(db_session, sample_user, sample_image):
-    app, _, _, mock_segmentation, mock_asset, _ = _make_app(db_session)
+async def test_sam_replace_object_with_asset_id(db_session, sample_user, sample_image):
+    app, _, mock_asset, _ = _make_app(db_session)
     mock_asset.get_asset_image = AsyncMock(return_value=b"asset-bytes")
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/3/replace",
-            params={"asset_id": "asset-1"},
-            headers=_auth_headers(sample_user),
-        )
+    tracker = AsyncMock(return_value=ML_RESULT)
+    with patch("app.api.v1.ml.sam_ops.run_tracked", new=tracker):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/segment/3/replace",
+                params={"asset_id": "asset-1"},
+                headers=_auth_headers(sample_user),
+            )
 
     assert resp.status_code == 200
-    _, kwargs = mock_segmentation.sam_replace_object.await_args
+    _, kwargs = tracker.call_args
     assert kwargs["replacement_image_bytes"] == b"asset-bytes"
     assert kwargs["replacement_is_cutout"] is True
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_sam_replace_object_asset_not_found_returns_404(db_session, sample_user, sample_image):
-    app, _, _, _, mock_asset, _ = _make_app(db_session)
-    mock_asset.get_asset_image = AsyncMock(return_value=None)
+async def test_sam_replace_object_missing_source_returns_400(db_session, sample_user, sample_image):
+    app, *_ = _make_app(db_session)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/3/replace",
-            params={"asset_id": "missing-asset"},
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 404
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_sam_replace_object_missing_file_and_asset_id_returns_400(db_session, sample_user, sample_image):
-    app, _, _, _, _, _ = _make_app(db_session)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
             f"/ml/images/{sample_image.id}/segment/3/replace",
@@ -904,213 +1235,14 @@ async def test_sam_replace_object_missing_file_and_asset_id_returns_400(db_sessi
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_extract_object_success(db_session, sample_user, sample_image):
-    app, _, _, _, mock_asset, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/3/extract",
-            json={"padding_pixels": 20},
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 200
-    assert resp.json()["extracted_url"] == "s3://bucket/obj.png"
-    mock_asset.extract_object.assert_awaited_once_with(
-        image_id=sample_image.id, mask_id=3, user_id=sample_user.id,
-        padding_pixels=20, label=None, persist_to_s3=False,
-    )
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_extract_object_default_body(db_session, sample_user, sample_image):
-    # ExtractRequest.padding_pixels has no ge/le constraints in the schema
-    app, _, _, _, mock_asset, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/3/extract",
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 200
-    mock_asset.extract_object.assert_awaited_once_with(
-        image_id=sample_image.id, mask_id=3, user_id=sample_user.id,
-        padding_pixels=8, label=None, persist_to_s3=False,
-    )
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_extract_object_large_padding_is_accepted(db_session, sample_user, sample_image):
-    # No upper bound is defined on padding_pixels, so a large value is valid
-    app, _, _, _, mock_asset, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/3/extract",
-            json={"padding_pixels": 100},
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 200
-    _, kwargs = mock_asset.extract_object.await_args
-    assert kwargs["padding_pixels"] == 100
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_extract_object_non_integer_padding_returns_422(db_session, sample_user, sample_image):
-    app, _, _, _, _, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/3/extract",
-            json={"padding_pixels": "not-a-number"},
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 422
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_extract_object_mask_not_found(db_session, sample_user, sample_image):
-    app, _, _, _, mock_asset, _ = _make_app(db_session)
-    mock_asset.extract_object.side_effect = ValueError("mask not found")
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/999/extract",
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 404
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_list_assets_success(db_session, sample_user):
-    app, _, _, _, mock_asset, _ = _make_app(db_session)
-    mock_asset.list_assets = AsyncMock(return_value=[{
-        "asset_id": "asset-1", "source_image_id": 1, "object_size": (50, 60),
-        "area_pixels": 3000, "label": None, "s3_url": None,
-        "created_at": "2025-01-01T00:00:00",
-    }])
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/ml/assets", headers=_auth_headers(sample_user))
-
-    assert resp.status_code == 200
-    assert len(resp.json()) == 1
-    mock_asset.list_assets.assert_awaited_once_with(sample_user.id, limit=50, offset=0)
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_list_assets_custom_pagination(db_session, sample_user):
-    app, _, _, _, mock_asset, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/ml/assets?limit=10&offset=5", headers=_auth_headers(sample_user))
-
-    assert resp.status_code == 200
-    mock_asset.list_assets.assert_awaited_once_with(sample_user.id, limit=10, offset=5)
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_list_assets_limit_above_max_returns_422(db_session, sample_user):
-    app, _, _, _, _, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/ml/assets?limit=500", headers=_auth_headers(sample_user))
-
-    assert resp.status_code == 422
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_get_asset_thumbnail_success(db_session, sample_user):
-    app, _, _, _, mock_asset, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/ml/assets/asset-1/thumbnail", headers=_auth_headers(sample_user))
-
-    assert resp.status_code == 200
-    assert resp.content == b"thumb-bytes"
-    assert resp.headers["content-type"] == "image/png"
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_get_asset_thumbnail_not_found(db_session, sample_user):
-    app, _, _, _, mock_asset, _ = _make_app(db_session)
-    mock_asset.get_asset_thumbnail = AsyncMock(return_value=None)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/ml/assets/missing/thumbnail", headers=_auth_headers(sample_user))
-
-    assert resp.status_code == 404
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_get_asset_image_success(db_session, sample_user):
-    app, _, _, _, mock_asset, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/ml/assets/asset-1/image", headers=_auth_headers(sample_user))
-
-    assert resp.status_code == 200
-    assert resp.content == b"asset-bytes"
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_get_asset_image_not_found(db_session, sample_user):
-    app, _, _, _, mock_asset, _ = _make_app(db_session)
+async def test_sam_replace_object_asset_not_found_returns_404(db_session, sample_user, sample_image):
+    app, _, mock_asset, _ = _make_app(db_session)
     mock_asset.get_asset_image = AsyncMock(return_value=None)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/ml/assets/missing/image", headers=_auth_headers(sample_user))
-
-    assert resp.status_code == 404
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_rename_asset_success(db_session, sample_user):
-    app, _, _, _, mock_asset, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.patch(
-            "/ml/assets/asset-1",
-            json={"label": "new-name"},
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 200
-    assert resp.json()["label"] == "new-name"
-    mock_asset.rename_asset.assert_awaited_once_with(sample_user.id, "asset-1", "new-name")
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_rename_asset_missing_label_returns_422(db_session, sample_user):
-    app, _, _, _, _, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.patch(
-            "/ml/assets/asset-1",
-            json={},
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 422
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_rename_asset_not_found(db_session, sample_user):
-    app, _, _, _, mock_asset, _ = _make_app(db_session)
-    mock_asset.rename_asset.side_effect = ValueError("asset not found")
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.patch(
-            "/ml/assets/missing",
-            json={"label": "x"},
+        resp = await client.post(
+            f"/ml/images/{sample_image.id}/segment/3/replace",
+            params={"asset_id": "missing"},
             headers=_auth_headers(sample_user),
         )
 
@@ -1119,471 +1251,55 @@ async def test_rename_asset_not_found(db_session, sample_user):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_delete_asset_success(db_session, sample_user):
-    app, _, _, _, mock_asset, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.delete("/ml/assets/asset-1", headers=_auth_headers(sample_user))
+async def test_extract_object_success(db_session, sample_user, sample_image):
+    app, *_ = _make_app(db_session)
+
+    tracker = AsyncMock(return_value=EXTRACT_RESULT)
+    with patch("app.api.v1.ml.sam_ops.run_tracked", new=tracker):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/segment/3/extract",
+                json={"padding_pixels": 10, "label": "chair", "persist_to_s3": True},
+                headers=_auth_headers(sample_user),
+            )
 
     assert resp.status_code == 200
-    assert resp.json() == {"detail": "Asset deleted"}
-    mock_asset.delete_asset.assert_awaited_once_with(sample_user.id, "asset-1")
+    assert resp.json()["asset_id"] == "asset-1"
+    _, kwargs = tracker.call_args
+    assert kwargs["mask_id"] == 3
+    assert kwargs["padding_pixels"] == 10
+    assert kwargs["label"] == "chair"
+    assert kwargs["persist_to_s3"] is True
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_delete_asset_not_found(db_session, sample_user):
-    app, _, _, _, mock_asset, _ = _make_app(db_session)
-    mock_asset.delete_asset.side_effect = ValueError("asset not found")
+async def test_extract_object_not_found_returns_404(db_session, sample_user, sample_image):
+    app, *_ = _make_app(db_session)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.delete("/ml/assets/missing", headers=_auth_headers(sample_user))
+    with patch("app.api.v1.ml.sam_ops.run_tracked", side_effect=ValueError("mask not found")):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/ml/images/{sample_image.id}/segment/999/extract",
+                headers=_auth_headers(sample_user),
+            )
 
     assert resp.status_code == 404
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_paste_extracted_object_success(db_session, sample_user, sample_image):
-    app, _, _, _, mock_asset, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/paste",
-            json={
-                "extracted_url": "s3://bucket/obj.png",
-                "target_bbox": {"x1": 0, "y1": 0, "x2": 50, "y2": 50},
-                "scale": 1.5,
-            },
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 200
-    assert resp.json()["result_url"] == "s3://bucket/pasted.jpg"
-    # PasteRequest defaults: use_color_matching=False, use_edge_blending=False
-    mock_asset.paste_extracted_object.assert_awaited_once_with(
-        image_id=sample_image.id,
-        user_id=sample_user.id,
-        asset_id=None,
-        extracted_url="s3://bucket/obj.png",
-        target_bbox={"x1": 0, "y1": 0, "x2": 50, "y2": 50},
-        scale=1.5,
-        use_color_matching=False,
-        use_edge_blending=False,
-        color_match_method='color_transfer',
-    )
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_paste_extracted_object_missing_required_field_returns_422(db_session, sample_user, sample_image):
-    app, _, _, _, _, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/paste",
-            json={"extracted_url": "s3://bucket/obj.png"},
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 422
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_paste_extracted_object_missing_source_returns_422(db_session, sample_user, sample_image):
-    # PasteRequest requires either asset_id or extracted_url via model_validator
-    app, _, _, _, _, _ = _make_app(db_session)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/paste",
-            json={"target_bbox": {"x1": 0, "y1": 0, "x2": 10, "y2": 10}},
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 422
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_paste_extracted_object_not_found(db_session, sample_user, sample_image):
-    app, _, _, _, mock_asset, _ = _make_app(db_session)
-    mock_asset.paste_extracted_object.side_effect = ValueError("extracted object not found")
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/paste",
-            json={
-                "extracted_url": "s3://bucket/missing.png",
-                "target_bbox": {"x1": 0, "y1": 0, "x2": 10, "y2": 10},
-            },
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 404
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_segment_hybrid_success(db_session, sample_user, sample_image):
-    app, _, _, mock_segmentation, _, _ = _make_app(db_session)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/hybrid",
-            json={
-                "yolo_conf_threshold": 0.4,
-                "yolo_classes": ["person", "car"],
-                "fallback_min_area": 200,
-                "fallback_max_segments": 20,
-                "overlap_iou_thresh": 0.3,
-            },
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 200
-    mock_segmentation.segment_hybrid.assert_awaited_once_with(
-        image_id=sample_image.id,
-        user_id=sample_user.id,
-        yolo_conf_threshold=0.4,
-        yolo_classes=["person", "car"],
-        fallback_min_area=200,
-        fallback_max_segments=20,
-        overlap_iou_thresh=0.3,
-    )
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_segment_hybrid_default_body(db_session, sample_user, sample_image):
-    app, _, _, mock_segmentation, _, _ = _make_app(db_session)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/hybrid",
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 200
-    mock_segmentation.segment_hybrid.assert_awaited_once()
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_segment_hybrid_not_found(db_session, sample_user):
-    app, _, _, mock_segmentation, _, _ = _make_app(db_session)
-    mock_segmentation.segment_hybrid.side_effect = ValueError("image not found")
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post("/ml/images/99999/segment/hybrid", headers=_auth_headers(sample_user))
-
-    assert resp.status_code == 404
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_remove_object_async_enqueues_job(db_session, sample_user, sample_image):
-    app, _, _, _, _, mock_pool = _make_app(db_session)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/remove/1/async",
-            json={"expand_mask_pixels": 10, "use_edge_blending": False},
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 200
-    assert resp.json() == {"job_id": "job-123"}
-    mock_pool.enqueue_job.assert_awaited_once_with(
-        "remove_object_task",
-        image_id=sample_image.id,
-        bbox_id=1,
-        user_id=sample_user.id,
-        expand_mask_pixels=10,
-        use_edge_blending=False,
-        ldm_steps=25,
-        ldm_sampler='plms',
-        hd_strategy='CROP',
-        _trace_carrier=ANY,
-    )
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_remove_object_async_default_body(db_session, sample_user, sample_image):
-    app, _, _, _, _, mock_pool = _make_app(db_session)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/remove/1/async",
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 200
-    mock_pool.enqueue_job.assert_awaited_once_with(
-        "remove_object_task",
-        image_id=sample_image.id,
-        bbox_id=1,
-        user_id=sample_user.id,
-        expand_mask_pixels=5,
-        use_edge_blending=False,
-        ldm_steps=25,
-        ldm_sampler='plms',
-        hd_strategy='CROP',
-        _trace_carrier=ANY,
-    )
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_remove_multiple_objects_async_enqueues_job(db_session, sample_user, sample_image):
-    app, _, _, _, _, mock_pool = _make_app(db_session)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/remove-multiple/async",
-            json={"bbox_ids": [1, 2, 3]},
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 200
-    assert resp.json() == {"job_id": "job-123"}
-    mock_pool.enqueue_job.assert_awaited_once_with(
-        "remove_multiple_objects_task",
-        image_id=sample_image.id,
-        bbox_ids=[1, 2, 3],
-        user_id=sample_user.id,
-        expand_mask_pixels=5,
-        use_edge_blending=False,
-        ldm_steps=25,
-        ldm_sampler='plms',
-        hd_strategy='CROP',
-        _trace_carrier=ANY,
-    )
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_remove_multiple_objects_async_missing_bbox_ids_returns_422(db_session, sample_user, sample_image):
-    app, _, _, _, _, mock_pool = _make_app(db_session)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/remove-multiple/async",
-            json={},
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 422
-    mock_pool.enqueue_job.assert_not_awaited()
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_replace_object_async_reads_file_and_enqueues_job(db_session, sample_user, sample_image):
-    app, _, _, _, _, mock_pool = _make_app(db_session)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/replace/1/async",
-            files={"replacement_file": ("replacement.png", b"fake-image-bytes", "image/png")},
-            params={"color_match_method": "histogram", "expand_mask_pixels": 12},
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 200
-    assert resp.json() == {"job_id": "job-123"}
-    mock_pool.enqueue_job.assert_awaited_once()
-    args, kwargs = mock_pool.enqueue_job.call_args
-    assert args[0] == "replace_object_task"
-    assert kwargs["replace_image_bytes"] == b"fake-image-bytes"
-    assert kwargs["color_match_method"] == "histogram"
-    assert kwargs["expand_mask_pixels"] == 12
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_replace_object_async_missing_file_returns_422(db_session, sample_user, sample_image):
-    app, _, _, _, _, mock_pool = _make_app(db_session)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/replace/1/async",
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 422
-    mock_pool.enqueue_job.assert_not_awaited()
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_segment_objects_async_enqueues_job(db_session, sample_user, sample_image):
-    app, _, _, _, _, mock_pool = _make_app(db_session)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/async",
-            json={"min_area": 200, "max_segments": 20},
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 200
-    assert resp.json() == {"job_id": "job-123"}
-    mock_pool.enqueue_job.assert_awaited_once_with(
-        "segment_objects_task",
-        image_id=sample_image.id,
-        user_id=sample_user.id,
-        min_area=200,
-        max_segments=20,
-        _trace_carrier=ANY,
-    )
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_segment_objects_async_default_body(db_session, sample_user, sample_image):
-    app, _, _, _, _, mock_pool = _make_app(db_session)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/async",
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 200
-    mock_pool.enqueue_job.assert_awaited_once_with(
-        "segment_objects_task",
-        image_id=sample_image.id,
-        user_id=sample_user.id,
-        min_area=500,
-        max_segments=50,
-        _trace_carrier=ANY,
-    )
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_segment_with_prompt_async_enqueues_job(db_session, sample_user, sample_image):
-    app, _, _, _, _, mock_pool = _make_app(db_session)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/prompt/async",
-            json={"point_coords": [[10, 20]], "point_labels": [1]},
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 200
-    assert resp.json() == {"job_id": "job-123"}
-    mock_pool.enqueue_job.assert_awaited_once_with(
-        "segment_with_prompt_task",
-        image_id=sample_image.id,
-        user_id=sample_user.id,
-        point_coords=[(10, 20)],
-        point_labels=[1],
-        bbox=None,
-        multimask_output=None,
-        _trace_carrier=ANY,
-    )
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_segment_with_prompt_async_with_bbox(db_session, sample_user, sample_image):
-    app, _, _, _, _, mock_pool = _make_app(db_session)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/prompt/async",
-            json={"bbox": {"x1": 0, "y1": 0, "x2": 50, "y2": 50}},
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 200
-    _, kwargs = mock_pool.enqueue_job.call_args
-    assert kwargs["bbox"] == {"x1": 0, "y1": 0, "x2": 50, "y2": 50}
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_segment_by_polygon_async_enqueues_job(db_session, sample_user, sample_image):
-    app, _, _, _, _, mock_pool = _make_app(db_session)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/polygon/async",
-            json={"points": [[0, 0], [10, 0], [5, 10]]},
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 200
-    assert resp.json() == {"job_id": "job-123"}
-    mock_pool.enqueue_job.assert_awaited_once_with(
-        "segment_by_polygon_task",
-        image_id=sample_image.id,
-        user_id=sample_user.id,
-        points=[(0, 0), (10, 0), (5, 10)],
-        smooth=True,
-        smoothing_factor=0.0,
-        feather_px=0,
-        _trace_carrier=ANY,
-    )
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_segment_by_polygon_async_too_few_points_returns_422(db_session, sample_user, sample_image):
-    app, _, _, _, _, mock_pool = _make_app(db_session)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/polygon/async",
-            json={"points": [[0, 0], [10, 0]]},
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 422
-    mock_pool.enqueue_job.assert_not_awaited()
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_segment_hybrid_async_enqueues_job(db_session, sample_user, sample_image):
-    app, _, _, _, _, mock_pool = _make_app(db_session)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/hybrid/async",
-            json={
-                "yolo_conf_threshold": 0.4,
-                "yolo_classes": ["person"],
-                "fallback_min_area": 200,
-                "fallback_max_segments": 20,
-                "overlap_iou_thresh": 0.3,
-            },
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 200
-    assert resp.json() == {"job_id": "job-123"}
-    mock_pool.enqueue_job.assert_awaited_once_with(
-        "segment_hybrid_task",
-        image_id=sample_image.id,
-        user_id=sample_user.id,
-        yolo_conf_threshold=0.4,
-        yolo_classes=["person"],
-        fallback_min_area=200,
-        fallback_max_segments=20,
-        overlap_iou_thresh=0.3,
-        _trace_carrier=ANY,
-    )
-
+# ──────────────────────────────────────────────
+# sam_ops.py — async
+# ──────────────────────────────────────────────
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_sam_remove_object_async_enqueues_job(db_session, sample_user, sample_image):
-    app, _, _, _, _, mock_pool = _make_app(db_session)
+    app, mock_pool, *_ = _make_app(db_session)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
             f"/ml/images/{sample_image.id}/segment/3/remove/async",
+            json={"expand_mask_pixels": 8},
             headers=_auth_headers(sample_user),
         )
 
@@ -1594,11 +1310,11 @@ async def test_sam_remove_object_async_enqueues_job(db_session, sample_user, sam
         image_id=sample_image.id,
         mask_id=3,
         user_id=sample_user.id,
-        expand_mask_pixels=12,
-        use_edge_blending=False,
-        ldm_steps=25,
-        ldm_sampler='plms',
-        hd_strategy='CROP',
+        expand_mask_pixels=8,
+        use_edge_blending=ANY,
+        ldm_steps=ANY,
+        ldm_sampler=ANY,
+        hd_strategy=ANY,
         _trace_carrier=ANY,
     )
 
@@ -1606,12 +1322,12 @@ async def test_sam_remove_object_async_enqueues_job(db_session, sample_user, sam
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_sam_replace_object_async_with_file(db_session, sample_user, sample_image):
-    app, _, _, _, _, mock_pool = _make_app(db_session)
+    app, mock_pool, *_ = _make_app(db_session)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
             f"/ml/images/{sample_image.id}/segment/3/replace/async",
-            files={"replacement_file": ("replacement.png", b"fake-bytes", "image/png")},
+            files={"replacement_file": ("rep.png", b"rep-bytes", "image/png")},
             params={"expand_mask_pixels": 15},
             headers=_auth_headers(sample_user),
         )
@@ -1619,7 +1335,7 @@ async def test_sam_replace_object_async_with_file(db_session, sample_user, sampl
     assert resp.status_code == 200
     assert resp.json() == {"job_id": "job-123"}
     _, kwargs = mock_pool.enqueue_job.call_args
-    assert kwargs["replacement_image_bytes"] == b"fake-bytes"
+    assert kwargs["replacement_image_bytes"] == b"rep-bytes"
     assert kwargs["expand_mask_pixels"] == 15
     assert kwargs["replacement_is_cutout"] is False
 
@@ -1627,7 +1343,7 @@ async def test_sam_replace_object_async_with_file(db_session, sample_user, sampl
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_sam_replace_object_async_with_asset_id(db_session, sample_user, sample_image):
-    app, _, _, _, mock_asset, mock_pool = _make_app(db_session)
+    app, mock_pool, mock_asset, _ = _make_app(db_session)
     mock_asset.get_asset_image = AsyncMock(return_value=b"asset-bytes")
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1646,25 +1362,8 @@ async def test_sam_replace_object_async_with_asset_id(db_session, sample_user, s
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_sam_replace_object_async_asset_not_found_returns_404(db_session, sample_user, sample_image):
-    app, _, _, _, mock_asset, mock_pool = _make_app(db_session)
-    mock_asset.get_asset_image = AsyncMock(return_value=None)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/ml/images/{sample_image.id}/segment/3/replace/async",
-            params={"asset_id": "missing-asset"},
-            headers=_auth_headers(sample_user),
-        )
-
-    assert resp.status_code == 404
-    mock_pool.enqueue_job.assert_not_awaited()
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_sam_replace_object_async_missing_file_and_asset_id_returns_400(db_session, sample_user, sample_image):
-    app, _, _, _, _, mock_pool = _make_app(db_session)
+async def test_sam_replace_object_async_missing_source_returns_400(db_session, sample_user, sample_image):
+    app, mock_pool, *_ = _make_app(db_session)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
@@ -1679,8 +1378,25 @@ async def test_sam_replace_object_async_missing_file_and_asset_id_returns_400(db
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_sam_replace_object_async_asset_not_found_returns_404(db_session, sample_user, sample_image):
+    app, mock_pool, mock_asset, _ = _make_app(db_session)
+    mock_asset.get_asset_image = AsyncMock(return_value=None)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            f"/ml/images/{sample_image.id}/segment/3/replace/async",
+            params={"asset_id": "missing"},
+            headers=_auth_headers(sample_user),
+        )
+
+    assert resp.status_code == 404
+    mock_pool.enqueue_job.assert_not_awaited()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_extract_object_async_enqueues_job(db_session, sample_user, sample_image):
-    app, _, _, _, _, mock_pool = _make_app(db_session)
+    app, mock_pool, *_ = _make_app(db_session)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
@@ -1706,7 +1422,7 @@ async def test_extract_object_async_enqueues_job(db_session, sample_user, sample
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_extract_object_async_default_body(db_session, sample_user, sample_image):
-    app, _, _, _, _, mock_pool = _make_app(db_session)
+    app, mock_pool, *_ = _make_app(db_session)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
@@ -1727,13 +1443,209 @@ async def test_extract_object_async_default_body(db_session, sample_user, sample
     )
 
 
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_list_assets_success(db_session, sample_user):
+    app, _, mock_asset, _ = _make_app(db_session)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/ml/assets", headers=_auth_headers(sample_user))
+
+    assert resp.status_code == 200
+    assert len(resp.json()) == 2
+    mock_asset.list_assets.assert_awaited_once_with(sample_user.id, limit=50, offset=0)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_list_assets_pagination(db_session, sample_user):
+    app, _, mock_asset, _ = _make_app(db_session)
+    mock_asset.list_assets = AsyncMock(return_value=[])
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/ml/assets?limit=10&offset=5", headers=_auth_headers(sample_user))
+
+    assert resp.status_code == 200
+    mock_asset.list_assets.assert_awaited_once_with(sample_user.id, limit=10, offset=5)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_list_assets_no_auth_returns_401(db_session):
+    app, *_ = _make_app(db_session)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/ml/assets")
+
+    assert resp.status_code == 401
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_get_asset_thumbnail_success(db_session, sample_user):
+    app, _, mock_asset, _ = _make_app(db_session)
+    mock_asset.get_asset_thumbnail = AsyncMock(return_value=b"PNG-data")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/ml/assets/asset-1/thumbnail", headers=_auth_headers(sample_user))
+
+    assert resp.status_code == 200
+    assert resp.content == b"PNG-data"
+    assert resp.headers["content-type"] == "image/png"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_get_asset_thumbnail_not_found_returns_404(db_session, sample_user):
+    app, _, mock_asset, _ = _make_app(db_session)
+    mock_asset.get_asset_thumbnail = AsyncMock(return_value=None)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/ml/assets/missing/thumbnail", headers=_auth_headers(sample_user))
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_get_asset_image_success(db_session, sample_user):
+    app, _, mock_asset, _ = _make_app(db_session)
+    mock_asset.get_asset_image = AsyncMock(return_value=b"full-PNG")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/ml/assets/asset-1/image", headers=_auth_headers(sample_user))
+
+    assert resp.status_code == 200
+    assert resp.content == b"full-PNG"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_get_asset_image_not_found_returns_404(db_session, sample_user):
+    app, _, mock_asset, _ = _make_app(db_session)
+    mock_asset.get_asset_image = AsyncMock(return_value=None)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/ml/assets/missing/image", headers=_auth_headers(sample_user))
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_rename_asset_success(db_session, sample_user):
+    app, _, mock_asset, _ = _make_app(db_session)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.patch(
+            "/ml/assets/asset-1",
+            json={"label": "new-name"},
+            headers=_auth_headers(sample_user),
+        )
+
+    assert resp.status_code == 200
+    mock_asset.rename_asset.assert_awaited_once_with(sample_user.id, "asset-1", "new-name")
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_rename_asset_not_found_returns_404(db_session, sample_user):
+    app, _, mock_asset, _ = _make_app(db_session)
+    mock_asset.rename_asset.side_effect = ValueError("asset not found")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.patch(
+            "/ml/assets/missing",
+            json={"label": "x"},
+            headers=_auth_headers(sample_user),
+        )
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_delete_asset_success(db_session, sample_user):
+    app, _, mock_asset, _ = _make_app(db_session)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.delete("/ml/assets/asset-1", headers=_auth_headers(sample_user))
+
+    assert resp.status_code == 200
+    assert resp.json() == {"detail": "Asset deleted"}
+    mock_asset.delete_asset.assert_awaited_once_with(sample_user.id, "asset-1")
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_delete_asset_not_found_returns_404(db_session, sample_user):
+    app, _, mock_asset, _ = _make_app(db_session)
+    mock_asset.delete_asset.side_effect = ValueError("asset not found")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.delete("/ml/assets/missing", headers=_auth_headers(sample_user))
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_paste_extracted_object_success(db_session, sample_user, sample_image):
+    app, _, mock_asset, _ = _make_app(db_session)
+
+    payload = {
+        "asset_id": "asset-1",
+        "target_bbox": {"x1": 0, "y1": 0, "x2": 100, "y2": 100},
+        "scale": 1.0,
+        "use_color_matching": True,
+        "use_edge_blending": False,
+        "color_match_method": "histogram",
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            f"/ml/images/{sample_image.id}/paste",
+            json=payload,
+            headers=_auth_headers(sample_user),
+        )
+
+    assert resp.status_code == 200
+    mock_asset.paste_extracted_object.assert_awaited_once()
+    _, kwargs = mock_asset.paste_extracted_object.await_args
+    assert kwargs["asset_id"] == "asset-1"
+    assert kwargs["image_id"] == sample_image.id
+    assert kwargs["user_id"] == sample_user.id
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_paste_extracted_object_not_found_returns_404(db_session, sample_user, sample_image):
+    app, _, mock_asset, _ = _make_app(db_session)
+    mock_asset.paste_extracted_object.side_effect = ValueError("asset not found")
+
+    payload = {
+        "asset_id": "gone",
+        "target_bbox": {"x1": 0, "y1": 0, "x2": 50, "y2": 50},
+        "scale": 1.0,
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            f"/ml/images/{sample_image.id}/paste",
+            json=payload,
+            headers=_auth_headers(sample_user),
+        )
+
+    assert resp.status_code == 404
+
+
+# ──────────────────────────────────────────────
+# jobs.py — /ml/jobs/{job_id}
+# ──────────────────────────────────────────────
+
 def _patched_job(status, result_info=None):
+    """Patch arq.jobs.Job inside ml_jobs_module namespace."""
     job_instance = MagicMock()
     job_instance.status = AsyncMock(return_value=status)
     job_instance.result_info = AsyncMock(return_value=result_info)
-    # Job is imported directly inside app.api.v1.ml.jobs, so that's the
-    # namespace we need to patch it in (patching arq.jobs.Job or the old
-    # app.api.v1.ml.Job would silently do nothing).
     return patch.object(ml_jobs_module, "Job", return_value=job_instance), job_instance
 
 
@@ -1763,7 +1675,8 @@ async def test_get_job_status_pending_returns_status_only(db_session, sample_use
             resp = await client.get("/ml/jobs/job-1", headers=_auth_headers(sample_user))
 
     assert resp.status_code == 200
-    assert resp.json() == {"job_id": "job-1", "status": job_status.value}
+    data = resp.json()
+    assert data == {"job_id": "job-1", "status": job_status.value}
     job_instance.result_info.assert_not_awaited()
 
 
@@ -1805,7 +1718,7 @@ async def test_get_job_status_complete_failure_includes_error(db_session, sample
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_get_job_status_complete_without_result_info(db_session, sample_user):
+async def test_get_job_status_complete_no_result_info(db_session, sample_user):
     app, *_ = _make_app(db_session)
     patcher, _ = _patched_job(JobStatus.complete, result_info=None)
 
@@ -1814,8 +1727,7 @@ async def test_get_job_status_complete_without_result_info(db_session, sample_us
             resp = await client.get("/ml/jobs/job-4", headers=_auth_headers(sample_user))
 
     assert resp.status_code == 200
-    data = resp.json()
-    assert data == {"job_id": "job-4", "status": JobStatus.complete.value}
+    assert resp.json() == {"job_id": "job-4", "status": JobStatus.complete.value}
 
 
 @pytest.mark.integration

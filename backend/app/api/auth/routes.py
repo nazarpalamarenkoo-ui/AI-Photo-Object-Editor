@@ -12,7 +12,7 @@ from app.api.auth.mail import (
 )
 from app.api.auth.schema import SignInArgs, SignUpArgs
 from app.api.auth.auth import create_access_token
-from app.db.db_connect import get_db
+from app.db.db_connect import get_db_session
 from app.repository.user_repo import UserRepository
 from app.services.user_service import UserService
 from app.core.logging import get_logger, bind_user
@@ -22,8 +22,8 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
 
-def get_user_service(db: AsyncSession = Depends(get_db)) -> UserService:
-    return UserService(db=db, user_repo=UserRepository(db))
+def get_user_service() -> UserService:
+    return UserService(user_repo=UserRepository(get_db_session))
 
 
 @router.post("/login")
@@ -83,7 +83,7 @@ async def signup_confirmation(
 @router.post("/password-recovery")
 async def recover_password(
     email: EmailStr,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_session)
 ):
     token = generate_password_reset_token(email)
     await send_reset_password_email(db, email, token)

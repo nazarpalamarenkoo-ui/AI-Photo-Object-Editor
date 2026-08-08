@@ -20,29 +20,31 @@ def mock_user():
 @pytest.fixture
 def mock_service():
     service = MagicMock()
-    service.get_image_detections = AsyncMock()
+    service.get_detections = AsyncMock()
     service.get_detection_by_bbox_id = AsyncMock()
     service.get_detection_stats = AsyncMock()
-    service.delete_image_detections = AsyncMock()
+    service.delete_version_detections = AsyncMock()
     return service
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_get_image_detections_success(mock_user, mock_service):
-    mock_service.get_image_detections.return_value = [{"id": 1}]
+    mock_service.get_detections.return_value = [{"id": 1}]
 
     result = await get_image_detections(
         image_id=10,
-        use_cache=True,
+        version_id=None,
+        active_only=True,
         current_user=mock_user,
         service=mock_service
     )
 
-    mock_service.get_image_detections.assert_called_once_with(
+    mock_service.get_detections.assert_called_once_with(
         image_id=10,
         user_id=1,
-        use_cache=True
+        version_id=None,
+        active_only=True
     )
     assert len(result) == 1
 
@@ -50,7 +52,7 @@ async def test_get_image_detections_success(mock_user, mock_service):
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_get_image_detections_not_found(mock_user, mock_service):
-    mock_service.get_image_detections.side_effect = ValueError("not found")
+    mock_service.get_detections.side_effect = ValueError("not found")
 
     with pytest.raises(HTTPException) as exc:
         await get_image_detections(image_id=10, current_user=mock_user, service=mock_service)
@@ -61,7 +63,7 @@ async def test_get_image_detections_not_found(mock_user, mock_service):
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_get_image_detections_unauthorized(mock_user, mock_service):
-    mock_service.get_image_detections.side_effect = ValueError("unauthorized")
+    mock_service.get_detections.side_effect = ValueError("unauthorized")
 
     with pytest.raises(HTTPException) as exc:
         await get_image_detections(image_id=10, current_user=mock_user, service=mock_service)
@@ -72,7 +74,7 @@ async def test_get_image_detections_unauthorized(mock_user, mock_service):
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_get_image_detections_other_error(mock_user, mock_service):
-    mock_service.get_image_detections.side_effect = ValueError("some error")
+    mock_service.get_detections.side_effect = ValueError("some error")
 
     with pytest.raises(HTTPException) as exc:
         await get_image_detections(image_id=10, current_user=mock_user, service=mock_service)
@@ -95,7 +97,8 @@ async def test_get_detection_by_bbox_success(mock_user, mock_service):
     mock_service.get_detection_by_bbox_id.assert_called_once_with(
         image_id=1,
         bbox_id=2,
-        user_id=1
+        user_id=1,
+        version_id=None
     )
     assert result["id"] == 1
 
@@ -162,7 +165,7 @@ async def test_get_detection_stats_unauthorized(mock_user, mock_service):
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_delete_image_detections_success(mock_user, mock_service):
-    mock_service.delete_image_detections.return_value = 5
+    mock_service.delete_version_detections.return_value = 5
 
     result = await delete_image_detections(
         image_id=1,
@@ -170,14 +173,14 @@ async def test_delete_image_detections_success(mock_user, mock_service):
         service=mock_service
     )
 
-    mock_service.delete_image_detections.assert_called_once_with(image_id=1, user_id=1)
+    mock_service.delete_version_detections.assert_called_once_with(image_id=1, user_id=1)
     assert result["deleted"] == 5
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_delete_image_detections_not_found(mock_user, mock_service):
-    mock_service.delete_image_detections.side_effect = ValueError("not found")
+    mock_service.delete_version_detections.side_effect = ValueError("not found")
 
     with pytest.raises(HTTPException) as exc:
         await delete_image_detections(image_id=1, current_user=mock_user, service=mock_service)
@@ -188,7 +191,7 @@ async def test_delete_image_detections_not_found(mock_user, mock_service):
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_delete_image_detections_unauthorized(mock_user, mock_service):
-    mock_service.delete_image_detections.side_effect = ValueError("unauthorized")
+    mock_service.delete_version_detections.side_effect = ValueError("unauthorized")
 
     with pytest.raises(HTTPException) as exc:
         await delete_image_detections(image_id=1, current_user=mock_user, service=mock_service)
