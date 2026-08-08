@@ -2,11 +2,8 @@ from typing import List, Optional, Literal, Tuple
 from pydantic import BaseModel, Field, model_validator
 from datetime import datetime
 
-class BboxSchema(BaseModel):
-    x1: int
-    y1: int
-    x2: int
-    y2: int
+from app.db.schemas.common import BboxSchema
+from app.db.schemas.assets import AssetResponse  
 
 
 class LdmConfig(BaseModel):
@@ -71,17 +68,6 @@ class ReplaceRequest(BaseModel):
         )
 
 
-class SegmentRequest(BaseModel):
-    min_area: int = Field(500, ge=0)
-    max_segments: int = Field(50, ge=1, le=200)
-
-
-class SegmentWithPromptRequest(BaseModel):
-    point_coords: Optional[List[Tuple[int, int]]] = None
-    point_labels: Optional[List[int]] = None   # 1=fg, 0=bg
-    bbox: Optional[BboxSchema] = None
-    multimask_output: Optional[bool] = None
-
 class SamRemoveRequest(BaseModel):
     expand_mask_pixels: int = Field(12, ge=0, le=50)
     use_edge_blending: bool = False
@@ -121,7 +107,7 @@ class SamReplaceDiffusionRequest(BaseModel):
             "x1": self.bbox_x1, "y1": self.bbox_y1,
             "x2": self.bbox_x2, "y2": self.bbox_y2,
         }
-        
+
 class SamReplaceRequest(BaseModel):
     expand_mask_pixels: int = 8
     use_color_matching: bool = False
@@ -146,7 +132,7 @@ class ExtractRequest(BaseModel):
 
 
 class PasteRequest(BaseModel):
-    target_bbox: "BboxSchema"          
+    target_bbox: BboxSchema
     asset_id: Optional[str] = None
     extracted_url: Optional[str] = None
     scale: float = 1.0
@@ -168,39 +154,10 @@ class MLResultResponse(BaseModel):
     timestamp: datetime
 
 
-class SegmentInfo(BaseModel):
-    mask_id: int
-    bbox_id: int
-    bbox: BboxSchema
-    area: int
-    stability_score: Optional[float] = None
-    mask_url: Optional[str] = None  # base64 PNG data URL of the raster mask
-
-
-class SegmentResponse(BaseModel):
-    segments: List[SegmentInfo]
-    metrics: dict
-    image_size: Tuple[int, int]
-    timestamp: datetime
-
-class SegmentByPolygonRequest(BaseModel):
-    points: List[Tuple[int, int]] = Field(..., min_length=3)
-    smooth: bool = True
-    smoothing_factor: float = 0.0
-    feather_px: int = 0
-
-class SegmentHybridRequest(BaseModel):
-    yolo_conf_threshold: float = 0.35
-    yolo_classes: Optional[List[str]] = None
-    fallback_min_area: int = 800
-    fallback_max_segments: int = 50
-    overlap_iou_thresh: float = 0.5
-    
-    
 class ExtractResponse(BaseModel):
     asset_id: str
-    extracted_url: Optional[str] = None
-    presigned_url: Optional[str] = None
+    storage_path: str
+    thumbnail_path: Optional[str] = None
     object_size: tuple
     area_pixels: int
     cropped_bbox: dict
@@ -213,15 +170,6 @@ class PasteResponse(BaseModel):
     paste_bbox: BboxSchema
     object_size: Tuple[int, int]
     timestamp: datetime
-    
-class AssetResponse(BaseModel):
-    asset_id: str
-    source_image_id: int
-    object_size: tuple
-    area_pixels: int
-    label: Optional[str] = None
-    s3_url: Optional[str] = None
-    created_at: str
 
 
 class RenameAssetRequest(BaseModel):

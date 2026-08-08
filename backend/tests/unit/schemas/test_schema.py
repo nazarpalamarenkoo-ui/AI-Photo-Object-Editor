@@ -2,217 +2,415 @@ import pytest
 from datetime import datetime
 from pydantic import ValidationError
 
-from app.db.schemas.ml import (
-    BboxSchema,
-    LdmConfig,
-    DetectRequest,
-    RemoveRequest,
-    RemoveMultipleRequest,
-    ReplaceRequest,
-    SegmentRequest,
-    SegmentWithPromptRequest,
-    SamRemoveRequest,
-    SamReplaceDiffusionRequest,
-    SamReplaceRequest,
-    ExtractRequest,
-    PasteRequest,
-    MLResultResponse,
-    SegmentInfo,
-    SegmentResponse,
-    SegmentByPolygonRequest,
-    ExtractResponse,
-    PasteResponse,
+from app.db.schemas.common import BboxSchema
+
+from app.db.schemas.assets import (
+    AssetBase,
+    AssetCreate,
+    AssetUpdate,
     AssetResponse,
-    RenameAssetRequest,
 )
 
+from app.db.schemas.detection import (
+    DetectionBase,
+    DetectionCreate,
+    DetectionUpdate,
+    DetectionResponse,
+)
+
+from app.db.schemas.image import (
+    ImageBase,
+    ImageCreate,
+    ImageResponse,
+)
+
+from app.db.schemas.image_content import (
+    ImageContentBase,
+    ImageContentCreate,
+    ImageContentResponse,
+)
+
+from app.db.schemas.image_edit_history import (
+    ImageEditHistoryBase,
+    ImageEditHistoryCreate,
+    ImageEditHistoryResponse,
+)
+
+from app.db.schemas.image_version import (
+    ImageVersionBase,
+    ImageVersionCreate,
+    ImageVersionResponse,
+)
+
+from app.db.schemas.model_meta import ModelMeta
+
+from app.db.schemas.segmentation import (
+    SegmentRequest,
+    SegmentWithPromptRequest,
+    SegmentByPolygonRequest,
+    SegmentHybridRequest,
+    SegmentInfo,
+    SegmentResponse,
+    SegmentationMaskBase,
+    SegmentationMaskCreate,
+    SegmentationMaskUpdate,
+    SegmentationMaskResponse,
+)
+
+from app.db.schemas.user import (
+    UserBase,
+    UserCreate,
+    UserResponse,
+    UserUpdate,
+    ChangePassword,
+)
+
+from app.db.enums.edit_operation import EditOperation
+from app.db.enums.engine_types import EngineType
+from app.db.enums.segmentation_mode import SegmentationMode
 
 @pytest.mark.unit
 class TestBboxSchema:
-    def test_bbox_valid(self):
+    def test_valid(self):
         bbox = BboxSchema(x1=10, y1=20, x2=100, y2=200)
         assert (bbox.x1, bbox.y1, bbox.x2, bbox.y2) == (10, 20, 100, 200)
 
-    def test_bbox_zero_coords(self):
-        assert BboxSchema(x1=0, y1=0, x2=0, y2=0).x1 == 0
-
-    def test_bbox_negative_coords_allowed(self):
-        bbox = BboxSchema(x1=-10, y1=-20, x2=100, y2=200)
-        assert bbox.x1 == -10
-
-    def test_bbox_missing_field(self):
+    def test_missing_field_invalid(self):
         with pytest.raises(ValidationError):
             BboxSchema(x1=10, y1=20, x2=100)  # type: ignore
 
-    def test_bbox_wrong_type(self):
+    def test_wrong_type_invalid(self):
         with pytest.raises(ValidationError):
             BboxSchema(x1="a", y1=20, x2=100, y2=200)  # type: ignore
 
-
 @pytest.mark.unit
-class TestLdmConfig:
-    def test_defaults(self):
-        cfg = LdmConfig()
-        assert cfg.ldm_steps == 25
-        assert cfg.ldm_sampler == "plms"
-        assert cfg.hd_strategy == "CROP"
-
-    def test_custom_valid(self):
-        cfg = LdmConfig(ldm_steps=10, ldm_sampler="ddim", hd_strategy="RESIZE")
-        assert (cfg.ldm_steps, cfg.ldm_sampler, cfg.hd_strategy) == (10, "ddim", "RESIZE")
-
-    def test_hd_strategy_original(self):
-        assert LdmConfig(hd_strategy="ORIGINAL").hd_strategy == "ORIGINAL"
-
-    def test_steps_boundary_min(self):
-        assert LdmConfig(ldm_steps=5).ldm_steps == 5
-
-    def test_steps_boundary_max(self):
-        assert LdmConfig(ldm_steps=50).ldm_steps == 50
-
-    def test_steps_below_min_invalid(self):
-        with pytest.raises(ValidationError):
-            LdmConfig(ldm_steps=4)
-
-    def test_steps_above_max_invalid(self):
-        with pytest.raises(ValidationError):
-            LdmConfig(ldm_steps=51)
-
-    def test_invalid_sampler(self):
-        with pytest.raises(ValidationError):
-            LdmConfig(ldm_sampler="euler")  # type: ignore
-
-    def test_invalid_hd_strategy(self):
-        with pytest.raises(ValidationError):
-            LdmConfig(hd_strategy="INVALID")  # type: ignore
-
-
-@pytest.mark.unit
-class TestDetectRequest:
+class TestAssetBase:
     def test_valid(self):
-        req = DetectRequest(conf_threshold=0.7, classes=["person"])
-        assert req.conf_threshold == 0.7
-        assert req.classes == ["person"]
+        asset = AssetBase(width=100, height=200, area_pixels=20000)
+        assert asset.label is None
 
-    def test_defaults(self):
-        req = DetectRequest()
-        assert req.conf_threshold == 0.5
-        assert req.classes is None
+    def test_with_label(self):
+        asset = AssetBase(width=100, height=200, area_pixels=20000, label="cat")
+        assert asset.label == "cat"
 
-    def test_threshold_above_one_invalid(self):
+    def test_missing_required_field_invalid(self):
         with pytest.raises(ValidationError):
-            DetectRequest(conf_threshold=1.5)
-
-    def test_threshold_below_zero_invalid(self):
-        with pytest.raises(ValidationError):
-            DetectRequest(conf_threshold=-0.1)
-
-    def test_threshold_boundaries(self):
-        assert DetectRequest(conf_threshold=0.0).conf_threshold == 0.0
-        assert DetectRequest(conf_threshold=1.0).conf_threshold == 1.0
-
-    def test_empty_classes_list(self):
-        assert DetectRequest(classes=[]).classes == []
+            AssetBase(width=100, height=200)  # type: ignore
 
 
 @pytest.mark.unit
-class TestRemoveRequest:
+class TestAssetCreate:
     def test_defaults(self):
-        req = RemoveRequest()
-        assert req.expand_mask_pixels == 5
-        assert req.use_edge_blending is False
-        assert req.ldm.ldm_steps == 25
+        asset = AssetCreate(
+            width=100, height=200, area_pixels=20000,
+            user_id=1, storage_path="s3://a.png",
+        )
+        assert asset.content_type == "image/png"
+        assert asset.thumbnail_path is None
+        assert asset.file_size is None
+        assert asset.source_image_version_id is None
+        assert asset.source_segmentation_mask_id is None
 
-    def test_with_custom_ldm_fields(self):
-        req = RemoveRequest(ldm_steps=10, ldm_sampler="ddim", hd_strategy="RESIZE")
-        assert req.ldm.ldm_steps == 10
-        assert req.ldm.ldm_sampler == "ddim"
-        assert req.ldm.hd_strategy == "RESIZE"
-
-    def test_ldm_property_returns_new_instance_each_time(self):
-        req = RemoveRequest()
-        assert req.ldm is not req.ldm
-
-    def test_expand_mask_pixels_boundaries(self):
-        assert RemoveRequest(expand_mask_pixels=0).expand_mask_pixels == 0
-        assert RemoveRequest(expand_mask_pixels=50).expand_mask_pixels == 50
-
-    def test_expand_mask_pixels_above_max_invalid(self):
+    def test_missing_user_id_invalid(self):
         with pytest.raises(ValidationError):
-            RemoveRequest(expand_mask_pixels=51)
+            AssetCreate(width=100, height=200, area_pixels=20000, storage_path="s3://a.png")  # type: ignore
 
-    def test_expand_mask_pixels_below_min_invalid(self):
-        with pytest.raises(ValidationError):
-            RemoveRequest(expand_mask_pixels=-1)
-
-    def test_edge_blending_true(self):
-        assert RemoveRequest(use_edge_blending=True).use_edge_blending is True
-
-    def test_ldm_steps_below_min_invalid(self):
-        with pytest.raises(ValidationError):
-            RemoveRequest(ldm_steps=4)
-
-    def test_invalid_sampler_invalid(self):
-        with pytest.raises(ValidationError):
-            RemoveRequest(ldm_sampler="euler")  # type: ignore
+    def test_custom_content_type(self):
+        asset = AssetCreate(
+            width=100, height=200, area_pixels=20000,
+            user_id=1, storage_path="s3://a.png", content_type="image/jpeg",
+        )
+        assert asset.content_type == "image/jpeg"
 
 
 @pytest.mark.unit
-class TestRemoveMultipleRequest:
+class TestAssetUpdate:
     def test_valid(self):
-        req = RemoveMultipleRequest(bbox_ids=[1, 2, 3])
-        assert len(req.bbox_ids) == 3
+        assert AssetUpdate(label="new-label").label == "new-label"
 
-    def test_empty_bbox_ids_invalid(self):
+    def test_missing_label_invalid(self):
         with pytest.raises(ValidationError):
-            RemoveMultipleRequest(bbox_ids=[])
-
-    def test_single_id(self):
-        assert RemoveMultipleRequest(bbox_ids=[42]).bbox_ids == [42]
-
-    def test_defaults(self):
-        req = RemoveMultipleRequest(bbox_ids=[1])
-        assert req.expand_mask_pixels == 5
-        assert req.use_edge_blending is False
-        assert req.ldm.ldm_steps == 25
-
-    def test_missing_bbox_ids_invalid(self):
-        with pytest.raises(ValidationError):
-            RemoveMultipleRequest()  # type: ignore
-
-    def test_custom_ldm_fields_reflected_in_property(self):
-        req = RemoveMultipleRequest(bbox_ids=[1, 2], ldm_steps=15, ldm_sampler="ddim")
-        assert req.ldm.ldm_steps == 15
-        assert req.ldm.ldm_sampler == "ddim"
+            AssetUpdate()  # type: ignore
 
 
 @pytest.mark.unit
-class TestReplaceRequest:
+class TestAssetResponse:
+    def test_valid(self):
+        resp = AssetResponse(
+            width=100, height=200, area_pixels=20000,
+            public_id="pub-1", storage_path="s3://a.png",
+            content_type="image/png", created_at=datetime(2025, 1, 1),
+        )
+        assert resp.public_id == "pub-1"
+        assert resp.thumbnail_path is None
+
+    def test_missing_required_field_invalid(self):
+        with pytest.raises(ValidationError):
+            AssetResponse(
+                width=100, height=200, area_pixels=20000,
+                public_id="pub-1", storage_path="s3://a.png",
+                content_type="image/png",
+            )  # type: ignore
+
+    def test_from_attributes_config_enabled(self):
+        assert AssetResponse.model_config.get("from_attributes") is True
+
+@pytest.mark.unit
+class TestDetectionBase:
     def test_defaults(self):
-        req = ReplaceRequest()
-        assert req.expand_mask_pixels == 0
-        assert req.use_color_matching is False
-        assert req.use_edge_blending is False
-        assert req.color_match_method == "mean_std"
+        det = DetectionBase(x1=1, y1=2, x2=3, y2=4, confidence=0.5)
+        assert det.detected_class == "unknown"
 
-    def test_custom_method(self):
-        assert ReplaceRequest(color_match_method="histogram").color_match_method == "histogram"
-
-    def test_invalid_method(self):
+    def test_missing_confidence_invalid(self):
         with pytest.raises(ValidationError):
-            ReplaceRequest(color_match_method="invalid")  # type: ignore
+            DetectionBase(x1=1, y1=2, x2=3, y2=4)  # type: ignore
 
-    def test_all_valid_methods(self):
-        for method in ["mean_std", "histogram", "color_transfer"]:
-            assert ReplaceRequest(color_match_method=method).color_match_method == method
+    def test_custom_class(self):
+        det = DetectionBase(x1=1, y1=2, x2=3, y2=4, confidence=0.9, detected_class="dog")
+        assert det.detected_class == "dog"
 
-    def test_color_matching_true(self):
-        assert ReplaceRequest(use_color_matching=True).use_color_matching is True
 
-    def test_expand_mask_pixels_above_max_invalid(self):
+@pytest.mark.unit
+class TestDetectionCreate:
+    def test_valid(self):
+        det = DetectionCreate(
+            x1=1, y1=2, x2=3, y2=4, confidence=0.9,
+            content_id=1, bbox_id=1,
+            model_name="yolo", model_version="v8", inference_time_ms=12.5,
+        )
+        assert det.content_id == 1
+        assert det.model_name == "yolo"
+
+    def test_missing_model_name_invalid(self):
         with pytest.raises(ValidationError):
-            ReplaceRequest(expand_mask_pixels=51)
+            DetectionCreate(
+                x1=1, y1=2, x2=3, y2=4, confidence=0.9,
+                content_id=1, bbox_id=1,
+                model_version="v8", inference_time_ms=12.5,
+            )  # type: ignore
 
+
+@pytest.mark.unit
+class TestDetectionUpdate:
+    def test_default_none(self):
+        assert DetectionUpdate().is_active is None
+
+    def test_set_false(self):
+        assert DetectionUpdate(is_active=False).is_active is False
+
+
+@pytest.mark.unit
+class TestDetectionResponse:
+    def test_valid(self):
+        resp = DetectionResponse(
+            x1=1, y1=2, x2=3, y2=4, confidence=0.9,
+            id=1, content_id=1, bbox_id=1, is_active=True,
+            model_name="yolo", model_version="v8", inference_time_ms=12.5,
+            created_at=datetime(2025, 1, 1),
+        )
+        assert resp.id == 1
+        assert resp.is_active is True
+
+    def test_missing_required_field_invalid(self):
+        with pytest.raises(ValidationError):
+            DetectionResponse(
+                x1=1, y1=2, x2=3, y2=4, confidence=0.9,
+                id=1, content_id=1, bbox_id=1, is_active=True,
+                model_name="yolo", model_version="v8",
+                created_at=datetime(2025, 1, 1),
+            )  # type: ignore
+
+@pytest.mark.unit
+class TestImageBase:
+    def test_valid(self):
+        img = ImageBase(filename="a.jpg", storage_path="s3://a.jpg")
+        assert img.filename == "a.jpg"
+
+    def test_missing_field_invalid(self):
+        with pytest.raises(ValidationError):
+            ImageBase(filename="a.jpg")  # type: ignore
+
+
+@pytest.mark.unit
+class TestImageCreate:
+    def test_valid(self):
+        img = ImageCreate(filename="a.jpg", storage_path="s3://a.jpg", user_id=1)
+        assert img.user_id == 1
+
+
+@pytest.mark.unit
+class TestImageResponse:
+    def test_valid(self):
+        resp = ImageResponse(
+            filename="a.jpg", storage_path="s3://a.jpg",
+            id=1, uploaded_at=datetime(2025, 1, 1, 12, 30),
+        )
+        assert resp.cache_key is None
+
+    def test_uploaded_at_serialized_to_isoformat(self):
+        resp = ImageResponse(
+            filename="a.jpg", storage_path="s3://a.jpg",
+            id=1, uploaded_at=datetime(2025, 1, 1, 12, 30),
+        )
+        dumped = resp.model_dump(mode="json")
+        assert dumped["uploaded_at"] == datetime(2025, 1, 1, 12, 30).isoformat()
+
+    def test_with_cache_key(self):
+        resp = ImageResponse(
+            filename="a.jpg", storage_path="s3://a.jpg",
+            id=1, uploaded_at=datetime(2025, 1, 1), cache_key="abc123",
+        )
+        assert resp.cache_key == "abc123"
+
+@pytest.mark.unit
+class TestImageContentBase:
+    def test_valid(self):
+        content = ImageContentBase(width=100, height=100, file_size=1024)
+        assert content.file_size == 1024
+
+    def test_missing_field_invalid(self):
+        with pytest.raises(ValidationError):
+            ImageContentBase(width=100, height=100)  # type: ignore
+
+
+@pytest.mark.unit
+class TestImageContentCreate:
+    def test_valid(self):
+        content = ImageContentCreate(
+            width=100, height=100, file_size=1024,
+            content_hash="a" * 64, storage_path="s3://c.png",
+        )
+        assert content.content_hash == "a" * 64
+
+
+@pytest.mark.unit
+class TestImageContentResponse:
+    def test_valid(self):
+        resp = ImageContentResponse(
+            width=100, height=100, file_size=1024,
+            id=1, content_hash="a" * 64, storage_path="s3://c.png",
+            created_at=datetime(2025, 1, 1),
+        )
+        assert resp.id == 1
+
+    def test_missing_required_field_invalid(self):
+        with pytest.raises(ValidationError):
+            ImageContentResponse(
+                width=100, height=100, file_size=1024,
+                id=1, content_hash="a" * 64,
+                created_at=datetime(2025, 1, 1),
+            )  # type: ignore
+
+@pytest.mark.unit
+class TestImageEditHistoryBase:
+    def test_valid(self):
+        entry = ImageEditHistoryBase(
+            image_version_id=1,
+            operation=EditOperation.REMOVE,
+            engine=EngineType.LAMA,
+        )
+        assert entry.parameters is None
+        assert entry.processing_time_ms is None
+
+    def test_invalid_operation_value(self):
+        with pytest.raises(ValidationError):
+            ImageEditHistoryBase(
+                image_version_id=1, operation="not_a_real_op", engine=EngineType.LAMA
+            )  # type: ignore
+
+    def test_accepts_plain_string_matching_enum_value(self):
+        entry = ImageEditHistoryBase(
+            image_version_id=1, operation="detect", engine="yolo"
+        )
+        assert entry.operation == EditOperation.DETECT
+        assert entry.engine == EngineType.YOLO
+
+    def test_with_parameters(self):
+        entry = ImageEditHistoryBase(
+            image_version_id=1, operation=EditOperation.SEGMENT, engine=EngineType.SAM,
+            parameters={"threshold": 0.5}, processing_time_ms=120,
+        )
+        assert entry.parameters == {"threshold": 0.5}
+        assert entry.processing_time_ms == 120
+
+
+@pytest.mark.unit
+class TestImageEditHistoryCreate:
+    def test_valid(self):
+        entry = ImageEditHistoryCreate(
+            image_version_id=1, operation=EditOperation.REPLACE, engine=EngineType.DIFFUSION,
+        )
+        assert entry.operation == EditOperation.REPLACE
+
+
+@pytest.mark.unit
+class TestImageEditHistoryResponse:
+    def test_valid(self):
+        resp = ImageEditHistoryResponse(
+            image_version_id=1, operation=EditOperation.DETECT, engine=EngineType.YOLO,
+            id=1, created_at=datetime(2025, 1, 1),
+        )
+        assert resp.id == 1
+
+    def test_missing_created_at_invalid(self):
+        with pytest.raises(ValidationError):
+            ImageEditHistoryResponse(
+                image_version_id=1, operation=EditOperation.DETECT, engine=EngineType.YOLO,
+                id=1,
+            )  # type: ignore
+
+@pytest.mark.unit
+class TestImageVersionBase:
+    def test_valid(self):
+        version = ImageVersionBase(image_id=1, version_number=1, storage_path="s3://v1.png")
+        assert version.parent_version_id is None
+
+    def test_with_parent(self):
+        version = ImageVersionBase(
+            image_id=1, version_number=2, storage_path="s3://v2.png", parent_version_id=1,
+        )
+        assert version.parent_version_id == 1
+
+    def test_missing_field_invalid(self):
+        with pytest.raises(ValidationError):
+            ImageVersionBase(image_id=1, storage_path="s3://v1.png")  # type: ignore
+
+
+@pytest.mark.unit
+class TestImageVersionCreate:
+    def test_valid(self):
+        version = ImageVersionCreate(image_id=1, version_number=1, storage_path="s3://v1.png")
+        assert version.version_number == 1
+
+
+@pytest.mark.unit
+class TestImageVersionResponse:
+    def test_valid(self):
+        resp = ImageVersionResponse(
+            image_id=1, version_number=1, storage_path="s3://v1.png",
+            id=1, created_at=datetime(2025, 1, 1),
+        )
+        assert resp.id == 1
+
+    def test_missing_required_field_invalid(self):
+        with pytest.raises(ValidationError):
+            ImageVersionResponse(
+                image_id=1, version_number=1, storage_path="s3://v1.png", id=1,
+            )  # type: ignore
+@pytest.mark.unit
+class TestModelMeta:
+    def test_valid(self):
+        meta = ModelMeta(model_name="yolo", model_version="v8", inference_time_ms=12.5)
+        assert meta.model_name == "yolo"
+        assert meta.inference_time_ms == 12.5
+
+    def test_missing_field_invalid(self):
+        with pytest.raises(ValidationError):
+            ModelMeta(model_name="yolo", model_version="v8")  # type: ignore
+
+    def test_wrong_type_invalid(self):
+        with pytest.raises(ValidationError):
+            ModelMeta(model_name="yolo", model_version="v8", inference_time_ms="fast")  # type: ignore
 
 @pytest.mark.unit
 class TestSegmentRequest:
@@ -225,247 +423,28 @@ class TestSegmentRequest:
         with pytest.raises(ValidationError):
             SegmentRequest(min_area=-1)
 
-    def test_min_area_zero_valid(self):
-        assert SegmentRequest(min_area=0).min_area == 0
-
-    def test_max_segments_below_min_invalid(self):
+    def test_max_segments_bounds(self):
         with pytest.raises(ValidationError):
             SegmentRequest(max_segments=0)
-
-    def test_max_segments_above_max_invalid(self):
         with pytest.raises(ValidationError):
             SegmentRequest(max_segments=201)
-
-    def test_max_segments_boundaries(self):
-        assert SegmentRequest(max_segments=1).max_segments == 1
-        assert SegmentRequest(max_segments=200).max_segments == 200
 
 
 @pytest.mark.unit
 class TestSegmentWithPromptRequest:
-    def test_all_optional_defaults(self):
+    def test_all_optional(self):
         req = SegmentWithPromptRequest()
         assert req.point_coords is None
-        assert req.point_labels is None
         assert req.bbox is None
-        assert req.multimask_output is None
-
-    def test_with_points(self):
-        req = SegmentWithPromptRequest(point_coords=[(10, 20), (30, 40)], point_labels=[1, 0])
-        assert req.point_coords == [(10, 20), (30, 40)]
-        assert req.point_labels == [1, 0]
 
     def test_with_bbox(self):
-        req = SegmentWithPromptRequest(bbox=BboxSchema(x1=0, y1=0, x2=50, y2=50))
-        assert req.bbox.x2 == 50
-
-    def test_multimask_output_flag(self):
-        assert SegmentWithPromptRequest(multimask_output=True).multimask_output is True
-
-
-@pytest.mark.unit
-class TestSamRemoveRequest:
-    def test_defaults(self):
-        req = SamRemoveRequest()
-        assert req.expand_mask_pixels == 12
-        assert req.use_edge_blending is False
-        assert req.ldm.ldm_steps == 25
-
-    def test_expand_mask_pixels_above_max_invalid(self):
-        with pytest.raises(ValidationError):
-            SamRemoveRequest(expand_mask_pixels=51)
-
-    def test_expand_mask_pixels_below_min_invalid(self):
-        with pytest.raises(ValidationError):
-            SamRemoveRequest(expand_mask_pixels=-1)
-
-    def test_custom_ldm_reflected(self):
-        req = SamRemoveRequest(ldm_steps=30, hd_strategy="ORIGINAL")
-        assert req.ldm.ldm_steps == 30
-        assert req.ldm.hd_strategy == "ORIGINAL"
-
-
-@pytest.mark.unit
-class TestSamReplaceRequest:
-    def test_defaults(self):
-        req = SamReplaceRequest()
-        assert req.expand_mask_pixels == 8
-        assert req.use_color_matching is False
-        assert req.use_edge_blending is False
-        assert req.color_match_method == "color_transfer"
-        assert req.ldm_steps == 25
-        assert req.ldm_sampler == "plms"
-        assert req.hd_strategy == "CROP"
-
-    def test_color_match_method_is_plain_str_no_validation(self):
-        req = SamReplaceRequest(color_match_method="anything_goes")
-        assert req.color_match_method == "anything_goes"
-
-    def test_expand_mask_pixels_unconstrained(self):
-        req = SamReplaceRequest(expand_mask_pixels=999)
-        assert req.expand_mask_pixels == 999
-
-    def test_expand_mask_pixels_negative_allowed(self):
-        # plain int field with no ge/le constraint
-        req = SamReplaceRequest(expand_mask_pixels=-50)
-        assert req.expand_mask_pixels == -50
-
-    def test_ldm_property_builds_ldm_config(self):
-        req = SamReplaceRequest(ldm_steps=10, ldm_sampler="ddim", hd_strategy="RESIZE")
-        cfg = req.ldm
-        assert isinstance(cfg, LdmConfig)
-        assert (cfg.ldm_steps, cfg.ldm_sampler, cfg.hd_strategy) == (10, "ddim", "RESIZE")
-
-    def test_ldm_steps_field_itself_is_constrained(self):
-        # ldm_steps field on SamReplaceRequest DOES have ge/le constraints
-        with pytest.raises(ValidationError):
-            SamReplaceRequest(ldm_steps=4)
-
-
-@pytest.mark.unit
-class TestExtractRequest:
-    def test_default(self):
-        req = ExtractRequest()
-        assert req.padding_pixels == 8
-        assert req.label is None
-        assert req.persist_to_s3 is False
-
-    def test_padding_pixels_unconstrained(self):
-        req = ExtractRequest(padding_pixels=65)
-        assert req.padding_pixels == 65
-
-    def test_padding_pixels_negative_allowed(self):
-        req = ExtractRequest(padding_pixels=-5)
-        assert req.padding_pixels == -5
-
-    def test_with_label_and_persist(self):
-        req = ExtractRequest(label="cat", persist_to_s3=True)
-        assert req.label == "cat"
-        assert req.persist_to_s3 is True
-
-
-@pytest.mark.unit
-class TestPasteRequest:
-    def test_valid_with_extracted_url(self):
-        req = PasteRequest(
-            extracted_url="s3://obj.png",
-            target_bbox=BboxSchema(x1=0, y1=0, x2=10, y2=10),
-        )
-        assert req.scale == 1.0
-        assert req.color_match_method == "color_transfer"
-
-    def test_valid_with_asset_id(self):
-        req = PasteRequest(
-            asset_id="abc-123",
-            target_bbox=BboxSchema(x1=0, y1=0, x2=10, y2=10),
-        )
-        assert req.asset_id == "abc-123"
-
-    def test_scale_unconstrained(self):
-        req = PasteRequest(
-            extracted_url="s3://obj.png",
-            target_bbox=BboxSchema(x1=0, y1=0, x2=10, y2=10),
-            scale=3.5,
-        )
-        assert req.scale == 3.5
-
-    def test_missing_target_bbox_invalid(self):
-        with pytest.raises(ValidationError):
-            PasteRequest(extracted_url="s3://obj.png")  # type: ignore
-
-    def test_missing_both_source_fields_invalid(self):
-        with pytest.raises(ValidationError):
-            PasteRequest(target_bbox=BboxSchema(x1=0, y1=0, x2=10, y2=10))
-
-    def test_both_source_fields_present_is_valid(self):
-        req = PasteRequest(
-            asset_id="abc-123",
-            extracted_url="s3://obj.png",
-            target_bbox=BboxSchema(x1=0, y1=0, x2=10, y2=10),
-        )
-        assert req.asset_id == "abc-123"
-        assert req.extracted_url == "s3://obj.png"
-
-
-@pytest.mark.unit
-class TestMLResultResponse:
-    def test_valid(self):
-        res = MLResultResponse(
-            result_url="s3://result.jpg",
-            presigned_url="http://url",
-            metrics={"time": 0.5},
-            timestamp=datetime(2025, 1, 1),
-        )
-        assert res.result_url == "s3://result.jpg"
-
-    def test_empty_metrics(self):
-        res = MLResultResponse(
-            result_url="s3://result.jpg",
-            presigned_url="http://url",
-            metrics={},
-            timestamp=datetime(2025, 1, 1),
-        )
-        assert res.metrics == {}
-
-    def test_missing_field_invalid(self):
-        with pytest.raises(ValidationError):
-            MLResultResponse(
-                result_url="s3://result.jpg",
-                presigned_url="http://url",
-                metrics={},
-            )  # type: ignore
-
-
-@pytest.mark.unit
-class TestSegmentInfoAndResponse:
-    def test_segment_info_valid(self):
-        info = SegmentInfo(
-            mask_id=1, bbox_id=2,
-            bbox=BboxSchema(x1=0, y1=0, x2=10, y2=10),
-            area=100, stability_score=0.95,
-        )
-        assert info.area == 100
-        assert info.stability_score == 0.95
-
-    def test_segment_info_stability_score_optional(self):
-        info = SegmentInfo(
-            mask_id=1, bbox_id=2,
-            bbox=BboxSchema(x1=0, y1=0, x2=10, y2=10),
-            area=100,
-        )
-        assert info.stability_score is None
-
-    def test_segment_response_valid(self):
-        resp = SegmentResponse(
-            segments=[
-                SegmentInfo(
-                    mask_id=1, bbox_id=2,
-                    bbox=BboxSchema(x1=0, y1=0, x2=10, y2=10),
-                    area=100, stability_score=0.9,
-                )
-            ],
-            metrics={"count": 1},
-            image_size=(640, 480),
-            timestamp=datetime(2025, 1, 1),
-        )
-        assert len(resp.segments) == 1
-        assert resp.image_size == (640, 480)
-
-    def test_segment_response_empty_segments(self):
-        resp = SegmentResponse(
-            segments=[], metrics={}, image_size=(100, 100),
-            timestamp=datetime(2025, 1, 1),
-        )
-        assert resp.segments == []
+        req = SegmentWithPromptRequest(bbox=BboxSchema(x1=0, y1=0, x2=10, y2=10))
+        assert req.bbox.x2 == 10
 
 
 @pytest.mark.unit
 class TestSegmentByPolygonRequest:
-    def test_valid_triangle(self):
-        req = SegmentByPolygonRequest(points=[(0, 0), (10, 0), (5, 10)])
-        assert len(req.points) == 3
-
-    def test_defaults(self):
+    def test_valid(self):
         req = SegmentByPolygonRequest(points=[(0, 0), (10, 0), (5, 10)])
         assert req.smooth is True
         assert req.smoothing_factor == 0.0
@@ -475,332 +454,184 @@ class TestSegmentByPolygonRequest:
         with pytest.raises(ValidationError):
             SegmentByPolygonRequest(points=[(0, 0), (10, 0)])
 
+
+@pytest.mark.unit
+class TestSegmentHybridRequest:
+    def test_defaults(self):
+        req = SegmentHybridRequest()
+        assert req.yolo_conf_threshold == 0.35
+        assert req.yolo_classes is None
+        assert req.fallback_min_area == 800
+        assert req.fallback_max_segments == 50
+        assert req.overlap_iou_thresh == 0.5
+
     def test_custom_values(self):
-        req = SegmentByPolygonRequest(
-            points=[(0, 0), (10, 0), (5, 10)],
-            smooth=False, smoothing_factor=0.5, feather_px=3,
+        req = SegmentHybridRequest(
+            yolo_conf_threshold=0.6, yolo_classes=["person"],
+            fallback_min_area=1000, fallback_max_segments=10, overlap_iou_thresh=0.7,
         )
-        assert req.smooth is False
-        assert req.smoothing_factor == 0.5
-        assert req.feather_px == 3
+        assert req.yolo_conf_threshold == 0.6
+        assert req.yolo_classes == ["person"]
 
 
 @pytest.mark.unit
-class TestExtractResponse:
-    def test_valid_minimal(self):
-        resp = ExtractResponse(
-            asset_id="asset-1",
-            object_size=(50, 60),
-            area_pixels=3000,
-            cropped_bbox={"x1": 0, "y1": 0, "x2": 50, "y2": 60},
-            timestamp="2025-01-01T00:00:00",
+class TestSegmentInfoAndResponse:
+    def test_segment_info_valid(self):
+        info = SegmentInfo(
+            mask_id=1, bbox_id=2, bbox=BboxSchema(x1=0, y1=0, x2=10, y2=10), area=100,
         )
-        assert resp.object_size == (50, 60)
-        assert resp.area_pixels == 3000
-        assert resp.extracted_url is None
-        assert resp.presigned_url is None
+        assert info.stability_score is None
+        assert info.mask_url is None
 
-    def test_with_urls(self):
-        resp = ExtractResponse(
-            asset_id="asset-1",
-            extracted_url="s3://obj.png",
-            presigned_url="http://url",
-            object_size=(50, 60),
-            area_pixels=3000,
-            cropped_bbox={"x1": 0, "y1": 0, "x2": 50, "y2": 60},
-            timestamp="2025-01-01T00:00:00",
+    def test_segment_response_valid(self):
+        resp = SegmentResponse(
+            segments=[], metrics={}, image_size=(100, 100), timestamp=datetime(2025, 1, 1),
         )
-        assert resp.extracted_url == "s3://obj.png"
-        assert resp.presigned_url == "http://url"
-
-    def test_missing_required_field_invalid(self):
-        with pytest.raises(ValidationError):
-            ExtractResponse(
-                object_size=(50, 60),
-                area_pixels=3000,
-                cropped_bbox={},
-                timestamp="2025-01-01T00:00:00",
-            )  # type: ignore
+        assert resp.segments == []
 
 
 @pytest.mark.unit
-class TestPasteResponse:
+class TestSegmentationMaskBase:
     def test_valid(self):
-        resp = PasteResponse(
-            result_url="s3://result.png",
-            presigned_url="http://url",
-            paste_bbox=BboxSchema(x1=0, y1=0, x2=20, y2=20),
-            object_size=(20, 20),
-            timestamp=datetime(2025, 1, 1),
-        )
-        assert resp.paste_bbox.x2 == 20
-        assert resp.object_size == (20, 20)
+        mask = SegmentationMaskBase(x1=0, y1=0, x2=50, y2=50, area=2500.0, score=0.95)
+        assert mask.score == 0.95
 
     def test_missing_field_invalid(self):
         with pytest.raises(ValidationError):
-            PasteResponse(
-                result_url="s3://result.png",
-                presigned_url="http://url",
-                paste_bbox=BboxSchema(x1=0, y1=0, x2=20, y2=20),
-                timestamp=datetime(2025, 1, 1),
+            SegmentationMaskBase(x1=0, y1=0, x2=50, y2=50, area=2500.0)  # type: ignore
+
+
+@pytest.mark.unit
+class TestSegmentationMaskCreate:
+    def test_valid(self):
+        mask = SegmentationMaskCreate(
+            x1=0, y1=0, x2=50, y2=50, area=2500.0, score=0.95,
+            content_id=1, mask_id=1,
+            mask_storage_path="s3://m.png", preview_storage_path="s3://p.png",
+            segmentation_mode=SegmentationMode.SAM,
+            model_name="sam", model_version="v1", inference_time_ms=15.0,
+        )
+        assert mask.segmentation_mode == SegmentationMode.SAM
+
+    def test_invalid_segmentation_mode(self):
+        with pytest.raises(ValidationError):
+            SegmentationMaskCreate(
+                x1=0, y1=0, x2=50, y2=50, area=2500.0, score=0.95,
+                content_id=1, mask_id=1,
+                mask_storage_path="s3://m.png", preview_storage_path="s3://p.png",
+                segmentation_mode="not_a_mode",
+                model_name="sam", model_version="v1", inference_time_ms=15.0,
             )  # type: ignore
 
 
 @pytest.mark.unit
-class TestAssetResponse:
-    def test_valid_minimal(self):
-        resp = AssetResponse(
-            asset_id="asset-1",
-            source_image_id=1,
-            object_size=(50, 60),
-            area_pixels=3000,
-            created_at="2025-01-01T00:00:00",
-        )
-        assert resp.label is None
-        assert resp.s3_url is None
+class TestSegmentationMaskUpdate:
+    def test_default_none(self):
+        assert SegmentationMaskUpdate().is_active is None
 
-    def test_valid_full(self):
-        resp = AssetResponse(
-            asset_id="asset-1",
-            source_image_id=1,
-            object_size=(50, 60),
-            area_pixels=3000,
-            label="cat",
-            s3_url="s3://obj.png",
-            created_at="2025-01-01T00:00:00",
+    def test_set_value(self):
+        assert SegmentationMaskUpdate(is_active=False).is_active is False
+
+
+@pytest.mark.unit
+class TestSegmentationMaskResponse:
+    def test_valid(self):
+        resp = SegmentationMaskResponse(
+            x1=0, y1=0, x2=50, y2=50, area=2500.0, score=0.95,
+            id=1, content_id=1, mask_id=1, is_active=True,
+            segmentation_mode=SegmentationMode.HYBRID,
+            model_name="sam", model_version="v1", inference_time_ms=15.0,
+            created_at=datetime(2025, 1, 1),
         )
-        assert resp.label == "cat"
-        assert resp.s3_url == "s3://obj.png"
+        assert resp.is_active is True
 
     def test_missing_required_field_invalid(self):
         with pytest.raises(ValidationError):
-            AssetResponse(
-                asset_id="asset-1",
-                source_image_id=1,
-                object_size=(50, 60),
-                area_pixels=3000,
+            SegmentationMaskResponse(
+                x1=0, y1=0, x2=50, y2=50, area=2500.0, score=0.95,
+                id=1, content_id=1, mask_id=1, is_active=True,
+                segmentation_mode=SegmentationMode.HYBRID,
+                model_name="sam", model_version="v1",
+                created_at=datetime(2025, 1, 1),
             )  # type: ignore
 
-
 @pytest.mark.unit
-class TestRenameAssetRequest:
+class TestUserBase:
     def test_valid(self):
-        req = RenameAssetRequest(label="new-name")
-        assert req.label == "new-name"
+        user = UserBase(username="john", email="john@test.com")
+        assert user.username == "john"
 
-    def test_missing_label_invalid(self):
+    def test_username_too_short_invalid(self):
         with pytest.raises(ValidationError):
-            RenameAssetRequest()  # type: ignore
-            
+            UserBase(username="jo", email="john@test.com")
+
+    def test_username_too_long_invalid(self):
+        with pytest.raises(ValidationError):
+            UserBase(username="j" * 51, email="john@test.com")
+
+    def test_invalid_email(self):
+        with pytest.raises(ValidationError):
+            UserBase(username="john", email="not-an-email")
 
 
 @pytest.mark.unit
-class TestSamReplaceDiffusionRequest:
+class TestUserCreate:
+    def test_valid(self):
+        user = UserCreate(username="john", email="john@test.com", password="secret1")
+        assert user.password == "secret1"
 
-    def test_valid_minimal(self):
-        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=100, bbox_y2=100)
-        assert (req.bbox_x1, req.bbox_y1, req.bbox_x2, req.bbox_y2) == (0, 0, 100, 100)
-
-    def test_missing_bbox_field_invalid(self):
+    def test_password_too_short_invalid(self):
         with pytest.raises(ValidationError):
-            SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=100)  # type: ignore
+            UserCreate(username="john", email="john@test.com", password="123")
 
-    def test_bbox_wrong_type_invalid(self):
+    def test_password_too_long_invalid(self):
         with pytest.raises(ValidationError):
-            SamReplaceDiffusionRequest(
-                bbox_x1="a", bbox_y1=0, bbox_x2=100, bbox_y2=100
-            )  # type: ignore
-
-    def test_bbox_negative_coords_allowed(self):
-        req = SamReplaceDiffusionRequest(bbox_x1=-10, bbox_y1=-20, bbox_x2=100, bbox_y2=200)
-        assert req.bbox_x1 == -10
-        assert req.bbox_y1 == -20
-
-    def test_bbox_property_returns_dict(self):
-        req = SamReplaceDiffusionRequest(bbox_x1=1, bbox_y1=2, bbox_x2=3, bbox_y2=4)
-        assert req.bbox == {"x1": 1, "y1": 2, "x2": 3, "y2": 4}
-
-    def test_bbox_property_reflects_updated_values(self):
-        req = SamReplaceDiffusionRequest(bbox_x1=1, bbox_y1=2, bbox_x2=3, bbox_y2=4)
-        req.bbox_x1 = 99
-        assert req.bbox["x1"] == 99
+            UserCreate(username="john", email="john@test.com", password="x" * 101)
 
 
-    def test_prompt_default_empty_string(self):
-        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1)
-        assert req.prompt == ""
-
-    def test_prompt_custom_value(self):
-        req = SamReplaceDiffusionRequest(
-            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, prompt="a red car"
+@pytest.mark.unit
+class TestUserResponse:
+    def test_valid(self):
+        resp = UserResponse(
+            username="john", email="john@test.com", id=1, created_at=datetime(2025, 1, 1),
         )
-        assert req.prompt == "a red car"
+        assert resp.id == 1
 
-    def test_negative_prompt_default_none(self):
-        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1)
-        assert req.negative_prompt is None
-
-    def test_negative_prompt_custom_value(self):
-        req = SamReplaceDiffusionRequest(
-            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, negative_prompt="blurry, low quality"
-        )
-        assert req.negative_prompt == "blurry, low quality"
+    def test_from_attributes_config_enabled(self):
+        assert UserResponse.model_config.get("from_attributes") is True
 
 
-    def test_use_color_matching_default_false(self):
-        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1)
-        assert req.use_color_matching is False
+@pytest.mark.unit
+class TestUserUpdate:
+    def test_all_optional_defaults_none(self):
+        update = UserUpdate()
+        assert update.username is None
+        assert update.email is None
 
-    def test_use_color_matching_true(self):
-        req = SamReplaceDiffusionRequest(
-            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, use_color_matching=True
-        )
-        assert req.use_color_matching is True
+    def test_partial_update(self):
+        update = UserUpdate(username="newname")
+        assert update.username == "newname"
+        assert update.email is None
 
-    def test_color_match_method_default(self):
-        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1)
-        assert req.color_match_method == "color_transfer"
-
-    def test_color_match_method_is_plain_str_no_validation(self):
-        req = SamReplaceDiffusionRequest(
-            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, color_match_method="anything_goes"
-        )
-        assert req.color_match_method == "anything_goes"
-
-
-    def test_num_inference_steps_default_none(self):
-        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1)
-        assert req.num_inference_steps is None
-
-    def test_num_inference_steps_boundaries(self):
-        assert SamReplaceDiffusionRequest(
-            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, num_inference_steps=5
-        ).num_inference_steps == 5
-        assert SamReplaceDiffusionRequest(
-            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, num_inference_steps=100
-        ).num_inference_steps == 100
-
-    def test_num_inference_steps_below_min_invalid(self):
+    def test_invalid_email_still_validated(self):
         with pytest.raises(ValidationError):
-            SamReplaceDiffusionRequest(
-                bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, num_inference_steps=4
-            )
+            UserUpdate(email="not-an-email")
 
-    def test_num_inference_steps_above_max_invalid(self):
+
+@pytest.mark.unit
+class TestChangePassword:
+    def test_valid(self):
+        cp = ChangePassword(old_password="secret1", new_password="secret2")
+        assert cp.new_password == "secret2"
+
+    def test_old_password_too_short_invalid(self):
         with pytest.raises(ValidationError):
-            SamReplaceDiffusionRequest(
-                bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, num_inference_steps=101
-            )
+            ChangePassword(old_password="123", new_password="secret2")
 
-
-    def test_guidance_scale_default_none(self):
-        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1)
-        assert req.guidance_scale is None
-
-    def test_guidance_scale_boundaries(self):
-        assert SamReplaceDiffusionRequest(
-            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, guidance_scale=0.0
-        ).guidance_scale == 0.0
-        assert SamReplaceDiffusionRequest(
-            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, guidance_scale=20.0
-        ).guidance_scale == 20.0
-
-    def test_guidance_scale_below_min_invalid(self):
+    def test_new_password_too_short_invalid(self):
         with pytest.raises(ValidationError):
-            SamReplaceDiffusionRequest(
-                bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, guidance_scale=-0.1
-            )
+            ChangePassword(old_password="secret1", new_password="123")
 
-    def test_guidance_scale_above_max_invalid(self):
+    def test_missing_field_invalid(self):
         with pytest.raises(ValidationError):
-            SamReplaceDiffusionRequest(
-                bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, guidance_scale=20.1
-            )
-
-
-    def test_ip_adapter_scale_default_none(self):
-        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1)
-        assert req.ip_adapter_scale is None
-
-    def test_ip_adapter_scale_boundaries(self):
-        assert SamReplaceDiffusionRequest(
-            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, ip_adapter_scale=0.0
-        ).ip_adapter_scale == 0.0
-        assert SamReplaceDiffusionRequest(
-            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, ip_adapter_scale=1.0
-        ).ip_adapter_scale == 1.0
-
-    def test_ip_adapter_scale_above_max_invalid(self):
-        with pytest.raises(ValidationError):
-            SamReplaceDiffusionRequest(
-                bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, ip_adapter_scale=1.1
-            )
-
-    def test_ip_adapter_scale_below_min_invalid(self):
-        with pytest.raises(ValidationError):
-            SamReplaceDiffusionRequest(
-                bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, ip_adapter_scale=-0.1
-            )
-
-
-    def test_strength_default_none(self):
-        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1)
-        assert req.strength is None
-
-    def test_strength_boundaries(self):
-        assert SamReplaceDiffusionRequest(
-            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, strength=0.0
-        ).strength == 0.0
-        assert SamReplaceDiffusionRequest(
-            bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, strength=1.0
-        ).strength == 1.0
-
-    def test_strength_above_max_invalid(self):
-        with pytest.raises(ValidationError):
-            SamReplaceDiffusionRequest(
-                bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, strength=1.5
-            )
-
-    def test_strength_below_min_invalid(self):
-        with pytest.raises(ValidationError):
-            SamReplaceDiffusionRequest(
-                bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, strength=-0.5
-            )
-
-
-    def test_seed_default_zero(self):
-        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1)
-        assert req.seed == 0
-
-    def test_seed_custom_value(self):
-        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, seed=12345)
-        assert req.seed == 12345
-
-    def test_seed_negative_allowed(self):
-        # plain int field, no ge/le constraint on seed itself
-        req = SamReplaceDiffusionRequest(bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1, seed=-1)
-        assert req.seed == -1
-
-    def test_full_valid_request(self):
-        req = SamReplaceDiffusionRequest(
-            bbox_x1=10, bbox_y1=20, bbox_x2=110, bbox_y2=220,
-            prompt="a golden retriever",
-            negative_prompt="cartoon, sketch",
-            use_color_matching=True,
-            color_match_method="mean_std",
-            num_inference_steps=50,
-            guidance_scale=7.5,
-            ip_adapter_scale=0.6,
-            strength=0.8,
-            seed=42,
-        )
-        assert req.bbox == {"x1": 10, "y1": 20, "x2": 110, "y2": 220}
-        assert req.prompt == "a golden retriever"
-        assert req.negative_prompt == "cartoon, sketch"
-        assert req.use_color_matching is True
-        assert req.color_match_method == "mean_std"
-        assert req.num_inference_steps == 50
-        assert req.guidance_scale == 7.5
-        assert req.ip_adapter_scale == 0.6
-        assert req.strength == 0.8
-        assert req.seed == 42
+            ChangePassword(old_password="secret1")  # type: ignore
