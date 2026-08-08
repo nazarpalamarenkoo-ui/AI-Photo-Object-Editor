@@ -12,7 +12,7 @@ setup_tracing("image-editor-api")
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from prometheus_fastapi_instrumentator import Instrumentator
 
-from app.db.db_connect import engine, Base
+from app.db.db_connect import engine, Base, dispose_engine
 from app.api.auth.routes import router as auth_router
 from app.api.v1.user import router as user_router
 from app.api.v1.image import router as image_router
@@ -30,6 +30,8 @@ async def lifespan(app: FastAPI):
     logger.info("app_started")
     yield
     logger.info("app_shutting_down")
+    await dispose_engine()
+    logger.info("app_shutdown_complete")
 
 
 app = FastAPI(
