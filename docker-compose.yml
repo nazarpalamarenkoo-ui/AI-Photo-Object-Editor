@@ -3,6 +3,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    image: objectdetectionsystem-backend:latest
     gpus: all
     ports:
       - "8000:8000"
@@ -30,9 +31,7 @@ services:
     restart: unless-stopped
 
   worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    image: objectdetectionsystem-backend:latest
     gpus: all
     command: arq app.workers.worker.WorkerSettings
     env_file:
