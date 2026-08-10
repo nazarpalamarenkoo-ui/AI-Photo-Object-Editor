@@ -22,6 +22,7 @@
         v-model:replaceEngine="replaceEngine"
         v-model:diffusionPrompt="diffusionPrompt"
         :zoom="zoom"
+        :fitZoom="fitZoom"
         :canUndo="canUndo"
         :mlLoading="mlLoading"
         :busy="detecting || segmenting || mlLoading"
@@ -42,14 +43,13 @@
         :running="mode === 'yolo' ? detecting : segmenting"
         :mode="mode"
         :confThreshold="confThreshold"
-        :promptMode="mode === 'sam' ? promptMode : null"
-        :promptPolygonPoints="polygonPoints"
-        :promptPoints="promptPoints"
+        :activeTool="activeTool"
+        :polygonPoints="polygonPoints"
         :promptBbox="promptBbox"
-        @add-point="p => addPromptPoint(p.x, p.y)"
         @set-bbox="b => setPromptBbox(b)"
         @add-polygon-point="p => addPolygonPoint(p.x, p.y)"
         @image-load="onImageLoad"
+        @fit-zoom="onFitZoom"
         @toggle-selection="onToggleSelection"
         @run="onRun"
         @clear="onClearRegions"
@@ -58,6 +58,7 @@
 
       <EditorSidebar
         :mode="mode"
+        :activeTool="activeTool"
         :regions="regions"
         :selectedIds="selectedIds"
         v-model:useEdgeBlending="activeUseEdgeBlending"
@@ -75,15 +76,10 @@
         :assetsError="assetsError"
         :assetsHasMore="assetsHasMore"
         :deletingAssetId="deletingId"
-        :promptMode="promptMode"
-        :promptPolygonPoints="polygonPoints"
+        :polygonPoints="polygonPoints"
         :canRunPolygon="canRunPolygon"
-        :promptLabel="promptLabel"
-        :promptPoints="promptPoints"
         :promptBbox="promptBbox"
-        @update:promptMode="setPromptMode"
-        @update:promptLabel="v => promptLabel = v"
-        @clear-prompt="clearPrompt"
+        @clear-bbox="clearBbox"
         @run-prompt-segment="() => handleSegmentWithPrompt()"
         @toggle-selection="onToggleSelection"
         @sam-replace-asset="onSamReplaceAsset"
@@ -157,8 +153,15 @@ function onSamReplace() {
   }
 }
 
-const activeTool = ref('select')
+const activeTool = ref('')
 const zoom = ref(1)
+
+const fitZoom = ref(1)
+
+function onFitZoom(value: number) {
+  fitZoom.value = value
+  zoom.value = value
+}
 const modelPreset = ref<LdmConfig>(PRESETS.quality)
 const mode = ref<EditingMode>('yolo')
 const useHybridSegment = ref(false)
@@ -192,8 +195,7 @@ const {
   handleSamRemove, handleSamReplace, handleSamReplaceWithAsset,
   handleSamReplaceDiffusion, handleSamReplaceWithAssetDiffusion,
   onReplacementSelect: onSamReplacementSelect, clearSegments,
-  promptMode, promptLabel, promptPoints, promptBbox,
-  addPromptPoint, setPromptBbox, clearPrompt, setPromptMode,
+  promptBbox, setPromptBbox, clearBbox,
   polygonPoints, addPolygonPoint, clearPolygon, canRunPolygon,
   polygonShapes,
 } = useSegmentation(imageId, currentImageUrl, history)
@@ -264,7 +266,8 @@ function onReset() {
   handleReset(originalImageUrl.value)
   clearSegments()
   clearExtracted()
-  setPromptMode(null)
+  clearBbox()
+  clearPolygon()
 }
 
 async function onExtract() {
@@ -284,7 +287,8 @@ watch(mode, () => {
   selectedBboxIds.value = []
   selectedMaskId.value = null
   clearExtracted()
-  setPromptMode(null)
+  clearBbox()
+  clearPolygon()
   replaceEngine.value = 'lama'
   diffusionPrompt.value = ''
 })

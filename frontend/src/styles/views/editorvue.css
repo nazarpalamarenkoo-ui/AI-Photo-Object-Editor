@@ -119,3 +119,25 @@
   animation: spin 0.7s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 1024px) {
+  .editor-body {
+    height: calc(100vh - 44px);
+  }
+}
+
+@media (max-width: 860px) {
+  .editor-body {
+    flex-direction: column;
+    height: auto;
+    min-height: calc(100vh - 44px);
+    min-height: calc(100dvh - 44px);
+    overflow: visible;
+  }
+}
+
+@supports (min-height: 100dvh) {
+  .editor-page {
+    min-height: 100dvh;
+  }
+}

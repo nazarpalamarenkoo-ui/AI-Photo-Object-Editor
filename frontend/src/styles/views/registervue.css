@@ -113,3 +113,26 @@
   font-size: 0.875rem;
   color: var(--p-surface-400) !important;
 }
+
+@media (max-width: 640px) {
+  .auth-page {
+    align-items: flex-start;
+    padding: 1.5rem 1rem;
+  }
+
+  .auth-card {
+    padding: 1.75rem 1.25rem;
+    max-width: 100%;
+    margin-top: 1rem;
+  }
+
+  .auth-title {
+    font-size: 1.5rem;
+  }
+}
+
+@media (max-width: 360px) {
+  .auth-card {
+    padding: 1.25rem 1rem;
+  }
+}
