@@ -3,15 +3,17 @@ import type { Detection, DetectionStats } from '@/types/Index'
 
 export const detectionsApi = {
 
-    async getByImage(imageId: number, useCache = true): Promise<Detection[]> {
+    async getByImage(imageId: number, versionId?: number, activeOnly = true): Promise<Detection[]> {
         const { data } = await apiClient.get<Detection[]>(`/detections/images/${imageId}`, {
-            params: {useCache: useCache}
+            params: {version_id: versionId, active_only: activeOnly}
         })
         return data
     },
 
-    async getByBboxId(imageId: number, bboxId: number): Promise<Detection> {
-        const { data } = await apiClient.get<Detection>(`/detections/images/${imageId}/bbox/${bboxId}`)
+    async getByBboxId(imageId: number, bboxId: number, versionId?: number): Promise<Detection> {
+        const { data } = await apiClient.get<Detection>(`/detections/images/${imageId}/bbox/${bboxId}`, {
+            params: {version_id: versionId}
+        })
         return data
     },
 

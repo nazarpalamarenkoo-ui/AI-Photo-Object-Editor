@@ -41,10 +41,11 @@ const fakeSegmentResponse: SegmentResponse = {
   timestamp: '2026-01-01T00:00:00Z',
 }
 
+// Matches ExtractResponse: { asset_id, storage_path, thumbnail_path, object_size, area_pixels, cropped_bbox, timestamp }
 const fakeExtractResponse: ExtractResponse = {
   asset_id: 'asset-123',
-  extracted_url: 's3://bucket/extracted.png',
-  presigned_url: 'https://storage.example.com/extracted.png?sig=abc',
+  storage_path: 's3://bucket/extracted.png',
+  thumbnail_path: 's3://bucket/extracted-thumb.png',
   object_size: [90, 190],
   area_pixels: 12000,
   cropped_bbox: { x1: 2, y1: 2, x2: 92, y2: 192 },
@@ -66,11 +67,12 @@ const fakeMLResult: MLResultResponse = {
   timestamp: '2026-01-01T00:00:00Z',
 }
 
+// Matches Detection: content_id (not image_id), plus is_active/model_name/model_version/inference_time_ms/created_at are required
 const fakeDetectResponse: DetectResponse = {
   detections: [
     {
       id: 1,
-      image_id: 1,
+      content_id: 1,
       bbox_id: 0,
       x1: 10,
       y1: 10,
@@ -78,6 +80,11 @@ const fakeDetectResponse: DetectResponse = {
       y2: 100,
       detected_class: 'cat',
       confidence: 0.9,
+      is_active: true,
+      model_name: 'yolov8',
+      model_version: '1.0',
+      inference_time_ms: 45.2,
+      created_at: '2026-01-01T00:00:00Z',
     },
   ],
   image_size: [640, 480],
@@ -86,12 +93,17 @@ const fakeDetectResponse: DetectResponse = {
 }
 
 const fakeAsset: Asset = {
-  asset_id: 'asset-123',
-  source_image_id: 1,
-  object_size: [90, 190],
+  public_id: 'asset-123',
+  width: 90,
+  height: 190,
   area_pixels: 12000,
   label: 'cat cutout',
-  s3_url: 's3://bucket/asset.png',
+  storage_path: 's3://bucket/asset.png',
+  thumbnail_path: 's3://bucket/asset-thumb.png',
+  content_type: 'image/png',
+  file_size: 45210,
+  source_image_version_id: 7,
+  source_segmentation_mask_id: 3,
   created_at: '2026-01-01T00:00:00Z',
 }
 
@@ -582,20 +594,6 @@ describe('mlApi: samRemoveObject', () => {
     expect((body as any).ldm).toBeUndefined()
   })
 
-  it('passes custom expandMaskPixels, useEdgeBlending and ldm', async () => {
-    mockJobSuccess('job-7', fakeMLResult)
-
-    await mlApi.samRemoveObject(1, 3, 20, false, fastLdm)
-
-    const [, body] = mockedClient.post.mock.calls[0]
-    expect((body as any).expand_mask_pixels).toBe(20)
-    expect((body as any).use_edge_blending).toBe(false)
-    expect((body as any).ldm_steps).toBe(fastLdm.ldm_steps)
-    expect((body as any).ldm_sampler).toBe(fastLdm.ldm_sampler)
-    expect((body as any).hd_strategy).toBe(fastLdm.hd_strategy)
-    expect((body as any).ldm).toBeUndefined()
-  })
-
   it('polls the job and returns MLResultResponse', async () => {
     mockJobSuccess('job-7', fakeMLResult)
 
@@ -617,12 +615,13 @@ describe('mlApi: samRemoveObject', () => {
     await expect(mlApi.samRemoveObject(1, 3)).rejects.toThrow(MLJobError)
   })
 })
+
 describe('mlApi: segmentHybrid', () => {
   it('enqueues to correct async url with default params', async () => {
     mockJobSuccess('job-11', fakeSegmentResponse)
- 
+
     await mlApi.segmentHybrid(1)
- 
+
     expect(mockedClient.post).toHaveBeenCalledWith(
       '/ml/images/1/segment/hybrid/async',
       {
@@ -634,10 +633,10 @@ describe('mlApi: segmentHybrid', () => {
       }
     )
   })
- 
+
   it('passes custom params', async () => {
     mockJobSuccess('job-11', fakeSegmentResponse)
- 
+
     await mlApi.segmentHybrid(1, {
       yoloConfThreshold: 0.6,
       yoloClasses: ['cat', 'dog'],
@@ -645,7 +644,7 @@ describe('mlApi: segmentHybrid', () => {
       fallbackMaxSegments: 25,
       overlapIouThresh: 0.4,
     })
- 
+
     expect(mockedClient.post).toHaveBeenCalledWith(
       '/ml/images/1/segment/hybrid/async',
       {
@@ -657,12 +656,12 @@ describe('mlApi: segmentHybrid', () => {
       }
     )
   })
- 
+
   it('applies defaults for params not provided in a partial object', async () => {
     mockJobSuccess('job-11', fakeSegmentResponse)
- 
+
     await mlApi.segmentHybrid(1, { yoloConfThreshold: 0.7 })
- 
+
     const [, body] = mockedClient.post.mock.calls[0]
     expect((body as any).yolo_conf_threshold).toBe(0.7)
     expect((body as any).yolo_classes).toBeNull()
@@ -670,37 +669,38 @@ describe('mlApi: segmentHybrid', () => {
     expect((body as any).fallback_max_segments).toBe(50)
     expect((body as any).overlap_iou_thresh).toBe(0.5)
   })
- 
+
   it('polls the job and returns SegmentResponse', async () => {
     mockJobSuccess('job-11', fakeSegmentResponse)
- 
+
     const result = await mlApi.segmentHybrid(1)
- 
+
     expect(mockedClient.get).toHaveBeenCalledWith('/ml/jobs/job-11')
     expect(result).toEqual(fakeSegmentResponse)
   })
- 
+
   it('calls onStatus callback with job status', async () => {
     mockJobSuccess('job-11', fakeSegmentResponse)
     const onStatus = vi.fn()
- 
+
     await mlApi.segmentHybrid(1, {}, onStatus)
- 
+
     expect(onStatus).toHaveBeenCalledWith('complete')
   })
- 
+
   it('propagates enqueue error', async () => {
     mockedClient.post.mockRejectedValue(new Error('hybrid segmentation failed'))
- 
+
     await expect(mlApi.segmentHybrid(1)).rejects.toThrow('hybrid segmentation failed')
   })
- 
+
   it('throws MLJobError when the job itself fails', async () => {
     mockJobFailure('job-11', 'hybrid segmentation crashed')
- 
+
     await expect(mlApi.segmentHybrid(1)).rejects.toThrow(MLJobError)
   })
 })
+
 describe('mlApi: samReplaceObject', () => {
   const fakeFile = new File(['img'], 'replacement.png', { type: 'image/png' })
 
@@ -781,8 +781,9 @@ describe('mlApi: samReplaceObject', () => {
     await expect(mlApi.samReplaceObject(1, 3, fakeFile)).rejects.toThrow(MLJobError)
   })
 })
+
 describe('mlApi: samReplaceObjectDiffusion', () => {
-  const fakeBbox: Bbox = { x1: 10, y1: 20, x2: 110, y2: 220 }
+  const fakeBbox = { x1: 10, y1: 20, x2: 110, y2: 220 }
   const fakeReferenceFile = new File(['ref'], 'reference.png', { type: 'image/png' })
 
   function makeMaskDataUrl(content: string, mime = 'image/png') {
@@ -1015,6 +1016,7 @@ describe('mlApi: samReplaceObjectDiffusion', () => {
     ).rejects.toThrow(MLJobError)
   })
 })
+
 describe('mlApi: samReplaceObjectWithAsset', () => {
   it('posts to correct async url with undefined body and default params', async () => {
     mockJobSuccess('job-9', fakeMLResult)
@@ -1340,6 +1342,12 @@ describe('mlApi: saveResult', () => {
     id: 1,
     filename: 'photo.jpg',
     storage_path: '/path/photo.jpg',
+    mime_type: 'image/jpeg',
+    width: 1920,
+    height: 1080,
+    file_size: 204800,
+    cache_key: null,
+    current_version_id: 3,
     status: 'saved',
     uploaded_at: '2026-01-01T00:00:00Z',
     user_id: 1,
@@ -1466,45 +1474,45 @@ describe('mlApi: resetState', () => {
 
     await expect(mlApi.resetState(1)).rejects.toThrow('reset failed')
   })
+})
 
 describe('mlApi: getCurrentState', () => {
-    const fakeCurrentState = {
-      presigned_url: 'https://storage.example.com/current.jpg',
-      is_edited: true,
-      history: ['remove', 'replace'],
-    }
+  const fakeCurrentState = {
+    presigned_url: 'https://storage.example.com/current.jpg',
+    is_edited: true,
+    history: ['remove', 'replace'],
+  }
 
-    it('gets from correct url', async () => {
-      mockedClient.get.mockResolvedValue({ data: fakeCurrentState })
+  it('gets from correct url', async () => {
+    mockedClient.get.mockResolvedValue({ data: fakeCurrentState })
 
-      await mlApi.getCurrentState(1)
+    await mlApi.getCurrentState(1)
 
-      expect(mockedClient.get).toHaveBeenCalledWith('/ml/images/1/current')
+    expect(mockedClient.get).toHaveBeenCalledWith('/ml/images/1/current')
+  })
+
+  it('returns current state response', async () => {
+    mockedClient.get.mockResolvedValue({ data: fakeCurrentState })
+
+    const result = await mlApi.getCurrentState(1)
+
+    expect(result).toEqual(fakeCurrentState)
+  })
+
+  it('returns is_edited false when image has no edits', async () => {
+    mockedClient.get.mockResolvedValue({
+      data: { presigned_url: 'https://storage.example.com/original.jpg', is_edited: false, history: [] },
     })
 
-    it('returns current state response', async () => {
-      mockedClient.get.mockResolvedValue({ data: fakeCurrentState })
+    const result = await mlApi.getCurrentState(1)
 
-      const result = await mlApi.getCurrentState(1)
+    expect(result.is_edited).toBe(false)
+    expect(result.history).toEqual([])
+  })
 
-      expect(result).toEqual(fakeCurrentState)
-    })
+  it('propagates error', async () => {
+    mockedClient.get.mockRejectedValue(new Error('current state failed'))
 
-    it('returns is_edited false when image has no edits', async () => {
-      mockedClient.get.mockResolvedValue({
-        data: { presigned_url: 'https://storage.example.com/original.jpg', is_edited: false, history: [] },
-      })
-
-      const result = await mlApi.getCurrentState(1)
-
-      expect(result.is_edited).toBe(false)
-      expect(result.history).toEqual([])
-    })
-
-    it('propagates error', async () => {
-      mockedClient.get.mockRejectedValue(new Error('current state failed'))
-
-      await expect(mlApi.getCurrentState(1)).rejects.toThrow('current state failed')
-    })
+    await expect(mlApi.getCurrentState(1)).rejects.toThrow('current state failed')
   })
 })

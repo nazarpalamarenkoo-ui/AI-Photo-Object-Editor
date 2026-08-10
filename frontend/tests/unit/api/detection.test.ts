@@ -57,24 +57,44 @@ beforeEach(() => {
 })
 
 describe('detectionsApi: getByImage', () => {
-  it('gets detections for an image with useCache defaulting to true', async () => {
+  it('defaults active_only to true and leaves version_id undefined when not passed', async () => {
     mockedClient.get.mockResolvedValue({ data: fakeDetections })
 
     const result = await detectionsApi.getByImage(42)
 
     expect(mockedClient.get).toHaveBeenCalledWith('/detections/images/42', {
-      params: { useCache: true }
+      params: { version_id: undefined, active_only: true }
     })
     expect(result).toEqual(fakeDetections)
   })
 
-  it('passes useCache=false through to the request params', async () => {
+  it('passes an explicit version_id through to the request params', async () => {
     mockedClient.get.mockResolvedValue({ data: fakeDetections })
 
-    await detectionsApi.getByImage(42, false)
+    await detectionsApi.getByImage(42, 3)
 
     expect(mockedClient.get).toHaveBeenCalledWith('/detections/images/42', {
-      params: { useCache: false }
+      params: { version_id: 3, active_only: true }
+    })
+  })
+
+  it('passes active_only=false through to the request params', async () => {
+    mockedClient.get.mockResolvedValue({ data: fakeDetections })
+
+    await detectionsApi.getByImage(42, undefined, false)
+
+    expect(mockedClient.get).toHaveBeenCalledWith('/detections/images/42', {
+      params: { version_id: undefined, active_only: false }
+    })
+  })
+
+  it('supports version_id and active_only=false together', async () => {
+    mockedClient.get.mockResolvedValue({ data: fakeDetections })
+
+    await detectionsApi.getByImage(42, 3, false)
+
+    expect(mockedClient.get).toHaveBeenCalledWith('/detections/images/42', {
+      params: { version_id: 3, active_only: false }
     })
   })
 
@@ -86,13 +106,25 @@ describe('detectionsApi: getByImage', () => {
 })
 
 describe('detectionsApi: getByBboxId', () => {
-  it('gets a single detection by image and bbox id', async () => {
+  it('gets a single detection by image and bbox id with no version_id', async () => {
     mockedClient.get.mockResolvedValue({ data: fakeDetection })
 
     const result = await detectionsApi.getByBboxId(42, 7)
 
-    expect(mockedClient.get).toHaveBeenCalledWith('/detections/images/42/bbox/7')
+    expect(mockedClient.get).toHaveBeenCalledWith('/detections/images/42/bbox/7', {
+      params: { version_id: undefined }
+    })
     expect(result).toEqual(fakeDetection)
+  })
+
+  it('passes an explicit version_id through to the request params', async () => {
+    mockedClient.get.mockResolvedValue({ data: fakeDetection })
+
+    await detectionsApi.getByBboxId(42, 7, 5)
+
+    expect(mockedClient.get).toHaveBeenCalledWith('/detections/images/42/bbox/7', {
+      params: { version_id: 5 }
+    })
   })
 
   it('propagates the error when the request fails', async () => {
@@ -127,6 +159,14 @@ describe('detectionsApi: deleteByImage', () => {
 
     expect(mockedClient.delete).toHaveBeenCalledWith('/detections/images/42')
     expect(result).toEqual({ deleted: 2 })
+  })
+
+  it('returns deleted: 0 when there was nothing to delete', async () => {
+    mockedClient.delete.mockResolvedValue({ data: { deleted: 0 } })
+
+    const result = await detectionsApi.deleteByImage(42)
+
+    expect(result).toEqual({ deleted: 0 })
   })
 
   it('propagates the error when the request fails', async () => {
