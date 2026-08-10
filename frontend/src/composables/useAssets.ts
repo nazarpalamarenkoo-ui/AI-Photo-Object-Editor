@@ -32,6 +32,7 @@ export function useAssets(
   }
 
   async function loadThumb(assetId: string) {
+    if (!assetId) { console.trace('loadThumb called with no assetId'); return }
     if (thumbUrls.value[assetId]) return
     try {
       const blob = await mlApi.getAssetThumbnailBlob(assetId)
@@ -51,7 +52,7 @@ export function useAssets(
       assets.value = reset ? page : [...assets.value, ...page]
       assetsHasMore.value = page.length === PAGE_SIZE
 
-      await Promise.all(page.map(a => loadThumb(a.asset_id)))
+      await Promise.all(page.map(a => loadThumb(a.public_id)))
     } catch (e: any) {
       assetsError.value = e.response?.data?.detail ?? 'Failed to load asset library'
     } finally {
@@ -70,7 +71,12 @@ export function useAssets(
       const result = await mlApi.extractObject(imageId, maskId, params)
 
       selectedAssetId.value = result.asset_id
-      extractedPreviewUrl.value = result.presigned_url
+
+      if (extractedPreviewUrl.value) {
+        URL.revokeObjectURL(extractedPreviewUrl.value)
+      }
+      const previewBlob = await mlApi.getAssetImageBlob(result.asset_id)
+      extractedPreviewUrl.value = URL.createObjectURL(previewBlob)
 
       await fetchAssets(true)
       await loadThumb(result.asset_id)
@@ -112,7 +118,7 @@ export function useAssets(
 
 
   function selectFromLibrary(asset: Asset) {
-    selectedAssetId.value = selectedAssetId.value === asset.asset_id ? null : asset.asset_id
+    selectedAssetId.value = selectedAssetId.value === asset.public_id ? null : asset.public_id
     extractedPreviewUrl.value = null
   }
 
@@ -120,7 +126,7 @@ export function useAssets(
     mlError.value = ''
     try {
       const updated = await mlApi.renameAsset(assetId, label)
-      const idx = assets.value.findIndex(a => a.asset_id === assetId)
+      const idx = assets.value.findIndex(a => a.public_id === assetId)
       if (idx !== -1) assets.value[idx] = updated
     } catch (e: any) {
       assetsError.value = e.response?.data?.detail ?? 'Rename failed'
@@ -132,7 +138,7 @@ export function useAssets(
     assetsError.value = ''
     try {
       await mlApi.deleteAsset(assetId)
-      assets.value = assets.value.filter(a => a.asset_id !== assetId)
+      assets.value = assets.value.filter(a => a.public_id !== assetId)
       revokeThumb(assetId)
       if (selectedAssetId.value === assetId) {
         selectedAssetId.value = null

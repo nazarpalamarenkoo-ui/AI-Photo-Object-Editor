@@ -1,6 +1,6 @@
 import { ref, computed } from 'vue'
 import { mlApi, PRESETS } from '@/api/ml'
-import type { SegmentInfo, LdmConfig, Bbox, RegionItem, PromptPoint, PolygonPoint, PromptMode, SegmentHybridParams, DiffusionReplaceOptions } from '@/types/Index'
+import type { SegmentInfo, LdmConfig, Bbox, RegionItem, PolygonPoint, SegmentHybridParams, DiffusionReplaceOptions } from '@/types/Index'
 
 export function useSegmentation(
   imageId: number,
@@ -14,21 +14,11 @@ export function useSegmentation(
   const useEdgeBlending = ref(true)
   const replacementFile = ref<File | null>(null)
   
-  const promptMode = ref<PromptMode>(null)
-  const promptLabel = ref<0 | 1>(1) 
-  const promptPoints = ref<PromptPoint[]>([])
   const promptBbox = ref<Bbox | null>(null)
   const polygonPoints = ref<PolygonPoint[]>([])
   const polygonShapes = ref<Record<number, PolygonPoint[]>>({})
   const canRunPolygon = computed(() => polygonPoints.value.length >= 3)
-
-  const canRunPrompt = computed(
-    () => promptPoints.value.length > 0 || promptBbox.value !== null
-  )
-
-  function addPromptPoint(x: number, y: number) {
-    promptPoints.value.push({ x: Math.round(x), y: Math.round(y), label: promptLabel.value })
-  }
+  const canRunBbox = computed(() => promptBbox.value !== null)
 
   function addPolygonPoint(x: number, y: number) {
     polygonPoints.value.push({ x: Math.round(x), y: Math.round(y) })
@@ -37,32 +27,23 @@ export function useSegmentation(
   function removeLastPolygonPoint() {
     polygonPoints.value.pop()
   }
-  function clearPrompt() {
-    promptPoints.value = []
-    promptBbox.value = null
-    polygonPoints.value = []
-  }
 
   function clearPolygon() {
     polygonPoints.value = []
-  
   }
-  function setPromptMode(mode: PromptMode) {
-    promptMode.value = mode
-    clearPrompt()
-  }
-  function removeLastPromptPoint() {
-    promptPoints.value.pop()
+
+  function clearBbox() {
+    promptBbox.value = null
   }
 
   function setPromptBbox(bbox: Bbox) {
-  promptBbox.value = {
-    x1: Math.round(bbox.x1),
-    y1: Math.round(bbox.y1),
-    x2: Math.round(bbox.x2),
-    y2: Math.round(bbox.y2),
+    promptBbox.value = {
+      x1: Math.round(bbox.x1),
+      y1: Math.round(bbox.y1),
+      x2: Math.round(bbox.x2),
+      y2: Math.round(bbox.y2),
+    }
   }
-}
 
   const regions = computed<RegionItem[]>(() =>
   segments.value.map(s => ({
@@ -101,29 +82,20 @@ export function useSegmentation(
     }
   }
 
-  async function handleSegmentWithPrompt(params?: {
-    pointCoords?: [number, number][]
-    pointLabels?: number[]
-    bbox?: Bbox
-  }) {
-    const pointCoords = params?.pointCoords
-      ?? (promptPoints.value.length ? promptPoints.value.map(p => [p.x, p.y] as [number, number]) : undefined)
-    const pointLabels = params?.pointLabels
-      ?? (promptPoints.value.length ? promptPoints.value.map(p => p.label) : undefined)
+  async function handleSegmentWithPrompt(params?: { bbox?: Bbox }) {
     const bbox = params?.bbox ?? promptBbox.value ?? undefined
 
-    if (!pointCoords && !bbox) {
-      mlError.value = 'Add one point or bbox'
+    if (!bbox) {
+      mlError.value = 'Draw a bbox first'
       return
     }
 
     segmenting.value = true
     mlError.value = ''
     try {
-      const result = await mlApi.segmentWithPrompt(imageId, { pointCoords, pointLabels, bbox, multimask_output: false })
+      const result = await mlApi.segmentWithPrompt(imageId, { bbox, multimask_output: false })
       segments.value = [...segments.value, ...result.segments]
-      clearPrompt()
-      promptMode.value = null
+      clearBbox()
     } catch (e: any) {
       mlError.value = e.response?.data?.detail ?? 'Prompted segmentation failed'
     } finally {
@@ -154,7 +126,6 @@ export function useSegmentation(
       }
       segments.value = [...segments.value, ...result.segments]
       clearPolygon()
-      promptMode.value = null
     } catch (e: any) {
       mlError.value = e.response?.data?.detail ?? 'Polygon segmentation failed'
     } finally {
@@ -272,8 +243,8 @@ export function useSegmentation(
   function clearSegments() {
     segments.value = []
     selectedMaskId.value = null
-    clearPrompt()
-    promptMode.value = null
+    clearBbox()
+    clearPolygon()
   }
 
   return {
@@ -282,9 +253,8 @@ export function useSegmentation(
     handleSegment, handleSegmentHybrid, handleSegmentWithPrompt, handleSegmentByPolygon,
     toggleMaskSelection, handleSamRemove, handleSamReplace, handleSamReplaceWithAsset,
     handleSamReplaceDiffusion, handleSamReplaceWithAssetDiffusion,
-    onReplacementSelect, clearSegments,polygonShapes,
-    promptMode, promptLabel, promptPoints, promptBbox, canRunPrompt,
-    addPromptPoint, removeLastPromptPoint, setPromptBbox, clearPrompt, setPromptMode,
+    onReplacementSelect, clearSegments, polygonShapes,
+    promptBbox, canRunBbox, setPromptBbox, clearBbox,
     polygonPoints, canRunPolygon, addPolygonPoint, removeLastPolygonPoint, clearPolygon,
   }
 }

@@ -1,681 +1,661 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { ref } from 'vue'
-import type { SegmentInfo } from '@/types/Index'
+import type { Asset } from '@/types/Index'
 
 vi.mock('@/api/ml', () => ({
-  PRESETS: {
-    quality: { ldm_steps: 20, ldm_sampler: 'plms', hd_strategy: 'RESIZE' }
-  },
   mlApi: {
-    segmentObjects: vi.fn(),
-    segmentWithPrompt: vi.fn(),
-    samRemoveObject: vi.fn(),
-    samReplaceObject: vi.fn(),
-    getHistory: vi.fn()
+    listAssets: vi.fn(),
+    getAssetThumbnailBlob: vi.fn(),
+    getAssetImageBlob: vi.fn(),
+    extractObject: vi.fn(),
+    pasteExtractedObject: vi.fn(),
+    renameAsset: vi.fn(),
+    deleteAsset: vi.fn(),
+    getHistory: vi.fn(),
   }
 }))
 
-import { mlApi, PRESETS } from '@/api/ml'
-import { useSegmentation } from '@/composables/useSegmentation'
-import type { MLResultResponse } from '@/types/Index'
+globalThis.URL.createObjectURL = vi.fn(() => 'blob:mock-url')
+globalThis.URL.revokeObjectURL = vi.fn()
+
+import { mlApi } from '@/api/ml'
+import { useAssets } from '@/composables/useAssets'
 
 const mockedMlApi = vi.mocked(mlApi, true)
 
-const makeSegment = (maskId: number, bboxId = maskId): SegmentInfo => ({
-  mask_id: maskId,
-  bbox_id: bboxId,
-  bbox: { x1: 0, y1: 0, x2: 50, y2: 50 },
-  area: 2500,
-  stability_score: 0.9
+const makeAsset = (id: string, label = `Asset ${id}`): Asset => ({
+  public_id: id,
+  label,
+  created_at: '2026-01-01T00:00:00Z',
 })
 
-const makeMLResult = (
-  overrides: Partial<MLResultResponse> & { presigned_url: string }
-): MLResultResponse => ({
+const makeExtractResult = (assetId: string) => ({
+  asset_id: assetId,
+  presigned_url: `https://cdn.example.com/${assetId}.png`,
+})
+
+const makePasteResult = (presigned_url: string) => ({
+  presigned_url,
   result_url: 'https://cdn.example.com/result.jpg',
   metrics: {},
   timestamp: '2026-01-01T00:00:00Z',
-  ...overrides,
 })
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // loadThumb silently succeeds by default
+  mockedMlApi.getAssetThumbnailBlob.mockResolvedValue(new Blob(['thumb']))
 })
 
-describe('useSegmentation: initial state', () => {
-  it('starts with empty segments, no selection, not segmenting, no error', () => {
-    const { segments, selectedMaskId, segmenting, mlError } =
-      useSegmentation(1, ref(''), ref([]))
 
-    expect(segments.value).toEqual([])
-    expect(selectedMaskId.value).toBeNull()
-    expect(segmenting.value).toBe(false)
+describe('useAssets: initial state', () => {
+  it('starts with correct defaults', () => {
+    const { extracting, pasting, mlError, selectedAssetId, extractedPreviewUrl } =
+      useAssets(1, ref(''), ref([]))
+
+    expect(extracting.value).toBe(false)
+    expect(pasting.value).toBe(false)
     expect(mlError.value).toBe('')
+    expect(selectedAssetId.value).toBeNull()
+    expect(extractedPreviewUrl.value).toBeNull()
   })
 
-  it('useEdgeBlending defaults to true and replacementFile defaults to null', () => {
-    const { useEdgeBlending, replacementFile } = useSegmentation(1, ref(''), ref([]))
+  it('assets list starts empty with assetsHasMore true', () => {
+    const { assets, assetsLoading, assetsError, assetsHasMore, thumbUrls, deletingId } =
+      useAssets(1, ref(''), ref([]))
 
-    expect(useEdgeBlending.value).toBe(true)
-    expect(replacementFile.value).toBeNull()
-  })
-
-  it('regions is empty when segments is empty', () => {
-    const { regions } = useSegmentation(1, ref(''), ref([]))
-    expect(regions.value).toEqual([])
-  })
-})
-
-describe('useSegmentation: regions', () => {
-  it('maps segments to region items with generated labels', async () => {
-    mockedMlApi.segmentObjects.mockResolvedValue({
-      segments: [makeSegment(1), makeSegment(2)],
-      metrics: {},
-      image_size: [800, 600],
-      timestamp: '2026-01-01T00:00:00Z'
-    })
-
-    const { handleSegment, regions } = useSegmentation(1, ref(''), ref([]))
-    await handleSegment()
-
-    expect(regions.value).toEqual([
-      { id: 1, bbox: { x1: 0, y1: 0, x2: 50, y2: 50 }, label: 'Object #1' },
-      { id: 2, bbox: { x1: 0, y1: 0, x2: 50, y2: 50 }, label: 'Object #2' }
-    ])
-  })
-
-  it('updates reactively when segments change', async () => {
-    mockedMlApi.segmentObjects.mockResolvedValue({
-      segments: [makeSegment(5)],
-      metrics: {},
-      image_size: [800, 600],
-      timestamp: '2026-01-01T00:00:00Z'
-    })
-
-    const { handleSegment, regions } = useSegmentation(1, ref(''), ref([]))
-    await handleSegment()
-
-    expect(regions.value).toHaveLength(1)
-    expect(regions.value[0].label).toBe('Object #5')
+    expect(assets.value).toEqual([])
+    expect(assetsLoading.value).toBe(false)
+    expect(assetsError.value).toBe('')
+    expect(assetsHasMore.value).toBe(true)
+    expect(thumbUrls.value).toEqual({})
+    expect(deletingId.value).toBeNull()
   })
 })
 
-describe('useSegmentation: handleSegment', () => {
-  it('calls segmentObjects with provided minArea and maxSegments', async () => {
-    mockedMlApi.segmentObjects.mockResolvedValue({
-      segments: [],
-      metrics: {},
-      image_size: [800, 600],
-      timestamp: '2026-01-01T00:00:00Z'
-    })
 
-    const { handleSegment } = useSegmentation(9, ref(''), ref([]))
-    await handleSegment(300, 20)
+describe('useAssets: fetchAssets', () => {
+  it('loads a page and populates assets', async () => {
+    const page = [makeAsset('a'), makeAsset('b')]
+    mockedMlApi.listAssets.mockResolvedValue(page)
 
-    expect(mockedMlApi.segmentObjects).toHaveBeenCalledWith(9, 300, 20)
+    const { fetchAssets, assets } = useAssets(1, ref(''), ref([]))
+    await fetchAssets()
+
+    expect(mockedMlApi.listAssets).toHaveBeenCalledWith(30, 0)
+    expect(assets.value).toEqual(page)
   })
 
-  it('uses default minArea and maxSegments when not provided', async () => {
-    mockedMlApi.segmentObjects.mockResolvedValue({
-      segments: [],
-      metrics: {},
-      image_size: [800, 600],
-      timestamp: '2026-01-01T00:00:00Z'
-    })
+  it('sets assetsHasMore to false when page is shorter than PAGE_SIZE', async () => {
+    mockedMlApi.listAssets.mockResolvedValue([makeAsset('a')])
 
-    const { handleSegment } = useSegmentation(9, ref(''), ref([]))
-    await handleSegment()
+    const { fetchAssets, assetsHasMore } = useAssets(1, ref(''), ref([]))
+    await fetchAssets()
 
-    expect(mockedMlApi.segmentObjects).toHaveBeenCalledWith(9, 500, 50)
+    expect(assetsHasMore.value).toBe(false)
   })
 
-  it('sets segments from result', async () => {
-    const seg = makeSegment(1)
-    mockedMlApi.segmentObjects.mockResolvedValue({
-      segments: [seg],
-      metrics: {},
-      image_size: [800, 600],
-      timestamp: '2026-01-01T00:00:00Z'
-    })
+  it('sets assetsHasMore to true when page equals PAGE_SIZE (30)', async () => {
+    const fullPage = Array.from({ length: 30 }, (_, i) => makeAsset(String(i)))
+    mockedMlApi.listAssets.mockResolvedValue(fullPage)
 
-    const { handleSegment, segments } = useSegmentation(9, ref(''), ref([]))
-    await handleSegment()
+    const { fetchAssets, assetsHasMore } = useAssets(1, ref(''), ref([]))
+    await fetchAssets()
 
-    expect(segments.value).toEqual([seg])
+    expect(assetsHasMore.value).toBe(true)
   })
 
-  it('resets selectedMaskId to null', async () => {
-    mockedMlApi.segmentObjects.mockResolvedValue({
-      segments: [makeSegment(1)],
-      metrics: {},
-      image_size: [800, 600],
-      timestamp: '2026-01-01T00:00:00Z'
-    })
+  it('resets assets on reset=true (default)', async () => {
+    const first = [makeAsset('a')]
+    const second = [makeAsset('b')]
+    mockedMlApi.listAssets.mockResolvedValueOnce(first).mockResolvedValueOnce(second)
 
-    const { handleSegment, toggleMaskSelection, selectedMaskId } = useSegmentation(9, ref(''), ref([]))
-    toggleMaskSelection(3)
-    expect(selectedMaskId.value).toBe(3)
+    const { fetchAssets, assets } = useAssets(1, ref(''), ref([]))
+    await fetchAssets()
+    await fetchAssets(true)
 
-    await handleSegment()
-
-    expect(selectedMaskId.value).toBeNull()
+    expect(assets.value).toEqual(second)
   })
 
-  it('sets segmenting to true during the call and false after success', async () => {
-    let resolvePromise: (value: any) => void
-    mockedMlApi.segmentObjects.mockReturnValue(
-      new Promise(resolve => { resolvePromise = resolve })
-    )
+  it('appends assets on reset=false', async () => {
+    const first = [makeAsset('a')]
+    const second = [makeAsset('b')]
+    mockedMlApi.listAssets.mockResolvedValueOnce(first).mockResolvedValueOnce(second)
 
-    const { handleSegment, segmenting } = useSegmentation(9, ref(''), ref([]))
-    const promise = handleSegment()
+    const { fetchAssets, assets } = useAssets(1, ref(''), ref([]))
+    await fetchAssets(true)
+    await fetchAssets(false)
 
-    expect(segmenting.value).toBe(true)
+    expect(assets.value).toEqual([makeAsset('a'), makeAsset('b')])
+  })
 
-    resolvePromise!({ segments: [], metrics: {}, image_size: [800, 600], timestamp: '2026-01-01T00:00:00Z' })
+  it('uses current assets length as offset when appending', async () => {
+    mockedMlApi.listAssets
+      .mockResolvedValueOnce([makeAsset('a')])
+      .mockResolvedValueOnce([makeAsset('b')])
+
+    const { fetchAssets } = useAssets(1, ref(''), ref([]))
+    await fetchAssets(true)
+    await fetchAssets(false)
+
+    expect(mockedMlApi.listAssets).toHaveBeenNthCalledWith(2, 30, 1)
+  })
+
+  it('sets assetsLoading to true during the call and false after', async () => {
+    let resolve: (v: any) => void
+    mockedMlApi.listAssets.mockReturnValue(new Promise(r => { resolve = r }))
+
+    const { fetchAssets, assetsLoading } = useAssets(1, ref(''), ref([]))
+    const promise = fetchAssets()
+    expect(assetsLoading.value).toBe(true)
+
+    resolve!([])
     await promise
-
-    expect(segmenting.value).toBe(false)
+    expect(assetsLoading.value).toBe(false)
   })
 
-  it('sets mlError when segmentObjects fails', async () => {
-    mockedMlApi.segmentObjects.mockRejectedValue({
-      response: { data: { detail: 'Segmentation failed on server' } }
-    })
+  it('does not start a second fetch while one is in progress', async () => {
+    let resolve: (v: any) => void
+    mockedMlApi.listAssets.mockReturnValue(new Promise(r => { resolve = r }))
 
-    const { handleSegment, mlError } = useSegmentation(9, ref(''), ref([]))
-    await handleSegment()
+    const { fetchAssets } = useAssets(1, ref(''), ref([]))
+    const p1 = fetchAssets()
+    fetchAssets() // should be ignored
+    resolve!([])
+    await p1
 
-    expect(mlError.value).toBe('Segmentation failed on server')
+    expect(mockedMlApi.listAssets).toHaveBeenCalledTimes(1)
   })
 
-  it('sets segmenting to false after failure', async () => {
-    mockedMlApi.segmentObjects.mockRejectedValue(new Error('fail'))
+  it('sets assetsError when listAssets fails', async () => {
+    mockedMlApi.listAssets.mockRejectedValue({
+      response: { data: { detail: 'Load failed on server' } }
+    })
 
-    const { handleSegment, segmenting } = useSegmentation(9, ref(''), ref([]))
-    await handleSegment()
+    const { fetchAssets, assetsError } = useAssets(1, ref(''), ref([]))
+    await fetchAssets()
 
-    expect(segmenting.value).toBe(false)
+    expect(assetsError.value).toBe('Load failed on server')
   })
 
-  it('clears previous mlError on new call', async () => {
-    mockedMlApi.segmentObjects.mockRejectedValueOnce({
-      response: { data: { detail: 'first error' } }
-    })
+  it('falls back to default error message when server gives none', async () => {
+    mockedMlApi.listAssets.mockRejectedValue(new Error('fail'))
 
-    const { handleSegment, mlError } = useSegmentation(9, ref(''), ref([]))
-    await handleSegment()
-    expect(mlError.value).toBe('first error')
+    const { fetchAssets, assetsError } = useAssets(1, ref(''), ref([]))
+    await fetchAssets()
 
-    mockedMlApi.segmentObjects.mockResolvedValueOnce({
-      segments: [], metrics: {}, image_size: [800, 600], timestamp: '2026-01-01T00:00:00Z'
-    })
-    await handleSegment()
+    expect(assetsError.value).toBe('Failed to load asset library')
+  })
 
-    expect(mlError.value).toBe('')
+  it('sets assetsLoading to false after failure', async () => {
+    mockedMlApi.listAssets.mockRejectedValue(new Error('fail'))
+
+    const { fetchAssets, assetsLoading } = useAssets(1, ref(''), ref([]))
+    await fetchAssets()
+
+    expect(assetsLoading.value).toBe(false)
+  })
+
+  it('loads thumbnails for each asset in the page', async () => {
+    mockedMlApi.listAssets.mockResolvedValue([makeAsset('x'), makeAsset('y')])
+
+    const { fetchAssets } = useAssets(1, ref(''), ref([]))
+    await fetchAssets()
+
+    expect(mockedMlApi.getAssetThumbnailBlob).toHaveBeenCalledWith('x')
+    expect(mockedMlApi.getAssetThumbnailBlob).toHaveBeenCalledWith('y')
+  })
+
+  it('stores blob object URL in thumbUrls', async () => {
+    mockedMlApi.listAssets.mockResolvedValue([makeAsset('x')])
+
+    const { fetchAssets, thumbUrls } = useAssets(1, ref(''), ref([]))
+    await fetchAssets()
+
+    expect(thumbUrls.value['x']).toBe('blob:mock-url')
+  })
+
+  it('clears assetsError before each fetch', async () => {
+    mockedMlApi.listAssets.mockRejectedValueOnce(new Error('fail'))
+
+    const { fetchAssets, assetsError } = useAssets(1, ref(''), ref([]))
+    await fetchAssets()
+    expect(assetsError.value).toBe('Failed to load asset library')
+
+    mockedMlApi.listAssets.mockResolvedValueOnce([])
+    await fetchAssets()
+    expect(assetsError.value).toBe('')
   })
 })
 
-describe('useSegmentation: handleSegmentWithPrompt', () => {
-  it('calls segmentWithPrompt with given params', async () => {
-    mockedMlApi.segmentWithPrompt.mockResolvedValue({
-      segments: [makeSegment(1)],
-      metrics: {},
-      image_size: [800, 600],
-      timestamp: '2026-01-01T00:00:00Z'
-    })
 
-    const { handleSegmentWithPrompt } = useSegmentation(9, ref(''), ref([]))
-    const params = { pointCoords: [[10, 20]] as [number, number][], pointLabels: [1] }
+describe('useAssets: handleExtract', () => {
+  it('calls extractObject with imageId, maskId and params', async () => {
+    mockedMlApi.extractObject.mockResolvedValue(makeExtractResult('asset-1'))
+    mockedMlApi.getAssetImageBlob.mockResolvedValue(new Blob(['img']))
+    mockedMlApi.listAssets.mockResolvedValue([])
 
-    await handleSegmentWithPrompt(params)
+    const { handleExtract } = useAssets(9, ref(''), ref([]))
+    await handleExtract(3, { paddingPixels: 10, label: 'car' })
 
-    expect(mockedMlApi.segmentWithPrompt).toHaveBeenCalledWith(9, {
-      pointCoords: [[10, 20]],
-      pointLabels: [1],
-      bbox: undefined,
-      multimask_output: false
-    })
-  })
-  
-  it('merges new segments with existing ones', async () => {
-    mockedMlApi.segmentObjects.mockResolvedValue({
-      segments: [makeSegment(1)],
-      metrics: {},
-      image_size: [800, 600],
-      timestamp: '2026-01-01T00:00:00Z'
-    })
-    mockedMlApi.segmentWithPrompt.mockResolvedValue({
-      segments: [makeSegment(2)],
-      metrics: {},
-      image_size: [800, 600],
-      timestamp: '2026-01-01T00:00:00Z'
-    })
-
-    const { handleSegment, handleSegmentWithPrompt, segments } = useSegmentation(9, ref(''), ref([]))
-    await handleSegment()
-    await handleSegmentWithPrompt({ bbox: { x1: 0, y1: 0, x2: 10, y2: 10 } })
-
-    expect(segments.value).toHaveLength(2)
-    expect(segments.value.map(s => s.mask_id)).toEqual([1, 2])
+    expect(mockedMlApi.extractObject).toHaveBeenCalledWith(9, 3, { paddingPixels: 10, label: 'car' })
   })
 
-  it('does not reset selectedMaskId', async () => {
-    mockedMlApi.segmentWithPrompt.mockResolvedValue({
-      segments: [makeSegment(2)],
-      metrics: {},
-      image_size: [800, 600],
-      timestamp: '2026-01-01T00:00:00Z'
-    })
+  it('calls extractObject with empty params by default', async () => {
+    mockedMlApi.extractObject.mockResolvedValue(makeExtractResult('asset-1'))
+    mockedMlApi.getAssetImageBlob.mockResolvedValue(new Blob(['img']))
+    mockedMlApi.listAssets.mockResolvedValue([])
 
-    const { handleSegmentWithPrompt, toggleMaskSelection, selectedMaskId } = useSegmentation(9, ref(''), ref([]))
-    toggleMaskSelection(7)
+    const { handleExtract } = useAssets(9, ref(''), ref([]))
+    await handleExtract(3)
 
-    await handleSegmentWithPrompt({ pointCoords: [[1, 1]], pointLabels: [1] })
-
-    expect(selectedMaskId.value).toBe(7)
+    expect(mockedMlApi.extractObject).toHaveBeenCalledWith(9, 3, {})
   })
 
-  it('sets segmenting to true during and false after success', async () => {
-    let resolvePromise: (value: any) => void
-    mockedMlApi.segmentWithPrompt.mockReturnValue(
-      new Promise(resolve => { resolvePromise = resolve })
-    )
+  it('sets selectedAssetId from result', async () => {
+    mockedMlApi.extractObject.mockResolvedValue(makeExtractResult('asset-1'))
+    mockedMlApi.getAssetImageBlob.mockResolvedValue(new Blob(['img']))
+    mockedMlApi.listAssets.mockResolvedValue([])
 
-    const { handleSegmentWithPrompt, segmenting } = useSegmentation(9, ref(''), ref([]))
-    const promise = handleSegmentWithPrompt({ pointCoords: [[1, 1]], pointLabels: [1] })
+    const { handleExtract, selectedAssetId } = useAssets(9, ref(''), ref([]))
+    await handleExtract(1)
 
-    expect(segmenting.value).toBe(true)
+    expect(selectedAssetId.value).toBe('asset-1')
+  })
 
-    resolvePromise!({ segments: [], metrics: {}, image_size: [800, 600], timestamp: '2026-01-01T00:00:00Z' })
+  it('sets extractedPreviewUrl from blob', async () => {
+    mockedMlApi.extractObject.mockResolvedValue(makeExtractResult('asset-1'))
+    mockedMlApi.getAssetImageBlob.mockResolvedValue(new Blob(['img']))
+    mockedMlApi.listAssets.mockResolvedValue([])
+
+    const { handleExtract, extractedPreviewUrl } = useAssets(9, ref(''), ref([]))
+    await handleExtract(1)
+
+    expect(extractedPreviewUrl.value).toBe('blob:mock-url')
+  })
+
+  it('sets extracting to true during and false after success', async () => {
+    let resolve: (v: any) => void
+    mockedMlApi.extractObject.mockReturnValue(new Promise(r => { resolve = r }))
+
+    const { handleExtract, extracting } = useAssets(9, ref(''), ref([]))
+    const promise = handleExtract(1)
+    expect(extracting.value).toBe(true)
+
+    mockedMlApi.getAssetImageBlob.mockResolvedValue(new Blob(['img']))
+    mockedMlApi.listAssets.mockResolvedValue([])
+    resolve!(makeExtractResult('asset-1'))
     await promise
-
-    expect(segmenting.value).toBe(false)
+    expect(extracting.value).toBe(false)
   })
 
-  it('sets mlError when segmentWithPrompt fails', async () => {
-    mockedMlApi.segmentWithPrompt.mockRejectedValue({
-      response: { data: { detail: 'Prompted segmentation failed on server' } }
+  it('returns the extract result', async () => {
+    const result = makeExtractResult('asset-1')
+    mockedMlApi.extractObject.mockResolvedValue(result)
+    mockedMlApi.getAssetImageBlob.mockResolvedValue(new Blob(['img']))
+    mockedMlApi.listAssets.mockResolvedValue([])
+
+    const { handleExtract } = useAssets(9, ref(''), ref([]))
+    const ret = await handleExtract(1)
+
+    expect(ret).toEqual(result)
+  })
+
+  it('sets mlError when extractObject fails', async () => {
+    mockedMlApi.extractObject.mockRejectedValue({
+      response: { data: { detail: 'Extract failed on server' } }
     })
 
-    const { handleSegmentWithPrompt, mlError } = useSegmentation(9, ref(''), ref([]))
-    await handleSegmentWithPrompt({ pointCoords: [[1, 1]], pointLabels: [1] })
+    const { handleExtract, mlError } = useAssets(9, ref(''), ref([]))
+    await handleExtract(1)
 
-    expect(mlError.value).toBe('Prompted segmentation failed on server')
+    expect(mlError.value).toBe('Extract failed on server')
   })
 
-  it('sets segmenting to false after failure', async () => {
-    mockedMlApi.segmentWithPrompt.mockRejectedValue(new Error('fail'))
+  it('falls back to default error message when server gives none', async () => {
+    mockedMlApi.extractObject.mockRejectedValue(new Error('fail'))
 
-    const { handleSegmentWithPrompt, segmenting } = useSegmentation(9, ref(''), ref([]))
-    await handleSegmentWithPrompt({ pointCoords: [[1, 1]], pointLabels: [1] })
+    const { handleExtract, mlError } = useAssets(9, ref(''), ref([]))
+    await handleExtract(1)
 
-    expect(segmenting.value).toBe(false)
-  })
-})
-
-describe('useSegmentation: toggleMaskSelection', () => {
-  it('selects a mask id when none is selected', () => {
-    const { toggleMaskSelection, selectedMaskId } = useSegmentation(1, ref(''), ref([]))
-
-    toggleMaskSelection(4)
-
-    expect(selectedMaskId.value).toBe(4)
+    expect(mlError.value).toBe('Extract failed')
   })
 
-  it('deselects the mask id when the same id is toggled again', () => {
-    const { toggleMaskSelection, selectedMaskId } = useSegmentation(1, ref(''), ref([]))
+  it('sets extracting to false after failure', async () => {
+    mockedMlApi.extractObject.mockRejectedValue(new Error('fail'))
 
-    toggleMaskSelection(4)
-    toggleMaskSelection(4)
+    const { handleExtract, extracting } = useAssets(9, ref(''), ref([]))
+    await handleExtract(1)
 
-    expect(selectedMaskId.value).toBeNull()
+    expect(extracting.value).toBe(false)
   })
 
-  it('switches selection when a different mask id is toggled', () => {
-    const { toggleMaskSelection, selectedMaskId } = useSegmentation(1, ref(''), ref([]))
+  it('refreshes asset list after extract', async () => {
+    mockedMlApi.extractObject.mockResolvedValue(makeExtractResult('asset-1'))
+    mockedMlApi.getAssetImageBlob.mockResolvedValue(new Blob(['img']))
+    mockedMlApi.listAssets.mockResolvedValue([makeAsset('asset-1')])
 
-    toggleMaskSelection(4)
-    toggleMaskSelection(9)
+    const { handleExtract, assets } = useAssets(9, ref(''), ref([]))
+    await handleExtract(1)
 
-    expect(selectedMaskId.value).toBe(9)
+    expect(mockedMlApi.listAssets).toHaveBeenCalled()
+    expect(assets.value).toEqual([makeAsset('asset-1')])
   })
 })
 
-describe('useSegmentation: handleSamRemove', () => {
-  it('does nothing if no mask is selected', async () => {
-    const { handleSamRemove } = useSegmentation(9, ref(''), ref([]))
-
-    await handleSamRemove()
-
-    expect(mockedMlApi.samRemoveObject).not.toHaveBeenCalled()
+describe('useAssets: handlePaste', () => {
+  it('does nothing if no asset is selected', async () => {
+    const { handlePaste } = useAssets(9, ref(''), ref([]))
+    await handlePaste({ targetBbox: { x1: 0, y1: 0, x2: 100, y2: 100 } })
+    expect(mockedMlApi.pasteExtractedObject).not.toHaveBeenCalled()
   })
 
-  it('calls samRemoveObject with default preset and expandMaskPixels of 12', async () => {
-    mockedMlApi.samRemoveObject.mockResolvedValue(
-      makeMLResult({ presigned_url: 'https://cdn.example.com/removed.jpg' })
-    )
+  it('calls pasteExtractedObject with selectedAssetId and params', async () => {
+    mockedMlApi.pasteExtractedObject.mockResolvedValue(makePasteResult('https://cdn.example.com/pasted.jpg'))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
-    const { toggleMaskSelection, handleSamRemove } = useSegmentation(9, ref(''), ref([]))
-    toggleMaskSelection(3)
+    const { selectedAssetId, handlePaste } = useAssets(9, ref(''), ref([]))
+    selectedAssetId.value = 'asset-1'
 
-    await handleSamRemove()
+    await handlePaste({ targetBbox: { x1: 0, y1: 0, x2: 100, y2: 100 }, scale: 1.5 })
 
-    expect(mockedMlApi.samRemoveObject).toHaveBeenCalledWith(9, 3, 12, true, PRESETS.quality)
-  })
-
-  it('calls samRemoveObject with a custom ldm config when provided', async () => {
-    mockedMlApi.samRemoveObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/removed.jpg' }))
-    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
-
-    const customLdm = { ldm_steps: 5, ldm_sampler: 'ddim' as const, hd_strategy: 'ORIGINAL' as const }
-    const { toggleMaskSelection, handleSamRemove } = useSegmentation(9, ref(''), ref([]))
-    toggleMaskSelection(3)
-
-    await handleSamRemove(customLdm)
-
-    expect(mockedMlApi.samRemoveObject).toHaveBeenCalledWith(9, 3, 12, true, customLdm)
+    expect(mockedMlApi.pasteExtractedObject).toHaveBeenCalledWith(9, {
+      assetId: 'asset-1',
+      targetBbox: { x1: 0, y1: 0, x2: 100, y2: 100 },
+      scale: 1.5,
+    })
   })
 
   it('updates currentImageUrl from result', async () => {
-    mockedMlApi.samRemoveObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/removed.jpg' }))
+    mockedMlApi.pasteExtractedObject.mockResolvedValue(makePasteResult('https://cdn.example.com/pasted.jpg'))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
     const currentImageUrl = ref('')
-    const { toggleMaskSelection, handleSamRemove } = useSegmentation(9, currentImageUrl, ref([]))
-    toggleMaskSelection(3)
+    const { selectedAssetId, handlePaste } = useAssets(9, currentImageUrl, ref([]))
+    selectedAssetId.value = 'asset-1'
 
-    await handleSamRemove()
+    await handlePaste({ targetBbox: { x1: 0, y1: 0, x2: 10, y2: 10 } })
 
-    expect(currentImageUrl.value).toBe('https://cdn.example.com/removed.jpg')
+    expect(currentImageUrl.value).toBe('https://cdn.example.com/pasted.jpg')
   })
 
-  it('removes the segment matching selectedMaskId from segments', async () => {
-    mockedMlApi.segmentObjects.mockResolvedValue({
-      segments: [makeSegment(1), makeSegment(2)],
-      metrics: {},
-      image_size: [800, 600],
-      timestamp: '2026-01-01T00:00:00Z'
-    })
-    mockedMlApi.samRemoveObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/removed.jpg' }))
-    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
-
-    const { handleSegment, toggleMaskSelection, handleSamRemove, segments } = useSegmentation(9, ref(''), ref([]))
-    await handleSegment()
-    toggleMaskSelection(1)
-
-    await handleSamRemove()
-
-    expect(segments.value).toHaveLength(1)
-    expect(segments.value[0].mask_id).toBe(2)
-  })
-
-  it('clears selectedMaskId after removal', async () => {
-    mockedMlApi.samRemoveObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/removed.jpg' }))
-    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
-
-    const { toggleMaskSelection, handleSamRemove, selectedMaskId } = useSegmentation(9, ref(''), ref([]))
-    toggleMaskSelection(3)
-
-    await handleSamRemove()
-
-    expect(selectedMaskId.value).toBeNull()
-  })
-
-  it('updates history after removal', async () => {
-    mockedMlApi.samRemoveObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/removed.jpg' }))
-    mockedMlApi.getHistory.mockResolvedValue({ history: ['step1', 'step2'] })
-
-    const history = ref<string[]>([])
-    const { toggleMaskSelection, handleSamRemove } = useSegmentation(9, ref(''), history)
-    toggleMaskSelection(3)
-
-    await handleSamRemove()
-
-    expect(mockedMlApi.getHistory).toHaveBeenCalledWith(9)
-    expect(history.value).toEqual(['step1', 'step2'])
-  })
-
-  it('sets mlError when samRemoveObject fails', async () => {
-    mockedMlApi.samRemoveObject.mockRejectedValue({
-      response: { data: { detail: 'SAM remove failed on server' } }
-    })
-
-    const { toggleMaskSelection, handleSamRemove, mlError } = useSegmentation(9, ref(''), ref([]))
-    toggleMaskSelection(3)
-
-    await handleSamRemove()
-
-    expect(mlError.value).toBe('SAM remove failed on server')
-  })
-
-  it('keeps selectedMaskId when samRemoveObject fails', async () => {
-    mockedMlApi.samRemoveObject.mockRejectedValue(new Error('fail'))
-
-    const { toggleMaskSelection, handleSamRemove, selectedMaskId } = useSegmentation(9, ref(''), ref([]))
-    toggleMaskSelection(3)
-
-    await handleSamRemove()
-
-    expect(selectedMaskId.value).toBe(3)
-  })
-})
-
-describe('useSegmentation: handleSamReplace', () => {
-  const makeFile = () => new File(['img'], 'replacement.jpg', { type: 'image/jpeg' })
-
-  it('does nothing if no mask is selected', async () => {
-    const { replacementFile, handleSamReplace } = useSegmentation(9, ref(''), ref([]))
-    replacementFile.value = makeFile()
-
-    await handleSamReplace()
-
-    expect(mockedMlApi.samReplaceObject).not.toHaveBeenCalled()
-  })
-
-  it('does nothing if no replacementFile is set', async () => {
-    const { toggleMaskSelection, handleSamReplace } = useSegmentation(9, ref(''), ref([]))
-    toggleMaskSelection(3)
-
-    await handleSamReplace()
-
-    expect(mockedMlApi.samReplaceObject).not.toHaveBeenCalled()
-  })
-
-  it('calls samReplaceObject with correct arguments and default ldm preset', async () => {
-    const file = makeFile()
-    mockedMlApi.samReplaceObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/replaced.jpg' }))
-    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
-
-    const { toggleMaskSelection, replacementFile, handleSamReplace } = useSegmentation(9, ref(''), ref([]))
-    toggleMaskSelection(3)
-    replacementFile.value = file
-
-    await handleSamReplace()
-
-    expect(mockedMlApi.samReplaceObject).toHaveBeenCalledWith(9, 3, file, {
-      useEdgeBlending: true,
-      ldm: PRESETS.quality
-    })
-  })
-
-  it('calls samReplaceObject with a custom ldm config when provided', async () => {
-    const file = makeFile()
-    mockedMlApi.samReplaceObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/replaced.jpg' }))
-    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
-
-    const customLdm = { ldm_steps: 5, ldm_sampler: 'ddim' as const, hd_strategy: 'ORIGINAL' as const }
-    const { toggleMaskSelection, replacementFile, handleSamReplace } = useSegmentation(9, ref(''), ref([]))
-    toggleMaskSelection(3)
-    replacementFile.value = file
-
-    await handleSamReplace(customLdm)
-
-    expect(mockedMlApi.samReplaceObject).toHaveBeenCalledWith(9, 3, file, {
-      useEdgeBlending: true,
-      ldm: customLdm
-    })
-  })
-
-  it('updates currentImageUrl after replacement', async () => {
-    mockedMlApi.samReplaceObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/replaced.jpg' }))
-    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
-
-    const currentImageUrl = ref('')
-    const { toggleMaskSelection, replacementFile, handleSamReplace } = useSegmentation(9, currentImageUrl, ref([]))
-    toggleMaskSelection(3)
-    replacementFile.value = makeFile()
-
-    await handleSamReplace()
-
-    expect(currentImageUrl.value).toBe('https://cdn.example.com/replaced.jpg')
-  })
-
-  it('removes the replaced segment from segments', async () => {
-    mockedMlApi.segmentObjects.mockResolvedValue({
-      segments: [makeSegment(1), makeSegment(2)],
-      metrics: {},
-      image_size: [800, 600],
-      timestamp: '2026-01-01T00:00:00Z'
-    })
-    mockedMlApi.samReplaceObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/replaced.jpg' }))
-    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
-
-    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplace, segments } =
-      useSegmentation(9, ref(''), ref([]))
-    await handleSegment()
-    toggleMaskSelection(1)
-    replacementFile.value = makeFile()
-
-    await handleSamReplace()
-
-    expect(segments.value).toHaveLength(1)
-    expect(segments.value[0].mask_id).toBe(2)
-  })
-
-  it('clears selectedMaskId and replacementFile after success', async () => {
-    mockedMlApi.samReplaceObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/replaced.jpg' }))
-    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
-
-    const { toggleMaskSelection, replacementFile, handleSamReplace, selectedMaskId } =
-      useSegmentation(9, ref(''), ref([]))
-    toggleMaskSelection(3)
-    replacementFile.value = makeFile()
-
-    await handleSamReplace()
-
-    expect(selectedMaskId.value).toBeNull()
-    expect(replacementFile.value).toBeNull()
-  })
-
-  it('updates history after replacement', async () => {
-    mockedMlApi.samReplaceObject.mockResolvedValue(makeMLResult({ presigned_url: 'https://cdn.example.com/replaced.jpg' }))
+  it('updates history after paste', async () => {
+    mockedMlApi.pasteExtractedObject.mockResolvedValue(makePasteResult('https://cdn.example.com/pasted.jpg'))
     mockedMlApi.getHistory.mockResolvedValue({ history: ['step1'] })
 
     const history = ref<string[]>([])
-    const { toggleMaskSelection, replacementFile, handleSamReplace } = useSegmentation(9, ref(''), history)
-    toggleMaskSelection(3)
-    replacementFile.value = makeFile()
+    const { selectedAssetId, handlePaste } = useAssets(9, ref(''), history)
+    selectedAssetId.value = 'asset-1'
 
-    await handleSamReplace()
+    await handlePaste({ targetBbox: { x1: 0, y1: 0, x2: 10, y2: 10 } })
 
     expect(mockedMlApi.getHistory).toHaveBeenCalledWith(9)
     expect(history.value).toEqual(['step1'])
   })
 
-  it('sets mlError when samReplaceObject fails', async () => {
-    mockedMlApi.samReplaceObject.mockRejectedValue({
-      response: { data: { detail: 'SAM replace failed on server' } }
-    })
+  it('sets pasting to true during and false after success', async () => {
+    let resolve: (v: any) => void
+    mockedMlApi.pasteExtractedObject.mockReturnValue(new Promise(r => { resolve = r }))
+    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
-    const { toggleMaskSelection, replacementFile, handleSamReplace, mlError } =
-      useSegmentation(9, ref(''), ref([]))
-    toggleMaskSelection(3)
-    replacementFile.value = makeFile()
+    const { selectedAssetId, handlePaste, pasting } = useAssets(9, ref(''), ref([]))
+    selectedAssetId.value = 'asset-1'
 
-    await handleSamReplace()
+    const promise = handlePaste({ targetBbox: { x1: 0, y1: 0, x2: 10, y2: 10 } })
+    expect(pasting.value).toBe(true)
 
-    expect(mlError.value).toBe('SAM replace failed on server')
+    resolve!(makePasteResult('https://cdn.example.com/pasted.jpg'))
+    await promise
+    expect(pasting.value).toBe(false)
   })
 
-  it('keeps selectedMaskId and replacementFile when samReplaceObject fails', async () => {
-    mockedMlApi.samReplaceObject.mockRejectedValue(new Error('fail'))
+  it('returns the paste result', async () => {
+    const result = makePasteResult('https://cdn.example.com/pasted.jpg')
+    mockedMlApi.pasteExtractedObject.mockResolvedValue(result)
+    mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
-    const file = makeFile()
-    const { toggleMaskSelection, replacementFile, handleSamReplace, selectedMaskId } =
-      useSegmentation(9, ref(''), ref([]))
-    toggleMaskSelection(3)
-    replacementFile.value = file
+    const { selectedAssetId, handlePaste } = useAssets(9, ref(''), ref([]))
+    selectedAssetId.value = 'asset-1'
 
-    await handleSamReplace()
+    const ret = await handlePaste({ targetBbox: { x1: 0, y1: 0, x2: 10, y2: 10 } })
+    expect(ret).toEqual(result)
+  })
 
-    expect(selectedMaskId.value).toBe(3)
-    expect(replacementFile.value).toBe(file)
+  it('sets mlError when pasteExtractedObject fails', async () => {
+    mockedMlApi.pasteExtractedObject.mockRejectedValue({
+      response: { data: { detail: 'Paste failed on server' } }
+    })
+
+    const { selectedAssetId, handlePaste, mlError } = useAssets(9, ref(''), ref([]))
+    selectedAssetId.value = 'asset-1'
+
+    await handlePaste({ targetBbox: { x1: 0, y1: 0, x2: 10, y2: 10 } })
+
+    expect(mlError.value).toBe('Paste failed on server')
+  })
+
+  it('falls back to default error message when server gives none', async () => {
+    mockedMlApi.pasteExtractedObject.mockRejectedValue(new Error('fail'))
+
+    const { selectedAssetId, handlePaste, mlError } = useAssets(9, ref(''), ref([]))
+    selectedAssetId.value = 'asset-1'
+
+    await handlePaste({ targetBbox: { x1: 0, y1: 0, x2: 10, y2: 10 } })
+
+    expect(mlError.value).toBe('Paste failed')
+  })
+
+  it('sets pasting to false after failure', async () => {
+    mockedMlApi.pasteExtractedObject.mockRejectedValue(new Error('fail'))
+
+    const { selectedAssetId, handlePaste, pasting } = useAssets(9, ref(''), ref([]))
+    selectedAssetId.value = 'asset-1'
+
+    await handlePaste({ targetBbox: { x1: 0, y1: 0, x2: 10, y2: 10 } })
+
+    expect(pasting.value).toBe(false)
   })
 })
 
-describe('useSegmentation: onReplacementSelect', () => {
-  it('sets replacementFile from input event', () => {
-    const { onReplacementSelect, replacementFile } = useSegmentation(9, ref(''), ref([]))
 
-    const file = new File(['img'], 'photo.jpg', { type: 'image/jpeg' })
-    const input = document.createElement('input')
-    input.type = 'file'
-    Object.defineProperty(input, 'files', { value: [file] })
+describe('useAssets: selectFromLibrary', () => {
+  it('selects an asset from the library', () => {
+    const { selectFromLibrary, selectedAssetId } = useAssets(1, ref(''), ref([]))
 
-    onReplacementSelect({ target: input } as unknown as Event)
+    selectFromLibrary(makeAsset('asset-1'))
 
-    expect(replacementFile.value).toBe(file)
+    expect(selectedAssetId.value).toBe('asset-1')
   })
 
-  it('sets replacementFile to null when no file selected', () => {
-    const { onReplacementSelect, replacementFile } = useSegmentation(9, ref(''), ref([]))
+  it('deselects when the same asset is selected again', () => {
+    const { selectFromLibrary, selectedAssetId } = useAssets(1, ref(''), ref([]))
 
-    const input = document.createElement('input')
-    input.type = 'file'
-    Object.defineProperty(input, 'files', { value: [] })
+    selectFromLibrary(makeAsset('asset-1'))
+    selectFromLibrary(makeAsset('asset-1'))
 
-    onReplacementSelect({ target: input } as unknown as Event)
+    expect(selectedAssetId.value).toBeNull()
+  })
 
-    expect(replacementFile.value).toBeNull()
+  it('switches selection to a different asset', () => {
+    const { selectFromLibrary, selectedAssetId } = useAssets(1, ref(''), ref([]))
+
+    selectFromLibrary(makeAsset('asset-1'))
+    selectFromLibrary(makeAsset('asset-2'))
+
+    expect(selectedAssetId.value).toBe('asset-2')
+  })
+
+  it('clears extractedPreviewUrl when selecting from library', () => {
+    const { selectFromLibrary, extractedPreviewUrl } = useAssets(1, ref(''), ref([]))
+    extractedPreviewUrl.value = 'blob:something'
+
+    selectFromLibrary(makeAsset('asset-1'))
+
+    expect(extractedPreviewUrl.value).toBeNull()
   })
 })
 
-describe('useSegmentation: clearSegments', () => {
-  it('clears segments and selectedMaskId', async () => {
-    mockedMlApi.segmentObjects.mockResolvedValue({
-      segments: [makeSegment(1), makeSegment(2)],
-      metrics: {},
-      image_size: [800, 600],
-      timestamp: '2026-01-01T00:00:00Z'
-    })
 
-    const { handleSegment, toggleMaskSelection, clearSegments, segments, selectedMaskId } =
-      useSegmentation(9, ref(''), ref([]))
-    await handleSegment()
-    toggleMaskSelection(1)
+describe('useAssets: clearExtracted', () => {
+  it('clears selectedAssetId and extractedPreviewUrl', () => {
+    const { selectedAssetId, extractedPreviewUrl, clearExtracted } = useAssets(1, ref(''), ref([]))
+    selectedAssetId.value = 'asset-1'
+    extractedPreviewUrl.value = 'blob:something'
 
-    clearSegments()
+    clearExtracted()
 
-    expect(segments.value).toEqual([])
-    expect(selectedMaskId.value).toBeNull()
+    expect(selectedAssetId.value).toBeNull()
+    expect(extractedPreviewUrl.value).toBeNull()
+  })
+})
+
+
+describe('useAssets: renameAsset', () => {
+  it('calls renameAsset api with assetId and label', async () => {
+    mockedMlApi.renameAsset.mockResolvedValue(makeAsset('asset-1', 'New Name'))
+
+    const { renameAsset } = useAssets(1, ref(''), ref([]))
+    await renameAsset('asset-1', 'New Name')
+
+    expect(mockedMlApi.renameAsset).toHaveBeenCalledWith('asset-1', 'New Name')
   })
 
-  it('empties regions as a side effect', async () => {
-    mockedMlApi.segmentObjects.mockResolvedValue({
-      segments: [makeSegment(1)],
-      metrics: {},
-      image_size: [800, 600],
-      timestamp: '2026-01-01T00:00:00Z'
+  it('updates the asset in the assets list', async () => {
+    mockedMlApi.listAssets.mockResolvedValue([makeAsset('asset-1', 'Old Name')])
+    mockedMlApi.renameAsset.mockResolvedValue(makeAsset('asset-1', 'New Name'))
+
+    const { fetchAssets, renameAsset, assets } = useAssets(1, ref(''), ref([]))
+    await fetchAssets()
+    await renameAsset('asset-1', 'New Name')
+
+    expect(assets.value[0].label).toBe('New Name')
+  })
+
+  it('sets assetsError when renameAsset fails', async () => {
+    mockedMlApi.renameAsset.mockRejectedValue({
+      response: { data: { detail: 'Rename failed on server' } }
     })
 
-    const { handleSegment, clearSegments, regions } = useSegmentation(9, ref(''), ref([]))
-    await handleSegment()
-    expect(regions.value).toHaveLength(1)
+    const { renameAsset, assetsError } = useAssets(1, ref(''), ref([]))
+    await renameAsset('asset-1', 'New Name')
 
-    clearSegments()
+    expect(assetsError.value).toBe('Rename failed on server')
+  })
 
-    expect(regions.value).toEqual([])
+  it('falls back to default error message when server gives none', async () => {
+    mockedMlApi.renameAsset.mockRejectedValue(new Error('fail'))
+
+    const { renameAsset, assetsError } = useAssets(1, ref(''), ref([]))
+    await renameAsset('asset-1', 'New Name')
+
+    expect(assetsError.value).toBe('Rename failed')
+  })
+})
+
+
+describe('useAssets: deleteAsset', () => {
+  it('calls deleteAsset api with assetId', async () => {
+    mockedMlApi.deleteAsset.mockResolvedValue(undefined)
+    mockedMlApi.listAssets.mockResolvedValue([makeAsset('asset-1')])
+
+    const { fetchAssets, deleteAsset } = useAssets(1, ref(''), ref([]))
+    await fetchAssets()
+    await deleteAsset('asset-1')
+
+    expect(mockedMlApi.deleteAsset).toHaveBeenCalledWith('asset-1')
+  })
+
+  it('removes the asset from the assets list', async () => {
+    mockedMlApi.listAssets.mockResolvedValue([makeAsset('asset-1'), makeAsset('asset-2')])
+    mockedMlApi.deleteAsset.mockResolvedValue(undefined)
+
+    const { fetchAssets, deleteAsset, assets } = useAssets(1, ref(''), ref([]))
+    await fetchAssets()
+    await deleteAsset('asset-1')
+
+    expect(assets.value).toHaveLength(1)
+    expect(assets.value[0].public_id).toBe('asset-2')
+  })
+
+  it('clears selectedAssetId when the selected asset is deleted', async () => {
+    mockedMlApi.listAssets.mockResolvedValue([makeAsset('asset-1')])
+    mockedMlApi.deleteAsset.mockResolvedValue(undefined)
+
+    const { fetchAssets, deleteAsset, selectedAssetId } = useAssets(1, ref(''), ref([]))
+    await fetchAssets()
+    selectedAssetId.value = 'asset-1'
+
+    await deleteAsset('asset-1')
+
+    expect(selectedAssetId.value).toBeNull()
+  })
+
+  it('clears extractedPreviewUrl when the selected asset is deleted', async () => {
+    mockedMlApi.listAssets.mockResolvedValue([makeAsset('asset-1')])
+    mockedMlApi.deleteAsset.mockResolvedValue(undefined)
+
+    const { fetchAssets, deleteAsset, selectedAssetId, extractedPreviewUrl } = useAssets(1, ref(''), ref([]))
+    await fetchAssets()
+    selectedAssetId.value = 'asset-1'
+    extractedPreviewUrl.value = 'blob:something'
+
+    await deleteAsset('asset-1')
+
+    expect(extractedPreviewUrl.value).toBeNull()
+  })
+
+  it('does not clear selectedAssetId when a different asset is deleted', async () => {
+    mockedMlApi.listAssets.mockResolvedValue([makeAsset('asset-1'), makeAsset('asset-2')])
+    mockedMlApi.deleteAsset.mockResolvedValue(undefined)
+
+    const { fetchAssets, deleteAsset, selectedAssetId } = useAssets(1, ref(''), ref([]))
+    await fetchAssets()
+    selectedAssetId.value = 'asset-1'
+
+    await deleteAsset('asset-2')
+
+    expect(selectedAssetId.value).toBe('asset-1')
+  })
+
+  it('sets deletingId during the call and clears it after', async () => {
+    let resolve: (v: any) => void
+    mockedMlApi.deleteAsset.mockReturnValue(new Promise(r => { resolve = r }))
+
+    const { deleteAsset, deletingId } = useAssets(1, ref(''), ref([]))
+    const promise = deleteAsset('asset-1')
+    expect(deletingId.value).toBe('asset-1')
+
+    resolve!(undefined)
+    await promise
+    expect(deletingId.value).toBeNull()
+  })
+
+  it('sets assetsError when deleteAsset fails', async () => {
+    mockedMlApi.deleteAsset.mockRejectedValue({
+      response: { data: { detail: 'Delete failed on server' } }
+    })
+
+    const { deleteAsset, assetsError } = useAssets(1, ref(''), ref([]))
+    await deleteAsset('asset-1')
+
+    expect(assetsError.value).toBe('Delete failed on server')
+  })
+
+  it('falls back to default error message when server gives none', async () => {
+    mockedMlApi.deleteAsset.mockRejectedValue(new Error('fail'))
+
+    const { deleteAsset, assetsError } = useAssets(1, ref(''), ref([]))
+    await deleteAsset('asset-1')
+
+    expect(assetsError.value).toBe('Delete failed')
+  })
+
+  it('clears deletingId after failure', async () => {
+    mockedMlApi.deleteAsset.mockRejectedValue(new Error('fail'))
+
+    const { deleteAsset, deletingId } = useAssets(1, ref(''), ref([]))
+    await deleteAsset('asset-1')
+
+    expect(deletingId.value).toBeNull()
   })
 })

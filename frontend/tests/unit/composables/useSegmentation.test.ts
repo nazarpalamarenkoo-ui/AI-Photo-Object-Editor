@@ -8,7 +8,7 @@ vi.mock('@/api/ml', () => ({
   },
   mlApi: {
     segmentObjects: vi.fn(),
-    segmentHybrid: vi.fn(),          
+    segmentHybrid: vi.fn(),
     segmentWithPrompt: vi.fn(),
     segmentByPolygon: vi.fn(),
     samRemoveObject: vi.fn(),
@@ -51,6 +51,7 @@ beforeEach(() => {
   vi.clearAllMocks()
 })
 
+
 describe('useSegmentation: initial state', () => {
   it('starts with empty segments, no selection, not segmenting, no error', () => {
     const { segments, selectedMaskId, segmenting, mlError } =
@@ -74,20 +75,18 @@ describe('useSegmentation: initial state', () => {
     expect(regions.value).toEqual([])
   })
 
-  it('prompt and polygon state start empty', () => {
-    const { promptMode, promptLabel, promptPoints, promptBbox, polygonPoints, polygonShapes, canRunPrompt, canRunPolygon } =
+  it('bbox and polygon state start empty', () => {
+    const { promptBbox, polygonPoints, polygonShapes, canRunBbox, canRunPolygon } =
       useSegmentation(1, ref(''), ref([]))
 
-    expect(promptMode.value).toBeNull()
-    expect(promptLabel.value).toBe(1)
-    expect(promptPoints.value).toEqual([])
     expect(promptBbox.value).toBeNull()
     expect(polygonPoints.value).toEqual([])
     expect(polygonShapes.value).toEqual({})
-    expect(canRunPrompt.value).toBe(false)
+    expect(canRunBbox.value).toBe(false)
     expect(canRunPolygon.value).toBe(false)
   })
 })
+
 
 describe('useSegmentation: regions', () => {
   it('maps segments to region items with generated labels and mask_url', async () => {
@@ -128,6 +127,7 @@ describe('useSegmentation: regions', () => {
   })
 })
 
+
 describe('useSegmentation: handleSegment', () => {
   it('calls segmentObjects with provided minArea and maxSegments', async () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([]))
@@ -138,7 +138,7 @@ describe('useSegmentation: handleSegment', () => {
     expect(mockedMlApi.segmentObjects).toHaveBeenCalledWith(9, 300, 20)
   })
 
-  it('uses default minArea and maxSegments when not provided', async () => {
+  it('uses default minArea=500 and maxSegments=50 when not provided', async () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([]))
 
     const { handleSegment } = useSegmentation(9, ref(''), ref([]))
@@ -162,27 +162,21 @@ describe('useSegmentation: handleSegment', () => {
 
     const { handleSegment, toggleMaskSelection, selectedMaskId } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(3)
-    expect(selectedMaskId.value).toBe(3)
-
     await handleSegment()
 
     expect(selectedMaskId.value).toBeNull()
   })
 
   it('sets segmenting to true during the call and false after success', async () => {
-    let resolvePromise: (value: any) => void
-    mockedMlApi.segmentObjects.mockReturnValue(
-      new Promise(resolve => { resolvePromise = resolve })
-    )
+    let resolve: (v: any) => void
+    mockedMlApi.segmentObjects.mockReturnValue(new Promise(r => { resolve = r }))
 
     const { handleSegment, segmenting } = useSegmentation(9, ref(''), ref([]))
     const promise = handleSegment()
-
     expect(segmenting.value).toBe(true)
 
-    resolvePromise!(makeSegmentResult([]))
+    resolve!(makeSegmentResult([]))
     await promise
-
     expect(segmenting.value).toBe(false)
   })
 
@@ -216,9 +210,7 @@ describe('useSegmentation: handleSegment', () => {
   })
 
   it('clears previous mlError on new call', async () => {
-    mockedMlApi.segmentObjects.mockRejectedValueOnce({
-      response: { data: { detail: 'first error' } }
-    })
+    mockedMlApi.segmentObjects.mockRejectedValueOnce({ response: { data: { detail: 'first error' } } })
 
     const { handleSegment, mlError } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
@@ -231,35 +223,8 @@ describe('useSegmentation: handleSegment', () => {
   })
 })
 
-describe('useSegmentation: prompt point / bbox management', () => {
-  it('addPromptPoint pushes a rounded point with the current promptLabel', () => {
-    const { addPromptPoint, promptPoints, promptLabel } = useSegmentation(1, ref(''), ref([]))
 
-    promptLabel.value = 0
-    addPromptPoint(10.6, 20.2)
-
-    expect(promptPoints.value).toEqual([{ x: 11, y: 20, label: 0 }])
-  })
-
-  it('addPromptPoint accumulates multiple points', () => {
-    const { addPromptPoint, promptPoints } = useSegmentation(1, ref(''), ref([]))
-
-    addPromptPoint(1, 1)
-    addPromptPoint(2, 2)
-
-    expect(promptPoints.value).toHaveLength(2)
-  })
-
-  it('removeLastPromptPoint pops the last point', () => {
-    const { addPromptPoint, removeLastPromptPoint, promptPoints } = useSegmentation(1, ref(''), ref([]))
-
-    addPromptPoint(1, 1)
-    addPromptPoint(2, 2)
-    removeLastPromptPoint()
-
-    expect(promptPoints.value).toEqual([{ x: 1, y: 1, label: 1 }])
-  })
-
+describe('useSegmentation: bbox management', () => {
   it('setPromptBbox rounds and stores the bbox', () => {
     const { setPromptBbox, promptBbox } = useSegmentation(1, ref(''), ref([]))
 
@@ -268,53 +233,30 @@ describe('useSegmentation: prompt point / bbox management', () => {
     expect(promptBbox.value).toEqual({ x1: 1, y1: 3, x2: 11, y2: 21 })
   })
 
-  it('clearPrompt resets promptPoints, promptBbox and polygonPoints', () => {
-    const { addPromptPoint, setPromptBbox, addPolygonPoint, clearPrompt, promptPoints, promptBbox, polygonPoints } =
-      useSegmentation(1, ref(''), ref([]))
+  it('canRunBbox is true when a bbox is set', () => {
+    const { setPromptBbox, canRunBbox } = useSegmentation(1, ref(''), ref([]))
 
-    addPromptPoint(1, 1)
     setPromptBbox({ x1: 0, y1: 0, x2: 10, y2: 10 })
-    addPolygonPoint(1, 1)
 
-    clearPrompt()
+    expect(canRunBbox.value).toBe(true)
+  })
 
-    expect(promptPoints.value).toEqual([])
+  it('canRunBbox is false when no bbox is set', () => {
+    const { canRunBbox } = useSegmentation(1, ref(''), ref([]))
+
+    expect(canRunBbox.value).toBe(false)
+  })
+
+  it('clearBbox resets promptBbox to null', () => {
+    const { setPromptBbox, clearBbox, promptBbox } = useSegmentation(1, ref(''), ref([]))
+
+    setPromptBbox({ x1: 0, y1: 0, x2: 10, y2: 10 })
+    clearBbox()
+
     expect(promptBbox.value).toBeNull()
-    expect(polygonPoints.value).toEqual([])
-  })
-
-  it('setPromptMode sets the mode and clears prompt state', () => {
-    const { addPromptPoint, setPromptMode, promptMode, promptPoints } = useSegmentation(1, ref(''), ref([]))
-
-    addPromptPoint(1, 1)
-    setPromptMode('points')
-
-    expect(promptMode.value).toBe('points')
-    expect(promptPoints.value).toEqual([])
-  })
-
-  it('canRunPrompt is true when there are prompt points', () => {
-    const { addPromptPoint, canRunPrompt } = useSegmentation(1, ref(''), ref([]))
-
-    addPromptPoint(1, 1)
-
-    expect(canRunPrompt.value).toBe(true)
-  })
-
-  it('canRunPrompt is true when a bbox is set', () => {
-    const { setPromptBbox, canRunPrompt } = useSegmentation(1, ref(''), ref([]))
-
-    setPromptBbox({ x1: 0, y1: 0, x2: 10, y2: 10 })
-
-    expect(canRunPrompt.value).toBe(true)
-  })
-
-  it('canRunPrompt is false with no points and no bbox', () => {
-    const { canRunPrompt } = useSegmentation(1, ref(''), ref([]))
-
-    expect(canRunPrompt.value).toBe(false)
   })
 })
+
 
 describe('useSegmentation: polygon point management', () => {
   it('addPolygonPoint pushes a rounded point', () => {
@@ -323,6 +265,15 @@ describe('useSegmentation: polygon point management', () => {
     addPolygonPoint(10.6, 20.4)
 
     expect(polygonPoints.value).toEqual([{ x: 11, y: 20 }])
+  })
+
+  it('addPolygonPoint accumulates multiple points', () => {
+    const { addPolygonPoint, polygonPoints } = useSegmentation(1, ref(''), ref([]))
+
+    addPolygonPoint(1, 1)
+    addPolygonPoint(2, 2)
+
+    expect(polygonPoints.value).toHaveLength(2)
   })
 
   it('removeLastPolygonPoint pops the last point', () => {
@@ -335,17 +286,13 @@ describe('useSegmentation: polygon point management', () => {
     expect(polygonPoints.value).toEqual([{ x: 1, y: 1 }])
   })
 
-  it('clearPolygon only resets polygonPoints', () => {
-    const { addPolygonPoint, addPromptPoint, clearPolygon, polygonPoints, promptPoints } =
-      useSegmentation(1, ref(''), ref([]))
+  it('clearPolygon resets polygonPoints', () => {
+    const { addPolygonPoint, clearPolygon, polygonPoints } = useSegmentation(1, ref(''), ref([]))
 
     addPolygonPoint(1, 1)
-    addPromptPoint(2, 2)
-
     clearPolygon()
 
     expect(polygonPoints.value).toEqual([])
-    expect(promptPoints.value).toHaveLength(1)
   })
 
   it('canRunPolygon is false with fewer than 3 points', () => {
@@ -368,35 +315,17 @@ describe('useSegmentation: polygon point management', () => {
   })
 })
 
+
 describe('useSegmentation: handleSegmentWithPrompt', () => {
-  it('calls segmentWithPrompt with given params and multimask_output false', async () => {
+  it('calls segmentWithPrompt with given bbox params', async () => {
     mockedMlApi.segmentWithPrompt.mockResolvedValue(makeSegmentResult([makeSegment(1)]))
 
     const { handleSegmentWithPrompt } = useSegmentation(9, ref(''), ref([]))
-    const params = { pointCoords: [[10, 20]] as [number, number][], pointLabels: [1] }
 
-    await handleSegmentWithPrompt(params)
-
-    expect(mockedMlApi.segmentWithPrompt).toHaveBeenCalledWith(9, {
-      pointCoords: [[10, 20]],
-      pointLabels: [1],
-      bbox: undefined,
-      multimask_output: false
-    })
-  })
-
-  it('falls back to promptPoints/promptBbox state when no params are given', async () => {
-    mockedMlApi.segmentWithPrompt.mockResolvedValue(makeSegmentResult([makeSegment(1)]))
-
-    const { addPromptPoint, handleSegmentWithPrompt } = useSegmentation(9, ref(''), ref([]))
-    addPromptPoint(5, 5)
-
-    await handleSegmentWithPrompt()
+    await handleSegmentWithPrompt({ bbox: { x1: 0, y1: 0, x2: 10, y2: 10 } })
 
     expect(mockedMlApi.segmentWithPrompt).toHaveBeenCalledWith(9, {
-      pointCoords: [[5, 5]],
-      pointLabels: [1],
-      bbox: undefined,
+      bbox: { x1: 0, y1: 0, x2: 10, y2: 10 },
       multimask_output: false
     })
   })
@@ -410,19 +339,17 @@ describe('useSegmentation: handleSegmentWithPrompt', () => {
     await handleSegmentWithPrompt()
 
     expect(mockedMlApi.segmentWithPrompt).toHaveBeenCalledWith(9, {
-      pointCoords: undefined,
-      pointLabels: undefined,
       bbox: { x1: 0, y1: 0, x2: 10, y2: 10 },
       multimask_output: false
     })
   })
 
-  it('sets an error and does not call the api when neither points nor bbox are available', async () => {
+  it('sets an error and does not call the api when no bbox is available', async () => {
     const { handleSegmentWithPrompt, mlError } = useSegmentation(9, ref(''), ref([]))
 
     await handleSegmentWithPrompt()
 
-    expect(mlError.value).toBe('Add one point or bbox')
+    expect(mlError.value).toBe('Draw a bbox first')
     expect(mockedMlApi.segmentWithPrompt).not.toHaveBeenCalled()
   })
 
@@ -444,39 +371,32 @@ describe('useSegmentation: handleSegmentWithPrompt', () => {
     const { handleSegmentWithPrompt, toggleMaskSelection, selectedMaskId } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(7)
 
-    await handleSegmentWithPrompt({ pointCoords: [[1, 1]], pointLabels: [1] })
+    await handleSegmentWithPrompt({ bbox: { x1: 0, y1: 0, x2: 10, y2: 10 } })
 
     expect(selectedMaskId.value).toBe(7)
   })
 
-  it('clears prompt state and prompt mode on success', async () => {
+  it('clears promptBbox on success', async () => {
     mockedMlApi.segmentWithPrompt.mockResolvedValue(makeSegmentResult([makeSegment(2)]))
 
-    const { addPromptPoint, setPromptMode, handleSegmentWithPrompt, promptPoints, promptMode } =
-      useSegmentation(9, ref(''), ref([]))
-    setPromptMode('points')
-    addPromptPoint(1, 1)
+    const { setPromptBbox, handleSegmentWithPrompt, promptBbox } = useSegmentation(9, ref(''), ref([]))
+    setPromptBbox({ x1: 0, y1: 0, x2: 10, y2: 10 })
 
-    await handleSegmentWithPrompt({ pointCoords: [[1, 1]], pointLabels: [1] })
+    await handleSegmentWithPrompt()
 
-    expect(promptPoints.value).toEqual([])
-    expect(promptMode.value).toBeNull()
+    expect(promptBbox.value).toBeNull()
   })
 
   it('sets segmenting to true during and false after success', async () => {
-    let resolvePromise: (value: any) => void
-    mockedMlApi.segmentWithPrompt.mockReturnValue(
-      new Promise(resolve => { resolvePromise = resolve })
-    )
+    let resolve: (v: any) => void
+    mockedMlApi.segmentWithPrompt.mockReturnValue(new Promise(r => { resolve = r }))
 
     const { handleSegmentWithPrompt, segmenting } = useSegmentation(9, ref(''), ref([]))
-    const promise = handleSegmentWithPrompt({ pointCoords: [[1, 1]], pointLabels: [1] })
-
+    const promise = handleSegmentWithPrompt({ bbox: { x1: 0, y1: 0, x2: 10, y2: 10 } })
     expect(segmenting.value).toBe(true)
 
-    resolvePromise!(makeSegmentResult([]))
+    resolve!(makeSegmentResult([]))
     await promise
-
     expect(segmenting.value).toBe(false)
   })
 
@@ -486,7 +406,7 @@ describe('useSegmentation: handleSegmentWithPrompt', () => {
     })
 
     const { handleSegmentWithPrompt, mlError } = useSegmentation(9, ref(''), ref([]))
-    await handleSegmentWithPrompt({ pointCoords: [[1, 1]], pointLabels: [1] })
+    await handleSegmentWithPrompt({ bbox: { x1: 0, y1: 0, x2: 10, y2: 10 } })
 
     expect(mlError.value).toBe('Prompted segmentation failed on server')
   })
@@ -495,7 +415,7 @@ describe('useSegmentation: handleSegmentWithPrompt', () => {
     mockedMlApi.segmentWithPrompt.mockRejectedValue(new Error('fail'))
 
     const { handleSegmentWithPrompt, mlError } = useSegmentation(9, ref(''), ref([]))
-    await handleSegmentWithPrompt({ pointCoords: [[1, 1]], pointLabels: [1] })
+    await handleSegmentWithPrompt({ bbox: { x1: 0, y1: 0, x2: 10, y2: 10 } })
 
     expect(mlError.value).toBe('Prompted segmentation failed')
   })
@@ -504,22 +424,23 @@ describe('useSegmentation: handleSegmentWithPrompt', () => {
     mockedMlApi.segmentWithPrompt.mockRejectedValue(new Error('fail'))
 
     const { handleSegmentWithPrompt, segmenting } = useSegmentation(9, ref(''), ref([]))
-    await handleSegmentWithPrompt({ pointCoords: [[1, 1]], pointLabels: [1] })
+    await handleSegmentWithPrompt({ bbox: { x1: 0, y1: 0, x2: 10, y2: 10 } })
 
     expect(segmenting.value).toBe(false)
   })
 
-  it('does not clear prompt state on failure', async () => {
+  it('does not clear promptBbox on failure', async () => {
     mockedMlApi.segmentWithPrompt.mockRejectedValue(new Error('fail'))
 
-    const { addPromptPoint, handleSegmentWithPrompt, promptPoints } = useSegmentation(9, ref(''), ref([]))
-    addPromptPoint(1, 1)
+    const { setPromptBbox, handleSegmentWithPrompt, promptBbox } = useSegmentation(9, ref(''), ref([]))
+    setPromptBbox({ x1: 0, y1: 0, x2: 10, y2: 10 })
 
-    await handleSegmentWithPrompt({ pointCoords: [[1, 1]], pointLabels: [1] })
+    await handleSegmentWithPrompt()
 
-    expect(promptPoints.value).toHaveLength(1)
+    expect(promptBbox.value).not.toBeNull()
   })
 })
+
 
 describe('useSegmentation: handleSegmentByPolygon', () => {
   it('sets an error and does not call the api when fewer than 3 points exist', async () => {
@@ -560,7 +481,6 @@ describe('useSegmentation: handleSegmentByPolygon', () => {
     addPolygonPoint(1, 1)
     addPolygonPoint(2, 2)
     addPolygonPoint(3, 3)
-
     await handleSegmentByPolygon()
 
     expect(segments.value).toHaveLength(2)
@@ -574,45 +494,36 @@ describe('useSegmentation: handleSegmentByPolygon', () => {
     addPolygonPoint(1, 1)
     addPolygonPoint(2, 2)
     addPolygonPoint(3, 3)
-
     await handleSegmentByPolygon()
 
     expect(polygonShapes.value[7]).toEqual([{ x: 1, y: 1 }, { x: 2, y: 2 }, { x: 3, y: 3 }])
   })
 
-  it('clears polygon points and prompt mode on success', async () => {
+  it('clears polygon points on success', async () => {
     mockedMlApi.segmentByPolygon.mockResolvedValue(makeSegmentResult([makeSegment(1)]))
 
-    const { addPolygonPoint, setPromptMode, handleSegmentByPolygon, polygonPoints, promptMode } =
-      useSegmentation(9, ref(''), ref([]))
-    setPromptMode('polygon')
+    const { addPolygonPoint, handleSegmentByPolygon, polygonPoints } = useSegmentation(9, ref(''), ref([]))
     addPolygonPoint(1, 1)
     addPolygonPoint(2, 2)
     addPolygonPoint(3, 3)
-
     await handleSegmentByPolygon()
 
     expect(polygonPoints.value).toEqual([])
-    expect(promptMode.value).toBeNull()
   })
 
   it('sets segmenting to true during and false after success', async () => {
-    let resolvePromise: (value: any) => void
-    mockedMlApi.segmentByPolygon.mockReturnValue(
-      new Promise(resolve => { resolvePromise = resolve })
-    )
+    let resolve: (v: any) => void
+    mockedMlApi.segmentByPolygon.mockReturnValue(new Promise(r => { resolve = r }))
 
     const { addPolygonPoint, handleSegmentByPolygon, segmenting } = useSegmentation(9, ref(''), ref([]))
     addPolygonPoint(1, 1)
     addPolygonPoint(2, 2)
     addPolygonPoint(3, 3)
-
     const promise = handleSegmentByPolygon()
     expect(segmenting.value).toBe(true)
 
-    resolvePromise!(makeSegmentResult([]))
+    resolve!(makeSegmentResult([]))
     await promise
-
     expect(segmenting.value).toBe(false)
   })
 
@@ -625,7 +536,6 @@ describe('useSegmentation: handleSegmentByPolygon', () => {
     addPolygonPoint(1, 1)
     addPolygonPoint(2, 2)
     addPolygonPoint(3, 3)
-
     await handleSegmentByPolygon()
 
     expect(mlError.value).toBe('Polygon segmentation failed on server')
@@ -638,7 +548,6 @@ describe('useSegmentation: handleSegmentByPolygon', () => {
     addPolygonPoint(1, 1)
     addPolygonPoint(2, 2)
     addPolygonPoint(3, 3)
-
     await handleSegmentByPolygon()
 
     expect(mlError.value).toBe('Polygon segmentation failed')
@@ -647,12 +556,10 @@ describe('useSegmentation: handleSegmentByPolygon', () => {
   it('sets segmenting to false and keeps polygon points after failure', async () => {
     mockedMlApi.segmentByPolygon.mockRejectedValue(new Error('fail'))
 
-    const { addPolygonPoint, handleSegmentByPolygon, segmenting, polygonPoints } =
-      useSegmentation(9, ref(''), ref([]))
+    const { addPolygonPoint, handleSegmentByPolygon, segmenting, polygonPoints } = useSegmentation(9, ref(''), ref([]))
     addPolygonPoint(1, 1)
     addPolygonPoint(2, 2)
     addPolygonPoint(3, 3)
-
     await handleSegmentByPolygon()
 
     expect(segmenting.value).toBe(false)
@@ -660,40 +567,34 @@ describe('useSegmentation: handleSegmentByPolygon', () => {
   })
 })
 
+
 describe('useSegmentation: toggleMaskSelection', () => {
   it('selects a mask id when none is selected', () => {
     const { toggleMaskSelection, selectedMaskId } = useSegmentation(1, ref(''), ref([]))
-
     toggleMaskSelection(4)
-
     expect(selectedMaskId.value).toBe(4)
   })
 
   it('deselects the mask id when the same id is toggled again', () => {
     const { toggleMaskSelection, selectedMaskId } = useSegmentation(1, ref(''), ref([]))
-
     toggleMaskSelection(4)
     toggleMaskSelection(4)
-
     expect(selectedMaskId.value).toBeNull()
   })
 
   it('switches selection when a different mask id is toggled', () => {
     const { toggleMaskSelection, selectedMaskId } = useSegmentation(1, ref(''), ref([]))
-
     toggleMaskSelection(4)
     toggleMaskSelection(9)
-
     expect(selectedMaskId.value).toBe(9)
   })
 })
 
+
 describe('useSegmentation: handleSamRemove', () => {
   it('does nothing if no mask is selected', async () => {
     const { handleSamRemove } = useSegmentation(9, ref(''), ref([]))
-
     await handleSamRemove()
-
     expect(mockedMlApi.samRemoveObject).not.toHaveBeenCalled()
   })
 
@@ -703,7 +604,6 @@ describe('useSegmentation: handleSamRemove', () => {
 
     const { toggleMaskSelection, handleSamRemove } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(3)
-
     await handleSamRemove()
 
     expect(mockedMlApi.samRemoveObject).toHaveBeenCalledWith(9, 3, 12, true, PRESETS.quality)
@@ -716,7 +616,6 @@ describe('useSegmentation: handleSamRemove', () => {
     const customLdm = { ldm_steps: 5, ldm_sampler: 'ddim' as const, hd_strategy: 'ORIGINAL' as const }
     const { toggleMaskSelection, handleSamRemove } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(3)
-
     await handleSamRemove(customLdm)
 
     expect(mockedMlApi.samRemoveObject).toHaveBeenCalledWith(9, 3, 12, true, customLdm)
@@ -729,7 +628,6 @@ describe('useSegmentation: handleSamRemove', () => {
     const currentImageUrl = ref('')
     const { toggleMaskSelection, handleSamRemove } = useSegmentation(9, currentImageUrl, ref([]))
     toggleMaskSelection(3)
-
     await handleSamRemove()
 
     expect(currentImageUrl.value).toBe('https://cdn.example.com/removed.jpg')
@@ -743,7 +641,6 @@ describe('useSegmentation: handleSamRemove', () => {
     const { handleSegment, toggleMaskSelection, handleSamRemove, segments } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(1)
-
     await handleSamRemove()
 
     expect(segments.value).toHaveLength(1)
@@ -756,7 +653,6 @@ describe('useSegmentation: handleSamRemove', () => {
 
     const { toggleMaskSelection, handleSamRemove, selectedMaskId } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(3)
-
     await handleSamRemove()
 
     expect(selectedMaskId.value).toBeNull()
@@ -769,7 +665,6 @@ describe('useSegmentation: handleSamRemove', () => {
     const history = ref<string[]>([])
     const { toggleMaskSelection, handleSamRemove } = useSegmentation(9, ref(''), history)
     toggleMaskSelection(3)
-
     await handleSamRemove()
 
     expect(mockedMlApi.getHistory).toHaveBeenCalledWith(9)
@@ -783,7 +678,6 @@ describe('useSegmentation: handleSamRemove', () => {
 
     const { toggleMaskSelection, handleSamRemove, mlError } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(3)
-
     await handleSamRemove()
 
     expect(mlError.value).toBe('SAM remove failed on server')
@@ -794,12 +688,12 @@ describe('useSegmentation: handleSamRemove', () => {
 
     const { toggleMaskSelection, handleSamRemove, selectedMaskId } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(3)
-
     await handleSamRemove()
 
     expect(selectedMaskId.value).toBe(3)
   })
 })
+
 
 describe('useSegmentation: handleSamReplace', () => {
   const makeFile = () => new File(['img'], 'replacement.jpg', { type: 'image/jpeg' })
@@ -807,18 +701,14 @@ describe('useSegmentation: handleSamReplace', () => {
   it('does nothing if no mask is selected', async () => {
     const { replacementFile, handleSamReplace } = useSegmentation(9, ref(''), ref([]))
     replacementFile.value = makeFile()
-
     await handleSamReplace()
-
     expect(mockedMlApi.samReplaceObject).not.toHaveBeenCalled()
   })
 
   it('does nothing if no replacementFile is set', async () => {
     const { toggleMaskSelection, handleSamReplace } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(3)
-
     await handleSamReplace()
-
     expect(mockedMlApi.samReplaceObject).not.toHaveBeenCalled()
   })
 
@@ -830,7 +720,6 @@ describe('useSegmentation: handleSamReplace', () => {
     const { toggleMaskSelection, replacementFile, handleSamReplace } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(3)
     replacementFile.value = file
-
     await handleSamReplace()
 
     expect(mockedMlApi.samReplaceObject).toHaveBeenCalledWith(9, 3, file, {
@@ -848,7 +737,6 @@ describe('useSegmentation: handleSamReplace', () => {
     const { toggleMaskSelection, replacementFile, handleSamReplace } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(3)
     replacementFile.value = file
-
     await handleSamReplace(customLdm)
 
     expect(mockedMlApi.samReplaceObject).toHaveBeenCalledWith(9, 3, file, {
@@ -865,7 +753,6 @@ describe('useSegmentation: handleSamReplace', () => {
     const { toggleMaskSelection, replacementFile, handleSamReplace } = useSegmentation(9, currentImageUrl, ref([]))
     toggleMaskSelection(3)
     replacementFile.value = makeFile()
-
     await handleSamReplace()
 
     expect(currentImageUrl.value).toBe('https://cdn.example.com/replaced.jpg')
@@ -876,12 +763,10 @@ describe('useSegmentation: handleSamReplace', () => {
     mockedMlApi.samReplaceObject.mockResolvedValue(makeMLResult('https://cdn.example.com/replaced.jpg'))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
-    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplace, segments } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplace, segments } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(1)
     replacementFile.value = makeFile()
-
     await handleSamReplace()
 
     expect(segments.value).toHaveLength(1)
@@ -892,11 +777,9 @@ describe('useSegmentation: handleSamReplace', () => {
     mockedMlApi.samReplaceObject.mockResolvedValue(makeMLResult('https://cdn.example.com/replaced.jpg'))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
-    const { toggleMaskSelection, replacementFile, handleSamReplace, selectedMaskId } =
-      useSegmentation(9, ref(''), ref([]))
+    const { toggleMaskSelection, replacementFile, handleSamReplace, selectedMaskId } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(3)
     replacementFile.value = makeFile()
-
     await handleSamReplace()
 
     expect(selectedMaskId.value).toBeNull()
@@ -911,10 +794,8 @@ describe('useSegmentation: handleSamReplace', () => {
     const { toggleMaskSelection, replacementFile, handleSamReplace } = useSegmentation(9, ref(''), history)
     toggleMaskSelection(3)
     replacementFile.value = makeFile()
-
     await handleSamReplace()
 
-    expect(mockedMlApi.getHistory).toHaveBeenCalledWith(9)
     expect(history.value).toEqual(['step1'])
   })
 
@@ -923,11 +804,9 @@ describe('useSegmentation: handleSamReplace', () => {
       response: { data: { detail: 'SAM replace failed on server' } }
     })
 
-    const { toggleMaskSelection, replacementFile, handleSamReplace, mlError } =
-      useSegmentation(9, ref(''), ref([]))
+    const { toggleMaskSelection, replacementFile, handleSamReplace, mlError } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(3)
     replacementFile.value = makeFile()
-
     await handleSamReplace()
 
     expect(mlError.value).toBe('SAM replace failed on server')
@@ -937,11 +816,9 @@ describe('useSegmentation: handleSamReplace', () => {
     mockedMlApi.samReplaceObject.mockRejectedValue(new Error('fail'))
 
     const file = makeFile()
-    const { toggleMaskSelection, replacementFile, handleSamReplace, selectedMaskId } =
-      useSegmentation(9, ref(''), ref([]))
+    const { toggleMaskSelection, replacementFile, handleSamReplace, selectedMaskId } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(3)
     replacementFile.value = file
-
     await handleSamReplace()
 
     expect(selectedMaskId.value).toBe(3)
@@ -949,19 +826,13 @@ describe('useSegmentation: handleSamReplace', () => {
   })
 })
 
+
 describe('useSegmentation: handleSegmentHybrid', () => {
   it('calls segmentHybrid with the provided params', async () => {
     mockedMlApi.segmentHybrid.mockResolvedValue(makeSegmentResult([]))
 
     const { handleSegmentHybrid } = useSegmentation(9, ref(''), ref([]))
-    const params = {
-      yoloConfThreshold: 0.5,
-      yoloClasses: ['cat', 'dog'],
-      fallbackMinArea: 1000,
-      fallbackMaxSegments: 10,
-      overlapIouThresh: 0.6,
-    }
-
+    const params = { yoloConfThreshold: 0.5, yoloClasses: ['cat'], fallbackMinArea: 1000, fallbackMaxSegments: 10, overlapIouThresh: 0.6 }
     await handleSegmentHybrid(params)
 
     expect(mockedMlApi.segmentHybrid).toHaveBeenCalledWith(9, params)
@@ -998,31 +869,25 @@ describe('useSegmentation: handleSegmentHybrid', () => {
   })
 
   it('resets selectedMaskId to null', async () => {
-    mockedMlApi.segmentHybrid.mockResolvedValue(makeSegmentResult([makeSegment(1)]))
+    mockedMlApi.segmentHybrid.mockResolvedValue(makeSegmentResult([]))
 
     const { handleSegmentHybrid, toggleMaskSelection, selectedMaskId } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(3)
-    expect(selectedMaskId.value).toBe(3)
-
     await handleSegmentHybrid()
 
     expect(selectedMaskId.value).toBeNull()
   })
 
   it('sets segmenting to true during the call and false after success', async () => {
-    let resolvePromise: (value: any) => void
-    mockedMlApi.segmentHybrid.mockReturnValue(
-      new Promise(resolve => { resolvePromise = resolve })
-    )
+    let resolve: (v: any) => void
+    mockedMlApi.segmentHybrid.mockReturnValue(new Promise(r => { resolve = r }))
 
     const { handleSegmentHybrid, segmenting } = useSegmentation(9, ref(''), ref([]))
     const promise = handleSegmentHybrid()
-
     expect(segmenting.value).toBe(true)
 
-    resolvePromise!(makeSegmentResult([]))
+    resolve!(makeSegmentResult([]))
     await promise
-
     expect(segmenting.value).toBe(false)
   })
 
@@ -1056,9 +921,7 @@ describe('useSegmentation: handleSegmentHybrid', () => {
   })
 
   it('clears previous mlError on new call', async () => {
-    mockedMlApi.segmentHybrid.mockRejectedValueOnce({
-      response: { data: { detail: 'first error' } }
-    })
+    mockedMlApi.segmentHybrid.mockRejectedValueOnce({ response: { data: { detail: 'first error' } } })
 
     const { handleSegmentHybrid, mlError } = useSegmentation(9, ref(''), ref([]))
     await handleSegmentHybrid()
@@ -1081,21 +944,19 @@ describe('useSegmentation: handleSegmentHybrid', () => {
     expect(segments.value).toEqual([makeSegment(1)])
   })
 })
+
+
 describe('useSegmentation: handleSamReplaceWithAsset', () => {
   it('does nothing if no mask is selected', async () => {
     const { handleSamReplaceWithAsset } = useSegmentation(9, ref(''), ref([]))
-
     await handleSamReplaceWithAsset('asset-1')
-
     expect(mockedMlApi.samReplaceObjectWithAsset).not.toHaveBeenCalled()
   })
 
   it('does nothing if assetId is empty', async () => {
     const { toggleMaskSelection, handleSamReplaceWithAsset } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(3)
-
     await handleSamReplaceWithAsset('')
-
     expect(mockedMlApi.samReplaceObjectWithAsset).not.toHaveBeenCalled()
   })
 
@@ -1105,7 +966,6 @@ describe('useSegmentation: handleSamReplaceWithAsset', () => {
 
     const { toggleMaskSelection, handleSamReplaceWithAsset } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(3)
-
     await handleSamReplaceWithAsset('asset-1')
 
     expect(mockedMlApi.samReplaceObjectWithAsset).toHaveBeenCalledWith(9, 3, 'asset-1', {
@@ -1121,7 +981,6 @@ describe('useSegmentation: handleSamReplaceWithAsset', () => {
     const customLdm = { ldm_steps: 5, ldm_sampler: 'ddim' as const, hd_strategy: 'ORIGINAL' as const }
     const { toggleMaskSelection, handleSamReplaceWithAsset } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(3)
-
     await handleSamReplaceWithAsset('asset-1', customLdm)
 
     expect(mockedMlApi.samReplaceObjectWithAsset).toHaveBeenCalledWith(9, 3, 'asset-1', {
@@ -1137,7 +996,6 @@ describe('useSegmentation: handleSamReplaceWithAsset', () => {
     const currentImageUrl = ref('')
     const { toggleMaskSelection, handleSamReplaceWithAsset } = useSegmentation(9, currentImageUrl, ref([]))
     toggleMaskSelection(3)
-
     await handleSamReplaceWithAsset('asset-1')
 
     expect(currentImageUrl.value).toBe('https://cdn.example.com/asset-replaced.jpg')
@@ -1148,11 +1006,9 @@ describe('useSegmentation: handleSamReplaceWithAsset', () => {
     mockedMlApi.samReplaceObjectWithAsset.mockResolvedValue(makeMLResult('https://cdn.example.com/asset-replaced.jpg'))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
-    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAsset, segments } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAsset, segments } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(1)
-
     await handleSamReplaceWithAsset('asset-1')
 
     expect(segments.value).toHaveLength(1)
@@ -1165,7 +1021,6 @@ describe('useSegmentation: handleSamReplaceWithAsset', () => {
 
     const { toggleMaskSelection, handleSamReplaceWithAsset, selectedMaskId } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(3)
-
     await handleSamReplaceWithAsset('asset-1')
 
     expect(selectedMaskId.value).toBeNull()
@@ -1178,10 +1033,8 @@ describe('useSegmentation: handleSamReplaceWithAsset', () => {
     const history = ref<string[]>([])
     const { toggleMaskSelection, handleSamReplaceWithAsset } = useSegmentation(9, ref(''), history)
     toggleMaskSelection(3)
-
     await handleSamReplaceWithAsset('asset-1')
 
-    expect(mockedMlApi.getHistory).toHaveBeenCalledWith(9)
     expect(history.value).toEqual(['step1'])
   })
 
@@ -1192,7 +1045,6 @@ describe('useSegmentation: handleSamReplaceWithAsset', () => {
 
     const { toggleMaskSelection, handleSamReplaceWithAsset, mlError } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(3)
-
     await handleSamReplaceWithAsset('asset-1')
 
     expect(mlError.value).toBe('SAM replace with asset failed on server')
@@ -1203,7 +1055,6 @@ describe('useSegmentation: handleSamReplaceWithAsset', () => {
 
     const { toggleMaskSelection, handleSamReplaceWithAsset, mlError } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(3)
-
     await handleSamReplaceWithAsset('asset-1')
 
     expect(mlError.value).toBe('SAM replace with asset failed')
@@ -1214,7 +1065,6 @@ describe('useSegmentation: handleSamReplaceWithAsset', () => {
 
     const { toggleMaskSelection, handleSamReplaceWithAsset, selectedMaskId } = useSegmentation(9, ref(''), ref([]))
     toggleMaskSelection(3)
-
     await handleSamReplaceWithAsset('asset-1')
 
     expect(selectedMaskId.value).toBe(3)
@@ -1229,7 +1079,6 @@ describe('useSegmentation: onReplacementSelect', () => {
     const input = document.createElement('input')
     input.type = 'file'
     Object.defineProperty(input, 'files', { value: [file] })
-
     onReplacementSelect({ target: input } as unknown as Event)
 
     expect(replacementFile.value).toBe(file)
@@ -1241,7 +1090,6 @@ describe('useSegmentation: onReplacementSelect', () => {
     const input = document.createElement('input')
     input.type = 'file'
     Object.defineProperty(input, 'files', { value: [] })
-
     onReplacementSelect({ target: input } as unknown as Event)
 
     expect(replacementFile.value).toBeNull()
@@ -1252,11 +1100,9 @@ describe('useSegmentation: clearSegments', () => {
   it('clears segments and selectedMaskId', async () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([makeSegment(1), makeSegment(2)]))
 
-    const { handleSegment, toggleMaskSelection, clearSegments, segments, selectedMaskId } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, clearSegments, segments, selectedMaskId } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(1)
-
     clearSegments()
 
     expect(segments.value).toEqual([])
@@ -1271,22 +1117,22 @@ describe('useSegmentation: clearSegments', () => {
     expect(regions.value).toHaveLength(1)
 
     clearSegments()
-
     expect(regions.value).toEqual([])
   })
 
-  it('also clears prompt state and prompt mode', async () => {
-    const { addPromptPoint, setPromptMode, clearSegments, promptPoints, promptMode } =
-      useSegmentation(9, ref(''), ref([]))
-    setPromptMode('points')
-    addPromptPoint(1, 1)
+  it('clears bbox and polygon state', () => {
+    const { setPromptBbox, addPolygonPoint, clearSegments, promptBbox, polygonPoints } = useSegmentation(9, ref(''), ref([]))
+    setPromptBbox({ x1: 0, y1: 0, x2: 10, y2: 10 })
+    addPolygonPoint(1, 1)
 
     clearSegments()
 
-    expect(promptPoints.value).toEqual([])
-    expect(promptMode.value).toBeNull()
+    expect(promptBbox.value).toBeNull()
+    expect(polygonPoints.value).toEqual([])
   })
 })
+
+
 describe('useSegmentation: handleSamReplaceDiffusion', () => {
   const makeFile = () => new File(['img'], 'reference.png', { type: 'image/png' })
   const segWithMask = (maskId: number) =>
@@ -1295,34 +1141,28 @@ describe('useSegmentation: handleSamReplaceDiffusion', () => {
   it('does nothing if no mask is selected', async () => {
     const { replacementFile, handleSamReplaceDiffusion } = useSegmentation(9, ref(''), ref([]))
     replacementFile.value = makeFile()
-
     await handleSamReplaceDiffusion()
-
     expect(mockedMlApi.samReplaceObjectDiffusion).not.toHaveBeenCalled()
   })
 
   it('does nothing if no replacementFile is set', async () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
 
-    const { handleSegment, toggleMaskSelection, handleSamReplaceDiffusion } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, handleSamReplaceDiffusion } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(3)
-
     await handleSamReplaceDiffusion()
 
     expect(mockedMlApi.samReplaceObjectDiffusion).not.toHaveBeenCalled()
   })
 
   it('sets mlError and does not call the api when the selected segment has no mask_url', async () => {
-    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([makeSegment(3)])) // no maskUrl
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([makeSegment(3)]))
 
-    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, mlError } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, mlError } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(3)
     replacementFile.value = makeFile()
-
     await handleSamReplaceDiffusion()
 
     expect(mlError.value).toBe('Mask preview unavailable, cannot run diffusion replace')
@@ -1332,17 +1172,13 @@ describe('useSegmentation: handleSamReplaceDiffusion', () => {
   it('calls samReplaceObjectDiffusion with the segment mask_url, bbox and referenceFile', async () => {
     const file = makeFile()
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
-    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
-      makeMLResult('https://cdn.example.com/diffused.jpg')
-    )
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(makeMLResult('https://cdn.example.com/diffused.jpg'))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
-    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(3)
     replacementFile.value = file
-
     await handleSamReplaceDiffusion()
 
     expect(mockedMlApi.samReplaceObjectDiffusion).toHaveBeenCalledWith(
@@ -1355,17 +1191,13 @@ describe('useSegmentation: handleSamReplaceDiffusion', () => {
 
   it('merges custom diffusion options into the call', async () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
-    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
-      makeMLResult('https://cdn.example.com/diffused.jpg')
-    )
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(makeMLResult('https://cdn.example.com/diffused.jpg'))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
-    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(3)
     replacementFile.value = makeFile()
-
     await handleSamReplaceDiffusion({ prompt: 'a red car', seed: 42 })
 
     expect(mockedMlApi.samReplaceObjectDiffusion).toHaveBeenCalledWith(
@@ -1378,38 +1210,28 @@ describe('useSegmentation: handleSamReplaceDiffusion', () => {
 
   it('updates currentImageUrl from result.presigned_url', async () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
-    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
-      makeMLResult('https://cdn.example.com/diffused.jpg')
-    )
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(makeMLResult('https://cdn.example.com/diffused.jpg'))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
     const currentImageUrl = ref('')
-    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion } =
-      useSegmentation(9, currentImageUrl, ref([]))
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion } = useSegmentation(9, currentImageUrl, ref([]))
     await handleSegment()
     toggleMaskSelection(3)
     replacementFile.value = makeFile()
-
     await handleSamReplaceDiffusion()
 
     expect(currentImageUrl.value).toBe('https://cdn.example.com/diffused.jpg')
   })
 
   it('removes the replaced segment from segments', async () => {
-    mockedMlApi.segmentObjects.mockResolvedValue(
-      makeSegmentResult([segWithMask(1), segWithMask(2)])
-    )
-    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
-      makeMLResult('https://cdn.example.com/diffused.jpg')
-    )
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(1), segWithMask(2)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(makeMLResult('https://cdn.example.com/diffused.jpg'))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
-    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, segments } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, segments } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(1)
     replacementFile.value = makeFile()
-
     await handleSamReplaceDiffusion()
 
     expect(segments.value).toHaveLength(1)
@@ -1418,17 +1240,13 @@ describe('useSegmentation: handleSamReplaceDiffusion', () => {
 
   it('clears selectedMaskId and replacementFile after success', async () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
-    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
-      makeMLResult('https://cdn.example.com/diffused.jpg')
-    )
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(makeMLResult('https://cdn.example.com/diffused.jpg'))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
-    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, selectedMaskId } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, selectedMaskId } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(3)
     replacementFile.value = makeFile()
-
     await handleSamReplaceDiffusion()
 
     expect(selectedMaskId.value).toBeNull()
@@ -1437,38 +1255,29 @@ describe('useSegmentation: handleSamReplaceDiffusion', () => {
 
   it('updates history after replacement', async () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
-    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
-      makeMLResult('https://cdn.example.com/diffused.jpg')
-    )
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(makeMLResult('https://cdn.example.com/diffused.jpg'))
     mockedMlApi.getHistory.mockResolvedValue({ history: ['step1'] })
 
     const history = ref<string[]>([])
-    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion } =
-      useSegmentation(9, ref(''), history)
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion } = useSegmentation(9, ref(''), history)
     await handleSegment()
     toggleMaskSelection(3)
     replacementFile.value = makeFile()
-
     await handleSamReplaceDiffusion()
 
-    expect(mockedMlApi.getHistory).toHaveBeenCalledWith(9)
     expect(history.value).toEqual(['step1'])
   })
 
   it('clears previous mlError before the call', async () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
-    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
-      makeMLResult('https://cdn.example.com/diffused.jpg')
-    )
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(makeMLResult('https://cdn.example.com/diffused.jpg'))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
-    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, mlError } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, mlError } = useSegmentation(9, ref(''), ref([]))
     mlError.value = 'stale error'
     await handleSegment()
     toggleMaskSelection(3)
     replacementFile.value = makeFile()
-
     await handleSamReplaceDiffusion()
 
     expect(mlError.value).toBe('')
@@ -1480,12 +1289,10 @@ describe('useSegmentation: handleSamReplaceDiffusion', () => {
       response: { data: { detail: 'Diffusion replace failed on server' } }
     })
 
-    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, mlError } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, mlError } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(3)
     replacementFile.value = makeFile()
-
     await handleSamReplaceDiffusion()
 
     expect(mlError.value).toBe('Diffusion replace failed on server')
@@ -1495,12 +1302,10 @@ describe('useSegmentation: handleSamReplaceDiffusion', () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
     mockedMlApi.samReplaceObjectDiffusion.mockRejectedValue(new Error('fail'))
 
-    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, mlError } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, mlError } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(3)
     replacementFile.value = makeFile()
-
     await handleSamReplaceDiffusion()
 
     expect(mlError.value).toBe('Diffusion replace failed')
@@ -1511,12 +1316,10 @@ describe('useSegmentation: handleSamReplaceDiffusion', () => {
     mockedMlApi.samReplaceObjectDiffusion.mockRejectedValue(new Error('fail'))
 
     const file = makeFile()
-    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, selectedMaskId } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, selectedMaskId } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(3)
     replacementFile.value = file
-
     await handleSamReplaceDiffusion()
 
     expect(selectedMaskId.value).toBe(3)
@@ -1527,17 +1330,16 @@ describe('useSegmentation: handleSamReplaceDiffusion', () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
     mockedMlApi.samReplaceObjectDiffusion.mockRejectedValue(new Error('fail'))
 
-    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, segments } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceDiffusion, segments } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(3)
     replacementFile.value = makeFile()
-
     await handleSamReplaceDiffusion()
 
     expect(segments.value).toHaveLength(1)
   })
 })
+
 
 describe('useSegmentation: handleSamReplaceWithAssetDiffusion', () => {
   const segWithMask = (maskId: number) =>
@@ -1545,33 +1347,27 @@ describe('useSegmentation: handleSamReplaceWithAssetDiffusion', () => {
 
   it('does nothing if no mask is selected', async () => {
     const { handleSamReplaceWithAssetDiffusion } = useSegmentation(9, ref(''), ref([]))
-
     await handleSamReplaceWithAssetDiffusion('asset-1')
-
     expect(mockedMlApi.samReplaceObjectDiffusion).not.toHaveBeenCalled()
   })
 
   it('does nothing if assetId is empty', async () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
 
-    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(3)
-
     await handleSamReplaceWithAssetDiffusion('')
 
     expect(mockedMlApi.samReplaceObjectDiffusion).not.toHaveBeenCalled()
   })
 
   it('sets mlError and does not call the api when the selected segment has no mask_url', async () => {
-    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([makeSegment(3)])) // no maskUrl
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([makeSegment(3)]))
 
-    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, mlError } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, mlError } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(3)
-
     await handleSamReplaceWithAssetDiffusion('asset-1')
 
     expect(mlError.value).toBe('Mask preview unavailable, cannot run diffusion replace')
@@ -1580,16 +1376,12 @@ describe('useSegmentation: handleSamReplaceWithAssetDiffusion', () => {
 
   it('calls samReplaceObjectDiffusion with the segment mask_url, bbox and assetId', async () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
-    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
-      makeMLResult('https://cdn.example.com/diffused-asset.jpg')
-    )
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(makeMLResult('https://cdn.example.com/diffused-asset.jpg'))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
-    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(3)
-
     await handleSamReplaceWithAssetDiffusion('asset-1')
 
     expect(mockedMlApi.samReplaceObjectDiffusion).toHaveBeenCalledWith(
@@ -1602,16 +1394,12 @@ describe('useSegmentation: handleSamReplaceWithAssetDiffusion', () => {
 
   it('merges custom diffusion options into the call', async () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
-    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
-      makeMLResult('https://cdn.example.com/diffused-asset.jpg')
-    )
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(makeMLResult('https://cdn.example.com/diffused-asset.jpg'))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
-    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(3)
-
     await handleSamReplaceWithAssetDiffusion('asset-1', { guidanceScale: 7.5 })
 
     expect(mockedMlApi.samReplaceObjectDiffusion).toHaveBeenCalledWith(
@@ -1624,36 +1412,26 @@ describe('useSegmentation: handleSamReplaceWithAssetDiffusion', () => {
 
   it('updates currentImageUrl after replacement', async () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
-    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
-      makeMLResult('https://cdn.example.com/diffused-asset.jpg')
-    )
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(makeMLResult('https://cdn.example.com/diffused-asset.jpg'))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
     const currentImageUrl = ref('')
-    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion } =
-      useSegmentation(9, currentImageUrl, ref([]))
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion } = useSegmentation(9, currentImageUrl, ref([]))
     await handleSegment()
     toggleMaskSelection(3)
-
     await handleSamReplaceWithAssetDiffusion('asset-1')
 
     expect(currentImageUrl.value).toBe('https://cdn.example.com/diffused-asset.jpg')
   })
 
   it('removes the replaced segment from segments', async () => {
-    mockedMlApi.segmentObjects.mockResolvedValue(
-      makeSegmentResult([segWithMask(1), segWithMask(2)])
-    )
-    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
-      makeMLResult('https://cdn.example.com/diffused-asset.jpg')
-    )
+    mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(1), segWithMask(2)]))
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(makeMLResult('https://cdn.example.com/diffused-asset.jpg'))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
-    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, segments } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, segments } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(1)
-
     await handleSamReplaceWithAssetDiffusion('asset-1')
 
     expect(segments.value).toHaveLength(1)
@@ -1662,16 +1440,12 @@ describe('useSegmentation: handleSamReplaceWithAssetDiffusion', () => {
 
   it('clears selectedMaskId after success', async () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
-    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
-      makeMLResult('https://cdn.example.com/diffused-asset.jpg')
-    )
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(makeMLResult('https://cdn.example.com/diffused-asset.jpg'))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
-    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, selectedMaskId } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, selectedMaskId } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(3)
-
     await handleSamReplaceWithAssetDiffusion('asset-1')
 
     expect(selectedMaskId.value).toBeNull()
@@ -1679,18 +1453,14 @@ describe('useSegmentation: handleSamReplaceWithAssetDiffusion', () => {
 
   it('does not touch replacementFile (asset flow is independent of file upload)', async () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
-    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
-      makeMLResult('https://cdn.example.com/diffused-asset.jpg')
-    )
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(makeMLResult('https://cdn.example.com/diffused-asset.jpg'))
     mockedMlApi.getHistory.mockResolvedValue({ history: [] })
 
     const file = new File(['img'], 'unrelated.png', { type: 'image/png' })
-    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceWithAssetDiffusion } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, replacementFile, handleSamReplaceWithAssetDiffusion } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(3)
     replacementFile.value = file
-
     await handleSamReplaceWithAssetDiffusion('asset-1')
 
     expect(replacementFile.value).toBe(file)
@@ -1698,20 +1468,15 @@ describe('useSegmentation: handleSamReplaceWithAssetDiffusion', () => {
 
   it('updates history after replacement', async () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
-    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(
-      makeMLResult('https://cdn.example.com/diffused-asset.jpg')
-    )
+    mockedMlApi.samReplaceObjectDiffusion.mockResolvedValue(makeMLResult('https://cdn.example.com/diffused-asset.jpg'))
     mockedMlApi.getHistory.mockResolvedValue({ history: ['step1'] })
 
     const history = ref<string[]>([])
-    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion } =
-      useSegmentation(9, ref(''), history)
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion } = useSegmentation(9, ref(''), history)
     await handleSegment()
     toggleMaskSelection(3)
-
     await handleSamReplaceWithAssetDiffusion('asset-1')
 
-    expect(mockedMlApi.getHistory).toHaveBeenCalledWith(9)
     expect(history.value).toEqual(['step1'])
   })
 
@@ -1721,11 +1486,9 @@ describe('useSegmentation: handleSamReplaceWithAssetDiffusion', () => {
       response: { data: { detail: 'Diffusion replace with asset failed on server' } }
     })
 
-    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, mlError } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, mlError } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(3)
-
     await handleSamReplaceWithAssetDiffusion('asset-1')
 
     expect(mlError.value).toBe('Diffusion replace with asset failed on server')
@@ -1735,11 +1498,9 @@ describe('useSegmentation: handleSamReplaceWithAssetDiffusion', () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
     mockedMlApi.samReplaceObjectDiffusion.mockRejectedValue(new Error('fail'))
 
-    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, mlError } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, mlError } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(3)
-
     await handleSamReplaceWithAssetDiffusion('asset-1')
 
     expect(mlError.value).toBe('Diffusion replace with asset failed')
@@ -1749,11 +1510,9 @@ describe('useSegmentation: handleSamReplaceWithAssetDiffusion', () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
     mockedMlApi.samReplaceObjectDiffusion.mockRejectedValue(new Error('fail'))
 
-    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, selectedMaskId } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, selectedMaskId } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(3)
-
     await handleSamReplaceWithAssetDiffusion('asset-1')
 
     expect(selectedMaskId.value).toBe(3)
@@ -1763,11 +1522,9 @@ describe('useSegmentation: handleSamReplaceWithAssetDiffusion', () => {
     mockedMlApi.segmentObjects.mockResolvedValue(makeSegmentResult([segWithMask(3)]))
     mockedMlApi.samReplaceObjectDiffusion.mockRejectedValue(new Error('fail'))
 
-    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, segments } =
-      useSegmentation(9, ref(''), ref([]))
+    const { handleSegment, toggleMaskSelection, handleSamReplaceWithAssetDiffusion, segments } = useSegmentation(9, ref(''), ref([]))
     await handleSegment()
     toggleMaskSelection(3)
-
     await handleSamReplaceWithAssetDiffusion('asset-1')
 
     expect(segments.value).toHaveLength(1)

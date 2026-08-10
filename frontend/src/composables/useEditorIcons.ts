@@ -69,7 +69,7 @@ export const ResetIcon = icon([
 ], 14)
 
 export const tools = [
-  { id: 'select',  label: 'Select',      shortcut: 'V', icon: SelectIcon  },
+  { id: 'select',  label: 'Draw',        shortcut: 'V', icon: SelectIcon  },
   { id: 'detect',  label: 'Detect',      shortcut: 'D', icon: DetectIcon  },
   { id: 'inpaint', label: 'Inpaint',     shortcut: 'E', icon: InpaintIcon },
   { id: 'swap',    label: 'Swap object', shortcut: 'R', icon: SwapIcon    },
