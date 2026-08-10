@@ -164,73 +164,45 @@
       </div>
     </div>
 
-  <div class="sidebar-section" v-if="mode === 'sam'">
+  <div class="sidebar-section" v-if="mode === 'sam' && activeTool === 'select'">
     <div class="section-header">Prompt segmentation</div>
-
-    <div class="tool-group mode-switch" style="margin-bottom: 8px;">
-      <button
-        :class="['tool-btn', { active: promptMode === 'points' }]"
-        @click="$emit('update:promptMode', promptMode === 'points' ? null : 'points')"
-      >Points</button>
-      <button
-        :class="['tool-btn', { active: promptMode === 'box' }]"
-        @click="$emit('update:promptMode', promptMode === 'box' ? null : 'box')"
-      >Box</button>
-      <button
-        :class="['tool-btn', { active: promptMode === 'polygon' }]"
-        @click="$emit('update:promptMode', promptMode === 'polygon' ? null : 'polygon')"
-      >Polygon</button>
+    <div class="selection-hint" style="margin-bottom: 0.5rem;">
+      hold &amp; drag on the image — bbox · click — polygon point
     </div>
 
-    <div v-if="promptMode === 'points'" class="toggle-row">
-        <span class="toggle-label">Point type</span>
+    <template v-if="promptBbox">
+      <div class="selection-hint">Bbox обрано</div>
+      <div class="action-stack">
         <button
-          :class="['toggle-btn', { on: promptLabel === 1 }]"
-          @click="$emit('update:promptLabel', 1)"
-        >Foreground</button>
+          class="action-btn ghost"
+          @click="$emit('clear-bbox')"
+        >Очистити bbox</button>
+
         <button
-          :class="['toggle-btn', { on: promptLabel === 0 }]"
-          @click="$emit('update:promptLabel', 0)"
-        >Background</button>
+          class="action-btn accent"
+          :disabled="mlLoading"
+          @click="$emit('run-prompt-segment')"
+        >{{ mlLoading ? 'Processing…' : 'Segment by bbox' }}</button>
       </div>
+    </template>
 
-      <div v-if="promptMode === 'points' && promptPoints.length" class="selection-hint">
-        {{ promptPoints.length }} точок обрано
+    <template v-if="polygonPoints.length">
+      <div class="selection-hint">
+        {{ polygonPoints.length }} точок полігону{{ canRunPolygon ? '' : ' (потрібно мінімум 3)' }}
       </div>
-      <div v-if="promptMode === 'box' && promptBbox" class="selection-hint">
-        Bbox обрано
+      <div class="action-stack">
+        <button
+          class="action-btn ghost"
+          @click="$emit('clear-polygon')"
+        >Очистити полігон</button>
+
+        <button
+          class="action-btn accent"
+          :disabled="mlLoading || !canRunPolygon"
+          @click="$emit('run-polygon-segment')"
+        >{{ mlLoading ? 'Processing…' : 'Run polygon' }}</button>
       </div>
-      <div v-if="promptMode === 'polygon' && promptPolygonPoints.length" class="selection-hint">
-        {{ promptPolygonPoints.length }} точок полігону{{ canRunPolygon ? '' : ' (потрібно мінімум 3)' }}
-      </div>
-
-    <div class="action-stack" v-if="promptMode === 'points' || promptMode === 'box'">
-      <button
-        class="action-btn ghost"
-        :disabled="promptMode === null || (!promptPoints.length && !promptBbox)"
-        @click="$emit('clear-prompt')"
-      >Очистити prompt</button>
-
-      <button
-        class="action-btn accent"
-        :disabled="mlLoading || (!promptPoints.length && !promptBbox)"
-        @click="$emit('run-prompt-segment')"
-      >{{ mlLoading ? 'Processing…' : 'Segment by prompt' }}</button>
-    </div>
-
-    <div class="action-stack" v-if="promptMode === 'polygon'">
-      <button
-        class="action-btn ghost"
-        :disabled="!promptPolygonPoints.length"
-        @click="$emit('clear-polygon')"
-      >Очистити полігон</button>
-
-      <button
-        class="action-btn accent"
-        :disabled="mlLoading || !canRunPolygon"
-        @click="$emit('run-polygon-segment')"
-      >{{ mlLoading ? 'Processing…' : 'Run polygon' }}</button>
-    </div>
+    </template>
   </div>
     <div class="sidebar-section">
       <AssetLibrary
@@ -291,11 +263,12 @@
 </template>
 
 <script setup lang="ts">
-import type { RegionItem, EditingMode, Asset, Bbox, PromptMode, PolygonPoint } from '@/types/Index'
+import type { RegionItem, EditingMode, Asset, Bbox, PolygonPoint } from '@/types/Index'
 import AssetLibrary from '@/components/AssetsLibrary.vue'
 
 const props = defineProps<{
   mode: EditingMode
+  activeTool: string
   regions: RegionItem[]
   selectedIds: number[]
   useEdgeBlending: boolean
@@ -314,11 +287,8 @@ const props = defineProps<{
   assetsError: string
   assetsHasMore: boolean
   deletingAssetId: string | null
-  promptMode: PromptMode
-  promptLabel: 0 | 1
-  promptPoints: { x: number; y: number; label: 0 | 1 }[]
   promptBbox: Bbox | null
-  promptPolygonPoints: PolygonPoint[]
+  polygonPoints: PolygonPoint[]
   canRunPolygon: boolean
 }>()
 
@@ -330,9 +300,7 @@ defineEmits<{
   'sam-remove': []
   'sam-replace': []
   'sam-replace-asset': []
-  'update:promptMode': [value: PromptMode]
-  'update:promptLabel': [value: 0 | 1]
-  'clear-prompt': []
+  'clear-bbox': []
   'run-prompt-segment': []
   'run-polygon-segment': []
   'clear-polygon': []

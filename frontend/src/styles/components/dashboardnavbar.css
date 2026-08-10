@@ -81,3 +81,36 @@
 .nav-icon-btn.logout:hover {
   color: var(--danger);
 }
+
+@media (max-width: 640px) {
+  .navbar {
+    padding: 0 0.75rem;
+    height: 48px;
+  }
+
+  .navbar-logo {
+    font-size: 0.85rem;
+  }
+
+  .version-badge {
+    display: none;
+  }
+
+  .navbar-user {
+    display: none;
+  }
+
+  .nav-divider {
+    margin: 0 0.15rem;
+  }
+}
+
+@media (max-width: 400px) {
+  .navbar-left {
+    gap: 0.4rem;
+  }
+
+  .navbar-right {
+    gap: 0.15rem;
+  }
+}

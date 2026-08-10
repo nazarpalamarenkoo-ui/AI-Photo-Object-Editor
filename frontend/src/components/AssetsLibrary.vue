@@ -21,14 +21,14 @@
     <div v-else class="lib-grid">
       <div
         v-for="asset in assets"
-        :key="asset.asset_id"
-        :class="['lib-card', { active: asset.asset_id === selectedAssetId, busy: deletingId === asset.asset_id }]"
+        :key="asset.public_id"
+        :class="['lib-card', { active: asset.public_id === selectedAssetId, busy: deletingId === asset.public_id }]"
         @click="$emit('select', asset)"
       >
         <div class="lib-thumb">
           <img
-            v-if="thumbUrls[asset.asset_id]"
-            :src="thumbUrls[asset.asset_id]"
+            v-if="thumbUrls[asset.public_id]"
+            :src="thumbUrls[asset.public_id]"
             :alt="asset.label ?? 'Extracted object'"
           />
           <div v-else class="lib-thumb-placeholder">
@@ -37,34 +37,34 @@
               <path d="M9 9h6v6H9z"/>
             </svg>
           </div>
-          <span v-if="asset.asset_id === selectedAssetId" class="lib-check">✓</span>
+          <span v-if="asset.public_id === selectedAssetId" class="lib-check">✓</span>
         </div>
 
         <div class="lib-meta">
-          <template v-if="renamingDraftId === asset.asset_id">
+          <template v-if="renamingDraftId === asset.public_id">
             <input
               ref="renameInputRef"
               class="lib-rename-input"
               v-model="renameDraft"
               @click.stop
-              @keydown.enter="commitRename(asset.asset_id)"
+              @keydown.enter="commitRename(asset.public_id)"
               @keydown.esc="renamingDraftId = null"
-              @blur="commitRename(asset.asset_id)"
+              @blur="commitRename(asset.public_id)"
             />
           </template>
           <template v-else>
             <span class="lib-label" :title="asset.label ?? undefined" @click.stop="startRename(asset)">
-              {{ asset.label || `Object #${asset.asset_id.slice(0, 6)}` }}
+              {{ asset.label || `Object #${asset.public_id.slice(0, 6)}` }}
             </span>
           </template>
-          <span class="lib-sub">{{ formatSize(asset.object_size) }}</span>
+          <span class="lib-sub">{{ formatSize(asset.width, asset.height) }}</span>
         </div>
 
         <button
           class="lib-delete"
           title="Delete asset"
-          :disabled="deletingId === asset.asset_id"
-          @click.stop="$emit('delete', asset.asset_id)"
+          :disabled="deletingId === asset.public_id"
+          @click.stop="$emit('delete', asset.public_id)"
         >
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
             <polyline points="3 6 5 6 21 6"/>
@@ -112,7 +112,7 @@ const renameDraft = ref('')
 const renameInputRef = ref<HTMLInputElement[] | HTMLInputElement | null>(null)
 
 async function startRename(asset: Asset) {
-  renamingDraftId.value = asset.asset_id
+  renamingDraftId.value = asset.public_id
   renameDraft.value = asset.label ?? ''
   await nextTick()
   const el = Array.isArray(renameInputRef.value) ? renameInputRef.value[0] : renameInputRef.value
@@ -126,11 +126,8 @@ function commitRename(assetId: string) {
   if (label) emit('rename', assetId, label)
 }
 
-function formatSize(size: unknown): string {
-  if (Array.isArray(size) && size.length === 2) {
-    return `${Math.round(size[0])}×${Math.round(size[1])}`
-  }
-  return ''
+function formatSize(width: number, height: number): string {
+  return `${Math.round(width)}×${Math.round(height)}`
 }
 </script>
 

@@ -1,4 +1,3 @@
-
 <template>
   <aside class="toolbar">
     <div class="tool-group">
@@ -6,7 +5,7 @@
         v-for="tool in tools"
         :key="tool.id"
         :class="['tool-btn', { active: activeTool === tool.id }]"
-        @click="$emit('update:activeTool', tool.id)"
+        @click="$emit('update:activeTool', activeTool === tool.id ? '' : tool.id)"
         :title="`${tool.label} [${tool.shortcut}]`"
       >
         <component :is="tool.icon" />
@@ -37,7 +36,7 @@
 
     <div v-if="mode === 'sam'" class="tool-group">
       <button
-        :class="['tool-btn', { active: useHybrid }]"
+        :class="['tool-btn', 'hybrid-btn', { active: useHybrid }]"
         :disabled="busy"
         title="Hybrid segmentation: YOLO detects common objects first, SAM2 batch-segments them in one encoder pass, sparse SAM2 auto-pass catches the rest — faster than full auto segmentation"
         @click="$emit('update:useHybrid', !useHybrid)"
@@ -113,8 +112,8 @@
 
       <button
         class="tool-btn zoom-label"
-        title="Reset zoom"
-        @click="$emit('zoom', 1)"
+        title="Fit to screen"
+        @click="$emit('zoom', fitZoom)"
       >
         {{ Math.round(zoom * 100) }}%
       </button>
@@ -254,9 +253,10 @@ import {
 import type { LdmConfig, EditingMode, ReplaceEngine } from '@/types/Index'
 import { PRESETS } from '@/api/ml'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   activeTool: string
   zoom: number
+  fitZoom?: number
   canUndo: boolean
   mlLoading: boolean
   modelConfig: LdmConfig
@@ -265,7 +265,9 @@ const props = defineProps<{
   useHybrid: boolean
   replaceEngine: ReplaceEngine
   diffusionPrompt: string
-}>()
+}>(), {
+  fitZoom: 1,
+})
 
 const emit = defineEmits<{
   'update:activeTool': [value: string]

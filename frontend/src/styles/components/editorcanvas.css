@@ -119,9 +119,6 @@
   min-width: 2.5ch;
 }
 .prompt-cursor { cursor: crosshair; }
-.prompt-point { stroke: #fff; stroke-width: 2; }
-.prompt-point.fg { fill: #22c55e; }
-.prompt-point.bg { fill: #ef4444; }
 .prompt-bbox {
   fill: rgba(179, 240, 0, 0.15);
   stroke: #b3f000;
@@ -176,4 +173,45 @@
   stroke: #ffffff;
   stroke-width: 2;
   stroke-dasharray: none;
+}
+
+@media (max-width: 860px) {
+  .image-panel {
+    min-height: 55vh;
+    min-height: 55dvh;
+  }
+
+  .canvas-wrap {
+    padding: 1rem;
+  }
+
+  .canvas-toolbar {
+    flex-wrap: wrap;
+    row-gap: 0.5rem;
+  }
+
+  .conf-control {
+    margin-left: 0;
+  }
+
+  .prompt-hint {
+    margin-left: 0;
+    width: 100%;
+    order: 10;
+  }
+}
+
+@media (max-width: 480px) {
+  .canvas-wrap {
+    padding: 0.6rem;
+  }
+
+  .canvas-action-btn {
+    padding: 0.4rem 0.7rem;
+    font-size: 0.72rem;
+  }
+
+  .conf-slider {
+    width: 64px;
+  }
 }

@@ -1,7 +1,7 @@
 <template>
   <div class="image-panel">
-    <div class="canvas-wrap">
-      <div class="canvas-inner" :style="{ transform: `scale(${zoom})`, transformOrigin: 'top left' }">
+    <div class="canvas-wrap" ref="canvasWrapRef">
+      <div class="canvas-inner" :style="{ transform: `scale(${zoom})`, transformOrigin: 'center center' }">
         <img
           :src="imageUrl"
           :alt="image?.filename"
@@ -12,10 +12,9 @@
         <svg
           v-if="imageLoaded"
           class="bbox-overlay"
-          :class="{ 'prompt-cursor': promptMode !== null }"
+          :class="{ 'prompt-cursor': isDrawTool }"
           :viewBox="`0 0 ${naturalSize.w} ${naturalSize.h}`"
           @click="onSvgClick"
-          @contextmenu="onSvgRightClick"
           @mousedown="onSvgMouseDown"
           @mousemove="onSvgMouseMove"
           @mouseup="onSvgMouseUp"
@@ -53,7 +52,7 @@
               v-else-if="r.points && r.points.length"
               :points="r.points.map(p => `${p.x},${p.y}`).join(' ')"
               :class="['bbox-rect', { selected: selectedIds.includes(r.id) }]"
-              @click.stop="promptMode === null && $emit('toggle-selection', r.id)"
+              @click.stop="!isDrawTool && $emit('toggle-selection', r.id)"
             />
             <rect
               v-else
@@ -61,7 +60,7 @@
               :width="r.bbox.x2 - r.bbox.x1"
               :height="r.bbox.y2 - r.bbox.y1"
               :class="['bbox-rect', { selected: selectedIds.includes(r.id) }]"
-              @click.stop="promptMode === null && $emit('toggle-selection', r.id)"
+              @click.stop="!isDrawTool && $emit('toggle-selection', r.id)"
             />
             <rect
               v-if="r.mask_url"
@@ -81,37 +80,29 @@
             class="bbox-label"
           >{{ r.label }}{{ r.confidence != null ? ` · ${(r.confidence * 100).toFixed(0)}%` : '' }}</text>
 
-          <g v-if="promptMode === 'points'">
-            <circle
-              v-for="(p, idx) in promptPoints"
-              :key="`pt-${idx}`"
-              :cx="p.x" :cy="p.y" r="6"
-              :class="['prompt-point', p.label === 1 ? 'fg' : 'bg']"
-            />
-          </g>
-          <g v-if="promptMode === 'polygon'">
+          <g v-if="isDrawTool && polygonPoints.length">
             <polyline
-              v-if="promptPolygonPoints.length > 1"
-              :points="promptPolygonPoints.map(p => `${p.x},${p.y}`).join(' ')"
+              v-if="polygonPoints.length > 1"
+              :points="polygonPoints.map(p => `${p.x},${p.y}`).join(' ')"
               class="prompt-polygon-path"
             />
             <line
-              v-if="promptPolygonPoints.length > 2"
-              :x1="promptPolygonPoints[promptPolygonPoints.length - 1].x"
-              :y1="promptPolygonPoints[promptPolygonPoints.length - 1].y"
-              :x2="promptPolygonPoints[0].x"
-              :y2="promptPolygonPoints[0].y"
+              v-if="polygonPoints.length > 2"
+              :x1="polygonPoints[polygonPoints.length - 1].x"
+              :y1="polygonPoints[polygonPoints.length - 1].y"
+              :x2="polygonPoints[0].x"
+              :y2="polygonPoints[0].y"
               class="prompt-polygon-close"
             />
             <circle
-              v-for="(p, idx) in promptPolygonPoints"
+              v-for="(p, idx) in polygonPoints"
               :key="`poly-${idx}`"
               :cx="p.x" :cy="p.y" r="5"
               class="prompt-polygon-point"
             />
           </g>
           <rect
-            v-if="promptMode === 'box' && (promptBbox || drawingBbox)"
+            v-if="isDrawTool && (promptBbox || drawingBbox)"
             :x="(promptBbox ?? drawingBbox)!.x1"
             :y="(promptBbox ?? drawingBbox)!.y1"
             :width="(promptBbox ?? drawingBbox)!.x2 - (promptBbox ?? drawingBbox)!.x1"
@@ -150,19 +141,16 @@
         <span class="conf-value">{{ confThreshold }}</span>
       </div>
 
-      <div class="prompt-hint" v-if="promptMode === 'points'">
-        left click — foreground · right click / Alt+click — background
-      </div>
-      <div class="prompt-hint" v-else-if="promptMode === 'box'">
-        left click and drag to draw a box
+      <div class="prompt-hint" v-if="isDrawTool">
+        hold &amp; drag — draw bbox mask · click — add polygon point
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
-import type { Image, RegionItem, EditingMode, Bbox, PromptPoint, PromptMode, PolygonPoint } from '@/types/Index'
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import type { Image, RegionItem, EditingMode, Bbox, PolygonPoint } from '@/types/Index'
 
 const props = withDefaults(defineProps<{
   image: Image | null
@@ -175,16 +163,13 @@ const props = withDefaults(defineProps<{
   running: boolean
   mode: EditingMode
   confThreshold: number
-  promptMode?: PromptMode
-  promptPoints?: PromptPoint[]
-  promptPolygonPoints?: PolygonPoint[]
+  activeTool: string
+  polygonPoints?: PolygonPoint[]
   promptBbox?: Bbox | null
 }>(), {
   regions: () => [],
   selectedIds: () => [],
-  promptMode: null,
-  promptPoints: () => [],
-  promptPolygonPoints: () => [],
+  polygonPoints: () => [],
   promptBbox: null,
 })
 
@@ -195,9 +180,11 @@ const emit = defineEmits<{
   clear: []
   'add-polygon-point': [point: { x: number; y: number }]
   'update:confThreshold': [value: number]
-  'add-point': [point: { x: number; y: number; label: 0 | 1 }]
   'set-bbox': [bbox: Bbox]
+  'fit-zoom': [zoom: number]
 }>()
+
+const isDrawTool = computed(() => props.mode === 'sam' && props.activeTool === 'select')
 
 const runLabel = computed(() => (props.mode === 'yolo' ? 'Run detection' : 'Run segmentation'))
 const runningLabel = computed(() => (props.mode === 'yolo' ? 'Detecting…' : 'Segmenting…'))
@@ -212,6 +199,52 @@ function regionColor(id: number): string {
 }
 
 const imageRef = ref<HTMLImageElement | null>(null)
+const canvasWrapRef = ref<HTMLDivElement | null>(null)
+
+const CANVAS_PADDING = 24 
+const MIN_ZOOM = 0.25
+const MAX_ZOOM = 4
+
+function computeFitZoom(): number | null {
+  const wrap = canvasWrapRef.value
+  if (!wrap || !props.naturalSize.w || !props.naturalSize.h) return null
+
+  const availableW = wrap.clientWidth - CANVAS_PADDING * 2
+  const availableH = wrap.clientHeight - CANVAS_PADDING * 2
+  if (availableW <= 0 || availableH <= 0) return null
+
+  const scale = Math.min(availableW / props.naturalSize.w, availableH / props.naturalSize.h)
+  return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, scale))
+}
+
+let resizeObserver: ResizeObserver | null = null
+
+function refitIfIdle() {
+  if (props.regions.length > 0) return
+  const fit = computeFitZoom()
+  if (fit !== null) emit('fit-zoom', fit)
+}
+
+function scheduleRefit() {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(refitIfIdle)
+  })
+}
+
+onMounted(() => {
+  window.addEventListener('resize', refitIfIdle)
+
+  if (typeof ResizeObserver === 'undefined' || !canvasWrapRef.value) return
+  resizeObserver = new ResizeObserver(() => {
+    refitIfIdle()
+  })
+  resizeObserver.observe(canvasWrapRef.value)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', refitIfIdle)
+  resizeObserver?.disconnect()
+})
 
 const maskCanvasCache = new Map<number, ImageData>()
 
@@ -284,6 +317,11 @@ function onLoad() {
       w: imageRef.value.naturalWidth,
       h: imageRef.value.naturalHeight,
     })
+    nextTick(() => {
+      const fit = computeFitZoom()
+      if (fit !== null) emit('fit-zoom', fit)
+      scheduleRefit()
+    })
   }
 }
 
@@ -299,20 +337,7 @@ function svgPoint(e: MouseEvent): { x: number; y: number } | null {
 }
 
 function onSvgClick(e: MouseEvent) {
-  if (props.promptMode === 'polygon') {
-    const p = svgPoint(e)
-    if (!p) return
-    emit('add-polygon-point', { x: p.x, y: p.y })
-    return
-  }
-  if (props.promptMode === 'points') {
-    const p = svgPoint(e)
-    if (!p) return
-    const label = e.altKey ? 0 : 1
-    emit('add-point', { x: p.x, y: p.y, label })
-    return
-  }
-  if (props.promptMode !== null) return
+  if (isDrawTool.value) return // handled by mousedown/mousemove/mouseup below
 
   const p = svgPoint(e)
   if (!p) return
@@ -320,48 +345,61 @@ function onSvgClick(e: MouseEvent) {
   if (id !== null) emit('toggle-selection', id)
 }
 
-function onSvgRightClick(e: MouseEvent) {
-  if (props.promptMode !== 'points') return
-  e.preventDefault()
-  const p = svgPoint(e)
-  if (!p) return
-  emit('add-point', { x: p.x, y: p.y, label: 0 })
-}
+const DRAG_THRESHOLD = 4 
 
 const drawingBbox = ref<Bbox | null>(null)
 const dragStart = ref<{ x: number; y: number } | null>(null)
+const dragMoved = ref(false)
 
 function onSvgMouseDown(e: MouseEvent) {
-  if (props.promptMode !== 'box') return
+  if (!isDrawTool.value) return
   const p = svgPoint(e)
   if (!p) return
   dragStart.value = p
+  dragMoved.value = false
   drawingBbox.value = { x1: p.x, y1: p.y, x2: p.x, y2: p.y }
 }
 
 function onSvgMouseMove(e: MouseEvent) {
-  if (props.promptMode !== 'box' || !dragStart.value) return
+  if (!isDrawTool.value || !dragStart.value) return
   const p = svgPoint(e)
   if (!p) return
-  drawingBbox.value = {
-    x1: Math.min(dragStart.value.x, p.x),
-    y1: Math.min(dragStart.value.y, p.y),
-    x2: Math.max(dragStart.value.x, p.x),
-    y2: Math.max(dragStart.value.y, p.y),
+
+  if (!dragMoved.value) {
+    const dist = Math.hypot(p.x - dragStart.value.x, p.y - dragStart.value.y)
+    if (dist > DRAG_THRESHOLD) dragMoved.value = true
+  }
+
+  if (dragMoved.value) {
+    drawingBbox.value = {
+      x1: Math.min(dragStart.value.x, p.x),
+      y1: Math.min(dragStart.value.y, p.y),
+      x2: Math.max(dragStart.value.x, p.x),
+      y2: Math.max(dragStart.value.y, p.y),
+    }
   }
 }
 
 function onSvgMouseUp() {
-  if (props.promptMode !== 'box' || !dragStart.value || !drawingBbox.value) {
+  if (!isDrawTool.value || !dragStart.value) {
     dragStart.value = null
+    drawingBbox.value = null
+    dragMoved.value = false
     return
   }
-  const box = drawingBbox.value
+
+  if (dragMoved.value && drawingBbox.value) {
+    const box = drawingBbox.value
+    if (box.x2 - box.x1 > 3 && box.y2 - box.y1 > 3) {
+      emit('set-bbox', box)
+    }
+  } else {
+    emit('add-polygon-point', { x: dragStart.value.x, y: dragStart.value.y })
+  }
+
   dragStart.value = null
   drawingBbox.value = null
-  if (box.x2 - box.x1 > 3 && box.y2 - box.y1 > 3) {
-    emit('set-bbox', box)
-  }
+  dragMoved.value = false
 }
 </script>
 

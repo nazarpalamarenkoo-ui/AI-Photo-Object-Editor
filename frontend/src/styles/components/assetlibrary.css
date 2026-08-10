@@ -210,3 +210,9 @@
   opacity: 0.6;
   cursor: default;
 }
+
+@media (max-width: 360px) {
+  .lib-grid {
+    grid-template-columns: 1fr;
+  }
+}

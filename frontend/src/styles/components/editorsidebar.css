@@ -307,3 +307,25 @@
   background: var(--border, rgba(255,255,255,0.08));
   margin: 4px 0;
 }
+
+@media (max-width: 860px) {
+  .sidebar {
+    width: 100%;
+    min-width: 0;
+    border-left: none;
+    border-top: 1px solid var(--border);
+    max-height: 55vh;
+    max-height: 55dvh;
+    overflow-y: auto;
+  }
+}
+
+@media (max-width: 480px) {
+  .sidebar-section {
+    padding: 0.85rem;
+  }
+
+  .detection-list {
+    max-height: 160px;
+  }
+}
