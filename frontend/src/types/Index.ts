@@ -35,6 +35,12 @@ export interface Image {
   id: number
   filename: string
   storage_path: string
+  mime_type: string
+  width: number
+  height: number
+  file_size: number
+  cache_key: string | null
+  current_version_id: number | null
   status: string
   uploaded_at: string
   user_id: number
@@ -55,7 +61,7 @@ export interface Bbox {
 
 export interface Detection {
   id: number
-  image_id: number
+  content_id: number
   bbox_id: number
   x1: number
   y1: number
@@ -63,6 +69,11 @@ export interface Detection {
   y2: number
   detected_class: string
   confidence: number
+  is_active: boolean
+  model_name: string
+  model_version: string
+  inference_time_ms: number
+  created_at: string
 }
 
 export type EditingMode = 'yolo' | 'sam'
@@ -194,8 +205,8 @@ export interface PromptPoint {
 
 export interface ExtractResponse {
   asset_id: string
-  extracted_url: string | null
-  presigned_url: string | null
+  storage_path: string
+  thumbnail_path: string | null
   object_size: [number, number]
   area_pixels: number
   cropped_bbox: Bbox
@@ -211,12 +222,17 @@ export interface PasteResponse {
 }
 
 export interface Asset {
-  asset_id: string
-  source_image_id: number
-  object_size: [number, number]
+  public_id: string
+  width: number
+  height: number
   area_pixels: number
   label: string | null
-  s3_url: string | null
+  storage_path: string
+  thumbnail_path: string | null
+  content_type: string
+  file_size: number | null
+  source_image_version_id: number | null
+  source_segmentation_mask_id: number | null
   created_at: string
 }
 
