@@ -1,0 +1,87 @@
+# docker-compose.test.yml
+#
+# Minimal CI/test environment.
+# Does NOT start: MLflow, Grafana, Prometheus, Loki, ML worker, GPU services.
+# Used for: integration tests, DB tests, smoke tests (no GPU).
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up -d
+#   docker compose -f docker-compose.test.yml exec backend pytest tests/integration -m "not gpu"
+#   docker compose -f docker-compose.test.yml down -v
+
+services:
+  # ── Test database ──────────────────────────────
+  postgres-test:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: testpassword
+      POSTGRES_DB: object_detection_test
+    ports:
+      - "5433:5432"   # 5433 to avoid conflict with local postgres
+    volumes:
+      - postgres-test-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser -d object_detection_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ── Test Redis ─────────────────────────────────
+  redis-test:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"   # 6380 to avoid conflict with local redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # ── Migrations (run once, then exit) ──────────
+  migrations:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: base        # Use same base stage as production
+    command: alembic upgrade head
+    environment:
+      DATABASE_URL: postgresql+asyncpg://testuser:testpassword@postgres-test:5432/object_detection_test
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+    restart: "no"
+
+  # ── Backend (for integration test execution) ───
+  backend-test:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: base
+    command: tail -f /dev/null   # Keep alive; tests run via docker exec
+    environment:
+      ENVIRONMENT: test
+      SECRET_KEY: ci-test-secret-key-not-for-production
+      TEST_DATABASE_URL: postgresql+asyncpg://testuser:testpassword@postgres-test:5432/object_detection_test
+      REDIS_URL: redis://redis-test:6379/15
+      S3_BUCKET_NAME: test-bucket
+      S3_ENDPOINT_URL: ""
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      MLFLOW_TRACKING_URI: ""
+    volumes:
+      - ./backend:/app   # Mount source for live test runs
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+      redis-test:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    ports:
+      - "8001:8000"
+
+volumes:
+  postgres-test-data:

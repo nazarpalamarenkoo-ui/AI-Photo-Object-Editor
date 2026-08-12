@@ -18,7 +18,6 @@ services:
       - U2NET_HOME=/app/weights/rembg
       - SERVICE_NAME=image-editor-api
     volumes:
-      - ./backend:/app
       - ./backend/weights:/app/weights
       - ./backend/weights/lama_cache:/root/.cache/torch/hub/checkpoints
     depends_on:
@@ -46,7 +45,6 @@ services:
       - ML_DEVICE=cpu
       - SERVICE_NAME=image-editor-worker
     volumes:
-      - ./backend:/app
       - ./backend/weights:/app/weights
       - ./backend/weights/lama_cache:/root/.cache/torch/hub/checkpoints
     depends_on:

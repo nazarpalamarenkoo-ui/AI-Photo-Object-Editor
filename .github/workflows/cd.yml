@@ -1,0 +1,183 @@
+name: CD
+
+# Runs only after CI has gone green on main — this mirrors the required
+# "ci-success" gate job in ci.yml, so a broken build can never reach prod.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch: {}   # manual re-deploy of current main, e.g. after infra changes
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Guard: only continue if the triggering CI run succeeded
+  # (workflow_dispatch always continues)
+  # ──────────────────────────────────────────────
+  gate:
+    name: Gate — CI succeeded
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - id: sha
+        run: echo "sha=${{ github.event.workflow_run.head_sha || github.sha }}" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    name: Build & Push Images
+    runs-on: ubuntu-latest
+    needs: gate
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push backend image (also used by worker)
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-backend:${{ needs.gate.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-backend:latest
+
+      - name: Build & push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:${{ needs.gate.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest
+
+  # ──────────────────────────────────────────────
+  # Deploy: migrate, restart, health-check, auto-rollback on failure
+  # ──────────────────────────────────────────────
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [gate, build-and-push]
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
+      - name: Copy health check script to deploy host
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          source: "scripts/deploy/health_check.sh"
+          target: "${{ secrets.DEPLOY_PATH || '/opt/object-detection' }}/"
+          strip_components: 0
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          NEW_SHA: ${{ needs.gate.outputs.sha }}
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          envs: NEW_SHA,REGISTRY,IMAGE_NAME,GITHUB_TOKEN,GITHUB_ACTOR,APP_DOMAIN
+          script_stop: true
+          script: |
+            set -euo pipefail
+            DEPLOY_DIR="${{ secrets.DEPLOY_PATH || '/opt/object-detection' }}"
+            cd "$DEPLOY_DIR"
+            chmod +x scripts/deploy/health_check.sh
+
+            echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+            # Worker reuses the backend image — see cd.yml build job note.
+            export BACKEND_IMAGE="${REGISTRY}/${IMAGE_NAME}-backend:${NEW_SHA}"
+            export FRONTEND_IMAGE="${REGISTRY}/${IMAGE_NAME}-frontend:${NEW_SHA}"
+            export WORKER_IMAGE="${REGISTRY}/${IMAGE_NAME}-backend:${NEW_SHA}"
+
+            echo "=== Pulling new images ==="
+            docker pull "$BACKEND_IMAGE"
+            docker pull "$FRONTEND_IMAGE"
+
+            # Remember what's live now so we can roll back to it on failure.
+            PREVIOUS_SHA=$(cat .deployed_sha 2>/dev/null || echo "")
+
+            echo "=== Running Alembic migrations against new image ==="
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+              run --rm app alembic upgrade head
+
+            echo "=== Restarting services with new images ==="
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+              up -d --no-build
+
+            echo "=== Running health check (incl. worker crash-loop check) ==="
+            if ! ./scripts/deploy/health_check.sh "https://${APP_DOMAIN}"; then
+              echo "!!! Health check FAILED — rolling back to previous image !!!"
+
+              if [ -z "$PREVIOUS_SHA" ]; then
+                echo "FATAL: no previous deployed SHA recorded — cannot auto-rollback."
+                echo "Manual intervention required. New (broken) images are still live."
+                exit 1
+              fi
+
+              export BACKEND_IMAGE="${REGISTRY}/${IMAGE_NAME}-backend:${PREVIOUS_SHA}"
+              export FRONTEND_IMAGE="${REGISTRY}/${IMAGE_NAME}-frontend:${PREVIOUS_SHA}"
+              export WORKER_IMAGE="${REGISTRY}/${IMAGE_NAME}-backend:${PREVIOUS_SHA}"
+
+              docker pull "$BACKEND_IMAGE"
+              docker pull "$FRONTEND_IMAGE"
+
+              docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+                up -d --no-build
+
+              echo "=== Rolled back to $PREVIOUS_SHA. Verifying rollback health... ==="
+              if ! ./scripts/deploy/health_check.sh "https://${APP_DOMAIN}"; then
+                echo "FATAL: rollback target is ALSO unhealthy. Manual intervention required."
+                exit 1
+              fi
+
+              echo "=== Rollback successful — production restored to $PREVIOUS_SHA ==="
+              exit 1   # still fail the CD run — the new deploy did not ship
+            fi
+
+            # Success — record new deployed SHA (rollback.yml reads this + .previous_sha)
+            echo "$PREVIOUS_SHA" > .previous_sha
+            echo "$NEW_SHA" > .deployed_sha
+            echo "=== Deploy successful: ${PREVIOUS_SHA:-<none>} → $NEW_SHA ==="

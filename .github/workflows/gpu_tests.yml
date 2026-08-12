@@ -1,0 +1,181 @@
+name: GPU Tests
+
+on:
+  # Manual trigger — primary way to run GPU tests
+  workflow_dispatch:
+    inputs:
+      test_suite:
+        description: "Which GPU test suite to run"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - yolo
+          - sam
+          - lama
+          - diffusion
+      branch:
+        description: "Branch or SHA to test"
+        required: false
+        default: ""
+
+  # Automatic: after successful CD on main (optional — comment out if too expensive)
+  # workflow_run:
+  #   workflows: [CD]
+  #   types: [completed]
+  #   branches: [main]
+
+  # Or on a schedule (e.g. nightly on main)
+  # schedule:
+  #   - cron: "0 2 * * *"  # 02:00 UTC daily
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  gpu-tests:
+    name: GPU Integration Tests — ${{ github.event.inputs.test_suite || 'all' }}
+    runs-on: [self-hosted, gpu, linux]
+    # Fallback label if you use a different runner label convention:
+    # runs-on: [self-hosted, linux, x64, gpu]
+
+    timeout-minutes: 60
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || github.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+
+      - name: Verify GPU availability
+        run: |
+          nvidia-smi
+          python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; print(f'CUDA: {torch.version.cuda}, GPUs: {torch.cuda.device_count()}')"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt 2>/dev/null || true
+
+      - name: Run YOLO GPU tests
+        if: >-
+          github.event.inputs.test_suite == 'all' ||
+          github.event.inputs.test_suite == 'yolo' ||
+          github.event.inputs.test_suite == ''
+        env:
+          ENVIRONMENT: test
+          SECRET_KEY: ci-test-secret-key-not-for-production
+          DATABASE_URL: ${{ secrets.GPU_TEST_DATABASE_URL }}
+          REDIS_URL: ${{ secrets.GPU_TEST_REDIS_URL }}
+          S3_BUCKET_NAME: ${{ secrets.GPU_TEST_S3_BUCKET }}
+          S3_ENDPOINT_URL: ${{ secrets.GPU_TEST_S3_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.GPU_TEST_AWS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.GPU_TEST_AWS_SECRET }}
+          MLFLOW_TRACKING_URI: ${{ secrets.GPU_TEST_MLFLOW_URI }}
+          WEIGHTS_DIR: ${{ secrets.GPU_WEIGHTS_DIR || '/opt/ml-weights' }}
+          CUDA_VISIBLE_DEVICES: "0"
+        run: |
+          pytest tests/ \
+            -m "gpu and yolo" \
+            --tb=short \
+            -v \
+            --timeout=300
+
+      - name: Run MobileSAM GPU tests
+        if: >-
+          github.event.inputs.test_suite == 'all' ||
+          github.event.inputs.test_suite == 'sam' ||
+          github.event.inputs.test_suite == ''
+        env:
+          ENVIRONMENT: test
+          SECRET_KEY: ci-test-secret-key-not-for-production
+          DATABASE_URL: ${{ secrets.GPU_TEST_DATABASE_URL }}
+          REDIS_URL: ${{ secrets.GPU_TEST_REDIS_URL }}
+          WEIGHTS_DIR: ${{ secrets.GPU_WEIGHTS_DIR || '/opt/ml-weights' }}
+          CUDA_VISIBLE_DEVICES: "0"
+        run: |
+          pytest tests/ \
+            -m "gpu and sam" \
+            --tb=short \
+            -v \
+            --timeout=300
+
+      - name: Run LaMa GPU tests
+        if: >-
+          github.event.inputs.test_suite == 'all' ||
+          github.event.inputs.test_suite == 'lama' ||
+          github.event.inputs.test_suite == ''
+        env:
+          ENVIRONMENT: test
+          SECRET_KEY: ci-test-secret-key-not-for-production
+          DATABASE_URL: ${{ secrets.GPU_TEST_DATABASE_URL }}
+          REDIS_URL: ${{ secrets.GPU_TEST_REDIS_URL }}
+          WEIGHTS_DIR: ${{ secrets.GPU_WEIGHTS_DIR || '/opt/ml-weights' }}
+          CUDA_VISIBLE_DEVICES: "0"
+        run: |
+          pytest tests/ \
+            -m "gpu and lama" \
+            --tb=short \
+            -v \
+            --timeout=600
+
+      - name: Run Diffusion / IP-Adapter GPU tests
+        if: >-
+          github.event.inputs.test_suite == 'all' ||
+          github.event.inputs.test_suite == 'diffusion' ||
+          github.event.inputs.test_suite == ''
+        env:
+          ENVIRONMENT: test
+          SECRET_KEY: ci-test-secret-key-not-for-production
+          DATABASE_URL: ${{ secrets.GPU_TEST_DATABASE_URL }}
+          REDIS_URL: ${{ secrets.GPU_TEST_REDIS_URL }}
+          WEIGHTS_DIR: ${{ secrets.GPU_WEIGHTS_DIR || '/opt/ml-weights' }}
+          CUDA_VISIBLE_DEVICES: "0"
+        run: |
+          pytest tests/ \
+            -m "gpu and diffusion" \
+            --tb=short \
+            -v \
+            --timeout=600
+
+      - name: Run all remaining GPU tests
+        if: github.event.inputs.test_suite == 'all' || github.event.inputs.test_suite == ''
+        env:
+          ENVIRONMENT: test
+          SECRET_KEY: ci-test-secret-key-not-for-production
+          DATABASE_URL: ${{ secrets.GPU_TEST_DATABASE_URL }}
+          REDIS_URL: ${{ secrets.GPU_TEST_REDIS_URL }}
+          WEIGHTS_DIR: ${{ secrets.GPU_WEIGHTS_DIR || '/opt/ml-weights' }}
+          CUDA_VISIBLE_DEVICES: "0"
+        run: |
+          pytest tests/ \
+            -m "gpu and not yolo and not sam and not lama and not diffusion" \
+            --tb=short \
+            -v \
+            --timeout=600
+
+      - name: Upload GPU test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gpu-test-results
+          path: |
+            backend/.pytest_cache/
+            backend/gpu-test-report.xml
+          retention-days: 14
+
+      - name: GPU memory cleanup
+        if: always()
+        run: |
+          python -c "import torch; torch.cuda.empty_cache()" 2>/dev/null || true

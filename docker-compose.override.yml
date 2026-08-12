@@ -1,0 +1,8 @@
+services:
+  app:
+    volumes:
+      - ./backend:/app
+ 
+  worker:
+    volumes:
+      - ./backend:/app

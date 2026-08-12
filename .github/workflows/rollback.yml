@@ -1,0 +1,116 @@
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: "Image SHA tag to roll back to (leave empty to use last known good)"
+        required: false
+        default: ""
+      confirm:
+        description: "Type ROLLBACK to confirm"
+        required: true
+        default: ""
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  rollback:
+    name: Rollback Production
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Verify confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "ROLLBACK" ]; then
+            echo "Rollback not confirmed. Type ROLLBACK in the confirm field."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      # Reuse the exact same health check cd.yml uses — including the
+      # worker crash-loop stability window. A rollback that "succeeds"
+      # but leaves a crash-looping worker is not actually a good rollback.
+      - name: Copy health check script to deploy host
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          source: "scripts/deploy/health_check.sh"
+          target: "${{ secrets.DEPLOY_PATH || '/opt/object-detection' }}/"
+          strip_components: 0
+
+      - name: Execute rollback via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          TARGET_SHA: ${{ github.event.inputs.target_sha }}
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          envs: TARGET_SHA,REGISTRY,IMAGE_NAME,GITHUB_TOKEN,GITHUB_ACTOR,APP_DOMAIN
+          script_stop: true
+          script: |
+            set -euo pipefail
+            DEPLOY_DIR="${{ secrets.DEPLOY_PATH || '/opt/object-detection' }}"
+            cd "$DEPLOY_DIR"
+            chmod +x scripts/deploy/health_check.sh
+
+            # Determine which SHA to roll back to
+            if [ -n "$TARGET_SHA" ]; then
+              ROLLBACK_TAG="$TARGET_SHA"
+              echo "Rolling back to specified tag: $ROLLBACK_TAG"
+            elif [ -f .previous_sha ]; then
+              ROLLBACK_TAG=$(cat .previous_sha)
+              echo "Rolling back to previous deployment: $ROLLBACK_TAG"
+            else
+              echo "ERROR: No target SHA and no .previous_sha file found."
+              exit 1
+            fi
+
+            echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+            export BACKEND_IMAGE="${REGISTRY}/${IMAGE_NAME}-backend:${ROLLBACK_TAG}"
+            export FRONTEND_IMAGE="${REGISTRY}/${IMAGE_NAME}-frontend:${ROLLBACK_TAG}"
+            # Worker reuses the backend image — same as cd.yml. There is no
+            # separate `-worker` tag pushed, so don't waste a pull attempt on one.
+            export WORKER_IMAGE="${REGISTRY}/${IMAGE_NAME}-backend:${ROLLBACK_TAG}"
+
+            echo "=== Pulling rollback images ==="
+            docker pull "$BACKEND_IMAGE"
+            docker pull "$FRONTEND_IMAGE"
+
+            echo "=== Running rollback Alembic downgrade (if needed) ==="
+            # NOTE: By default we do NOT downgrade migrations on rollback.
+            # If you need to downgrade, uncomment and specify the revision:
+            # docker run --rm --network host --env-file .env.production \
+            #   "$BACKEND_IMAGE" alembic downgrade -1
+
+            echo "=== Restarting services with rollback image ==="
+            BACKEND_IMAGE="$BACKEND_IMAGE" \
+            FRONTEND_IMAGE="$FRONTEND_IMAGE" \
+            WORKER_IMAGE="$WORKER_IMAGE" \
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+              up -d --no-build
+
+            echo "=== Running health check (incl. worker crash-loop check) ==="
+            if ! ./scripts/deploy/health_check.sh "https://${APP_DOMAIN}"; then
+              echo "FATAL: rollback target is unhealthy. Manual intervention required."
+              exit 1
+            fi
+
+            CURRENT=$(cat .deployed_sha 2>/dev/null || echo "unknown")
+            echo "$ROLLBACK_TAG" > .deployed_sha
+            echo "=== Rollback complete: $CURRENT → $ROLLBACK_TAG ==="

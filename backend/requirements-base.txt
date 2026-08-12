@@ -1,0 +1,74 @@
+# Web
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9
+httpx<0.28
+
+# DB
+sqlalchemy==2.0.30
+asyncpg==0.29.0
+psycopg2-binary==2.9.9
+alembic==1.13.1
+
+# Auth
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+
+# Settings
+pydantic==2.7.1
+pydantic-settings==2.2.1
+
+# Storage
+aioboto3==12.3.0
+
+# Cache
+redis==5.0.4
+
+# Mail
+fastapi-mail==1.4.1
+
+#tests
+pytest>=8.0
+pytest-asyncio>=0.23
+moto == 5.1.22
+fakeredis == 2.35.1
+# diffuser
+diffusers==0.29.1
+transformers>=4.50
+accelerate == 1.14.0
+safetensors == 0.8.0
+
+easydict
+loguru
+omegaconf
+rich
+typer
+
+#setuptool
+setuptools == 80.9.0
+
+mobile_sam @ git+https://github.com/ChaoningZhang/MobileSAM.git
+# CV / image processing
+opencv-python-headless==4.9.0.80
+Pillow==10.3.0
+numpy==1.26.4
+rembg[cpu]==2.0.57
+ultralytics>=8.2.0
+huggingface_hub>=0.25.0
+
+mlflow-skinny==2.12.1
+
+# workers
+arq==0.28.0
+
+#logger
+structlog==26.1.0
+psutil==7.2.2
+# opentelemetry
+opentelemetry-sdk==1.40.0
+opentelemetry-exporter-otlp==1.40.0
+opentelemetry-instrumentation-fastapi==0.61b0
+
+# prometheus
+prometheus-fastapi-instrumentator==6.1.0
