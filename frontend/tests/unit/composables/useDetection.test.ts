@@ -22,8 +22,18 @@ const mockedDetectionsApi = vi.mocked(detectionsApi, true)
 const mockedMlApi = vi.mocked(mlApi, true)
 
 const fakeDetections: Detection[] = [
-  { id: 1, image_id: 10, bbox_id: 0, x1: 0, y1: 0, x2: 100, y2: 100, detected_class: 'person', confidence: 0.9 },
-  { id: 2, image_id: 10, bbox_id: 1, x1: 50, y1: 50, x2: 150, y2: 150, detected_class: 'car', confidence: 0.75 }
+  {
+    id: 1, content_id: 10, bbox_id: 0, x1: 0, y1: 0, x2: 100, y2: 100,
+    detected_class: 'person', confidence: 0.9, is_active: true,
+    model_name: 'yolo', model_version: 'v8', inference_time_ms: 15,
+    created_at: '2026-01-01T00:00:00Z'
+  },
+  {
+    id: 2, content_id: 10, bbox_id: 1, x1: 50, y1: 50, x2: 150, y2: 150,
+    detected_class: 'car', confidence: 0.75, is_active: true,
+    model_name: 'yolo', model_version: 'v8', inference_time_ms: 15,
+    created_at: '2026-01-01T00:00:00Z'
+  }
 ]
 
 beforeEach(() => {

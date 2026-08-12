@@ -27,6 +27,12 @@ const fakeImage: Image = {
   id: 5,
   filename: 'shot.jpg',
   storage_path: 'uploads/1/5/shot.jpg',
+  mime_type: 'image/jpeg',
+  width: 800,
+  height: 600,
+  file_size: 51200,
+  cache_key: null,
+  current_version_id: null,
   status: 'ready',
   uploaded_at: '2026-01-01T00:00:00Z',
   user_id: 1
@@ -34,7 +40,7 @@ const fakeImage: Image = {
 
 const makeDetection = (bboxId: number): Detection => ({
   id: bboxId,
-  image_id: 7,
+  content_id: 7,
   bbox_id: bboxId,
   x1: 0,
   y1: 0,
@@ -42,6 +48,11 @@ const makeDetection = (bboxId: number): Detection => ({
   y2: 100,
   detected_class: 'person',
   confidence: 0.95,
+  is_active: true,
+  model_name: 'yolo',
+  model_version: 'v8',
+  inference_time_ms: 15,
+  created_at: '2026-01-01T00:00:00Z',
 })
 
 const makeMLResult = (presigned_url: string): MLResultResponse => ({

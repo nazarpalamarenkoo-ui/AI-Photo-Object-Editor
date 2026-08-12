@@ -1,8 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { Detection, DetectionStats } from '@/types/Index'
 
-// detectionsApi calls .get/.delete directly on the default-exported
-// apiClient instance, so we mock the whole module with stubbed methods.
 vi.mock('@/api/clients', () => ({
   default: {
     get: vi.fn(),
@@ -19,28 +17,38 @@ const mockedClient = vi.mocked(apiClient, true)
 
 const fakeDetection: Detection = {
   id: 1,
-  image_id: 42,
+  content_id: 42,
   bbox_id: 7,
   x1: 10,
   y1: 20,
   x2: 100,
   y2: 200,
   detected_class: 'car',
-  confidence: 0.92
+  confidence: 0.92,
+  is_active: true,
+  model_name: 'yolo',
+  model_version: 'v8',
+  inference_time_ms: 15,
+  created_at: '2026-01-01T00:00:00Z'
 }
 
 const fakeDetections: Detection[] = [
   fakeDetection,
   {
     id: 2,
-    image_id: 42,
+    content_id: 42,
     bbox_id: 8,
     x1: 30,
     y1: 40,
     x2: 120,
     y2: 220,
     detected_class: 'person',
-    confidence: 0.87
+    confidence: 0.87,
+    is_active: true,
+    model_name: 'yolo',
+    model_version: 'v8',
+    inference_time_ms: 15,
+    created_at: '2026-01-01T00:00:00Z'
   }
 ]
 

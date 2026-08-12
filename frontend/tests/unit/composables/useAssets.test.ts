@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { ref } from 'vue'
-import type { Asset } from '@/types/Index'
+import type { Asset, ExtractResponse, PasteResponse } from '@/types/Index'
 
 vi.mock('@/api/ml', () => ({
   mlApi: {
@@ -26,18 +26,33 @@ const mockedMlApi = vi.mocked(mlApi, true)
 const makeAsset = (id: string, label = `Asset ${id}`): Asset => ({
   public_id: id,
   label,
+  width: 100,
+  height: 100,
+  area_pixels: 10000,
+  storage_path: `s3://bucket/assets/${id}.png`,
+  thumbnail_path: null,
+  content_type: 'image/png',
+  file_size: 1024,
+  source_image_version_id: null,
+  source_segmentation_mask_id: null,
   created_at: '2026-01-01T00:00:00Z',
 })
 
-const makeExtractResult = (assetId: string) => ({
+const makeExtractResult = (assetId: string): ExtractResponse => ({
   asset_id: assetId,
-  presigned_url: `https://cdn.example.com/${assetId}.png`,
+  storage_path: `s3://bucket/assets/${assetId}.png`,
+  thumbnail_path: null,
+  object_size: [100, 100],
+  area_pixels: 10000,
+  cropped_bbox: { x1: 0, y1: 0, x2: 100, y2: 100 },
+  timestamp: '2026-01-01T00:00:00Z',
 })
 
-const makePasteResult = (presigned_url: string) => ({
+const makePasteResult = (presigned_url: string): PasteResponse => ({
   presigned_url,
   result_url: 'https://cdn.example.com/result.jpg',
-  metrics: {},
+  paste_bbox: { x1: 0, y1: 0, x2: 100, y2: 100 },
+  object_size: [100, 100],
   timestamp: '2026-01-01T00:00:00Z',
 })
 

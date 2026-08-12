@@ -30,6 +30,12 @@ const fakeImage: Image = {
   id: 5,
   filename: 'shot.jpg',
   storage_path: 'uploads/1/5/shot.jpg',
+  mime_type: 'image/jpeg',
+  width: 800,
+  height: 600,
+  file_size: 51200,
+  cache_key: null,
+  current_version_id: null,
   status: 'ready',
   uploaded_at: '2026-01-01T00:00:00Z',
   user_id: 1
@@ -43,7 +49,7 @@ describe('useImageEditor: onMounted', () => {
   it('fetches image, original url and current ml state on mount', async () => {
     mockedImagesApi.getById.mockResolvedValue(fakeImage)
     mockedImagesApi.getPresignedUrl.mockResolvedValue({ url: 'https://cdn.example.com/original.jpg', expires_in: 3600 })
-    mockedMlApi.getCurrentState.mockResolvedValue({ presigned_url: 'https://cdn.example.com/edited.jpg', is_edited: true })
+    mockedMlApi.getCurrentState.mockResolvedValue({ presigned_url: 'https://cdn.example.com/edited.jpg', is_edited: true, history: [] })
 
     const { image, imageUrl, originalImageUrl, isEdited } = useImageEditor(5)
 
@@ -62,7 +68,7 @@ describe('useImageEditor: onMounted', () => {
   it('sets isEdited to false when ml state reports no edits', async () => {
     mockedImagesApi.getById.mockResolvedValue(fakeImage)
     mockedImagesApi.getPresignedUrl.mockResolvedValue({ url: 'https://cdn.example.com/original.jpg', expires_in: 3600 })
-    mockedMlApi.getCurrentState.mockResolvedValue({ presigned_url: 'https://cdn.example.com/original.jpg', is_edited: false })
+    mockedMlApi.getCurrentState.mockResolvedValue({ presigned_url: 'https://cdn.example.com/original.jpg', is_edited: false, history: [] })
 
     const { isEdited } = useImageEditor(5)
 
@@ -74,7 +80,7 @@ describe('useImageEditor: onMounted', () => {
   it('sets loading to false after success', async () => {
     mockedImagesApi.getById.mockResolvedValue(fakeImage)
     mockedImagesApi.getPresignedUrl.mockResolvedValue({ url: 'https://cdn.example.com/original.jpg', expires_in: 3600 })
-    mockedMlApi.getCurrentState.mockResolvedValue({ presigned_url: 'https://cdn.example.com/edited.jpg', is_edited: false })
+    mockedMlApi.getCurrentState.mockResolvedValue({ presigned_url: 'https://cdn.example.com/edited.jpg', is_edited: false, history: [] })
 
     const { loading } = useImageEditor(5)
 
@@ -125,7 +131,7 @@ describe('useImageEditor: initial state', () => {
   it('starts with empty detections, naturalSize, originalImageUrl and isEdited false', () => {
     mockedImagesApi.getById.mockResolvedValue(fakeImage)
     mockedImagesApi.getPresignedUrl.mockResolvedValue({ url: '', expires_in: 3600 })
-    mockedMlApi.getCurrentState.mockResolvedValue({ presigned_url: '', is_edited: false })
+    mockedMlApi.getCurrentState.mockResolvedValue({ presigned_url: '', is_edited: false, history: [] })
 
     const { detections, naturalSize, imageLoaded, originalImageUrl, isEdited } = useImageEditor(5)
 
@@ -141,7 +147,7 @@ describe('useImageEditor: onImageLoad', () => {
   it('sets naturalSize and imageLoaded to true', () => {
     mockedImagesApi.getById.mockResolvedValue(fakeImage)
     mockedImagesApi.getPresignedUrl.mockResolvedValue({ url: '', expires_in: 3600 })
-    mockedMlApi.getCurrentState.mockResolvedValue({ presigned_url: '', is_edited: false })
+    mockedMlApi.getCurrentState.mockResolvedValue({ presigned_url: '', is_edited: false, history: [] })
 
     const { onImageLoad, naturalSize, imageLoaded } = useImageEditor(5)
 
@@ -154,7 +160,7 @@ describe('useImageEditor: onImageLoad', () => {
   it('updates naturalSize when called again with new size', () => {
     mockedImagesApi.getById.mockResolvedValue(fakeImage)
     mockedImagesApi.getPresignedUrl.mockResolvedValue({ url: '', expires_in: 3600 })
-    mockedMlApi.getCurrentState.mockResolvedValue({ presigned_url: '', is_edited: false })
+    mockedMlApi.getCurrentState.mockResolvedValue({ presigned_url: '', is_edited: false, history: [] })
 
     const { onImageLoad, naturalSize } = useImageEditor(5)
 

@@ -1,8 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { Image, PresignedUrlResponse } from '@/types/Index'
 
-// imagesApi calls .get/.post/.delete directly on the default-exported
-// apiClient instance, so we mock the whole module with stubbed methods.
 vi.mock('@/api/clients', () => ({
   default: {
     get: vi.fn(),
@@ -21,6 +19,12 @@ const fakeImage: Image = {
   id: 1,
   filename: 'photo.jpg',
   storage_path: 'uploads/1/photo.jpg',
+  mime_type: 'image/jpeg',
+  width: 800,
+  height: 600,
+  file_size: 51200,
+  cache_key: null,
+  current_version_id: null,
   status: 'ready',
   uploaded_at: '2026-01-01T00:00:00Z',
   user_id: 7
@@ -32,6 +36,12 @@ const fakeImages: Image[] = [
     id: 2,
     filename: 'photo2.jpg',
     storage_path: 'uploads/1/photo2.jpg',
+    mime_type: 'image/jpeg',
+    width: 800,
+    height: 600,
+    file_size: 51200,
+    cache_key: null,
+    current_version_id: null,
     status: 'processing',
     uploaded_at: '2026-01-02T00:00:00Z',
     user_id: 7
