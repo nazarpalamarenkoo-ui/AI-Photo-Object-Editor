@@ -23,23 +23,6 @@ class LaMaInpainter:
     """
     LaMa-based image inpainter (built on top of the `iopaint` package).
 
-    NOTE on iopaint API:
-        The config/request object in iopaint is called `InpaintRequest`
-        (NOT `Config` — that was the old `lama-cleaner` name, which iopaint
-        was renamed from). Importing `Config` from `iopaint.schema` will
-        raise an ImportError.
-
-        `iopaint`'s ModelManager expects the image passed in as RGB
-        (uint8 HxWxC) and returns a **BGR** array — this matches the
-        library's own reference usage:
-
-            img = cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB)
-            result = model_manager(img, mask, InpaintRequest(...))
-            result = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)  # actually undoes BGR
-
-        i.e. input RGB in, BGR out -> flip channels on the way out.
-        (This part of the original code was already correct.)
-
     Provides:
         1. Object removal (inpaint with background generation)
         2. Object replacement (paste replacement into bbox)
