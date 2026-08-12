@@ -16,9 +16,15 @@ venv/
 
 mlruns/
 
-weights
-weights/*
-!weights/.gitkeep
+*.pt
+*.onnx
+
+backend/weights/*
+!backend/weights/.gitkeep
+!backend/weights/lama_cache/
+!backend/weights/lama_cache/.gitkeep
+!backend/weights/rembg/
+!backend/weights/rembg/.gitkeep
 
 alembic/__pycache__/
 alembic/versions/__pycache__/
