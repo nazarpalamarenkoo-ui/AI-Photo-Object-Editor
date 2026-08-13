@@ -16,23 +16,6 @@ export const SelectIcon = icon([
   h('path', { d: 'M5 3l14 9-7 1-3 7-4-17z' }),
 ])
 
-export const DetectIcon = icon([
-  h('circle', { cx: '11', cy: '11', r: '8' }),
-  h('line', { x1: '21', y1: '21', x2: '16.65', y2: '16.65' }),
-])
-
-export const InpaintIcon = icon([
-  h('path', { d: 'M12 19l7-7 3 3-7 7-3-3z' }),
-  h('path', { d: 'M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z' }),
-  h('circle', { cx: '11', cy: '11', r: '2' }),
-])
-
-export const SwapIcon = icon([
-  h('polyline', { points: '17 1 21 5 17 9' }),
-  h('path', { d: 'M3 11V9a4 4 0 0 1 4-4h14' }),
-  h('polyline', { points: '7 23 3 19 7 15' }),
-  h('path', { d: 'M21 13v2a4 4 0 0 1-4 4H3' }),
-])
 export const SettingsIcon = defineComponent({
   render: () =>
     h('svg', { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2.5' }, [
@@ -69,8 +52,5 @@ export const ResetIcon = icon([
 ], 14)
 
 export const tools = [
-  { id: 'select',  label: 'Draw',        shortcut: 'V', icon: SelectIcon  },
-  { id: 'detect',  label: 'Detect',      shortcut: 'D', icon: DetectIcon  },
-  { id: 'inpaint', label: 'Inpaint',     shortcut: 'E', icon: InpaintIcon },
-  { id: 'swap',    label: 'Swap object', shortcut: 'R', icon: SwapIcon    },
+  { id: 'select', label: 'Draw', shortcut: 'V', icon: SelectIcon },
 ]
