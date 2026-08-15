@@ -283,6 +283,7 @@ The responsibilities of the components inside `backend/app` are covered above in
 - Docker & Docker Compose
 - An NVIDIA GPU with the NVIDIA Container Toolkit — `docker-compose.yml` requests `gpus: all` for the `app` and `worker` services, and `requirements.txt` installs PyTorch from the CUDA 12.4 wheel index (`torch==2.5.1`). `DeviceManager` falls back to CPU automatically if `torch.cuda.is_available()` is `False`, but `SAM_DEVICE` and `LAMA_DEVICE` default to `cuda` while `YOLO_DEVICE` defaults to `cpu` — segmentation, LaMa, and diffusion are the operations expected to need a GPU in practice.
 - Model weight files under `backend/weights/`, fetched via `scripts/download-models.sh` / `.ps1` — see below.
+- A Gmail account with an **App Password** (used for `fastapi-mail` signup-confirmation and password-recovery emails) — see [Mail Configuration](#mail-configuration-gmail-app-password) below.
 
 ## Model Weights
 
@@ -330,6 +331,55 @@ cp backend/.env.example .env
 Fill in the root-level `.env` — grouped as in `backend/.env.example` (the template lives under `backend/`, but `docker-compose.yml` reads `.env` from the project root via `env_file: - .env`, so the populated file must live at the repo root, not inside `backend/`): database (`DATABASE_URL`, `ALEMBIC_DATABASE_URL`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`), cache/queue (`CACHE_TYPE`, `REDIS_URL`, `REDIS_HOST`, `REDIS_PORT`), object storage (`ACCESS_KEY`, `SECRET_KEY`, `R2_ENDPOINT`, `S3_BUCKET`, `R2_PUBLIC_URL`), MLflow (`MLFLOW_TRACKING_URI`), auth/mail (`SECRET_KEY_AUTH`, `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_FROM`, `MAIL_PORT`, `MAIL_SERVER`, `MAIL_STARTTLS`, `MAIL_SSL_TLS`, `USE_CREDENTIALS`), device selection (`YOLO_DEVICE`, `SAM_DEVICE`, `LAMA_DEVICE`, `DEFAULT_DEVICE`), DB pool tuning (`DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT`, `DB_POOL_RECYCLE`, `DB_POOL_PRE_PING`, `DB_USE_NULLPOOL`), and diffusion (`DIFFUSION_INPAINT_MODEL_ID`, `DIFFUSION_STEPS`, `DIFFUSION_GUIDANCE_SCALE`, `DIFFUSION_STRENGTH`, `DIFFUSION_WORK_RESOLUTION`, `DIFFUSION_CROP_PADDING_RATIO`, `DIFFUSION_MIN_CROP_SIZE`, `DIFFUSION_MASK_BLUR_RADIUS`, `DIFFUSION_ENABLE_CPU_OFFLOAD`, `DIFFUSION_NEGATIVE_PROMPT`, `DIFFUSION_PROMPT_FALLBACK`, `IP_ADAPTER_REPO`, `IP_ADAPTER_SUBFOLDER`, `IP_ADAPTER_IMAGE_ENCODER_SUBFOLDER`, `IP_ADAPTER_VARIANT`, `IP_ADAPTER_SCALE`).
 
 `docker-compose.yml` reads `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `ACCESS_KEY`, `SECRET_KEY`, `R2_ENDPOINT`, `S3_BUCKET` from that same root-level `.env` file, plus an optional `GRAFANA_ADMIN_PASSWORD` (defaults to `admin` if unset).
+
+#### Mail Configuration (Gmail App Password)
+
+`fastapi-mail` sends the signup-confirmation and password-recovery emails via Gmail SMTP. It's driven by these keys in the root `.env`:
+
+```dotenv
+SECRET_KEY_AUTH=
+MAIL_USERNAME=
+MAIL_PASSWORD=
+MAIL_FROM=
+MAIL_PORT=
+MAIL_SERVER=
+MAIL_STARTTLS=
+MAIL_SSL_TLS=
+USE_CREDENTIALS=
+```
+
+Gmail requires an **App Password** rather than your normal account password for SMTP login — App Passwords only exist once 2-Step Verification is turned on, and using the account password directly will fail authentication.
+
+1. **Sign in to your Google Account.** Open [myaccount.google.com](https://myaccount.google.com/) with the Gmail account the app will send from.
+2. **Enable 2-Step Verification.** Go to **Security → How you sign in to Google → 2-Step Verification → Turn on**, and follow Google's prompts. An App Password can't be created until this is on.
+3. **Open App Passwords.** Go directly to [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) (sign in again if prompted).
+4. **Create the App Password.** Enter an app name (e.g. `AI Photo Object Editor`) and click **Create**. Google shows a 16-character password like `abcd efgh ijkl mnop` — copy it now; this is *not* your normal Gmail password and it's shown only once.
+5. **Fill in the `.env` values:**
+
+   | Variable | Value |
+   |---|---|
+   | `SECRET_KEY_AUTH` | A random secret string used to sign JWTs — unrelated to Gmail, generate your own (e.g. `openssl rand -hex 32`) |
+   | `MAIL_USERNAME` | Your full Gmail address, e.g. `your_email@gmail.com` |
+   | `MAIL_PASSWORD` | The 16-character App Password from step 4, with the spaces removed (e.g. `abcdefghijklmnop`) |
+   | `MAIL_FROM` | The address emails appear to be sent from — normally the same as `MAIL_USERNAME` |
+   | `MAIL_PORT` | `465` |
+   | `MAIL_SERVER` | `smtp.gmail.com` |
+   | `MAIL_STARTTLS` | `False` |
+   | `MAIL_SSL_TLS` | `True` |
+   | `USE_CREDENTIALS` | `True` |
+
+   Port `465` pairs with `MAIL_SSL_TLS=True` / `MAIL_STARTTLS=False` (implicit SSL). If you'd rather use STARTTLS instead, use `MAIL_PORT=587`, `MAIL_STARTTLS=True`, `MAIL_SSL_TLS=False`.
+
+**Troubleshooting**
+
+- *"App passwords" option isn't available* — confirm 2-Step Verification is actually on, that you're signed into the intended Google account, and (for Google Workspace accounts) that your admin hasn't disabled App Passwords.
+- *Authentication fails* — double-check `MAIL_USERNAME` is the full Gmail address, `MAIL_PASSWORD` is the App Password (not your account password) with no spaces, `MAIL_SERVER` is `smtp.gmail.com`, and the port/TLS pairing above matches.
+
+**Security notes**
+
+- Never use your normal Google account password for `MAIL_PASSWORD`.
+- Never commit the populated `.env` to Git.
+- Treat the App Password as a secret; if it's ever exposed, revoke it from the [App Passwords page](https://myaccount.google.com/apppasswords) and generate a new one.
 
 ### 3. Model weights
 
@@ -396,12 +446,6 @@ Grouped by router (see `/docs` for the full OpenAPI schema):
 
 ## Limitations
 
-- No `LICENSE` file is present.
-- `gpu_tests.yml` requires a self-hosted GPU runner and deploy secrets (`DEPLOY_HOST`, `DEPLOY_SSH_KEY`, etc.) that aren't part of this repository — CI itself runs fully on hosted runners without a GPU.
 - The GPU-marked smoke test suite exercises a live, already-running stack over HTTP; it is not designed to run in isolation without the full Docker Compose environment (including a GPU worker) up.
 - Diffusion-based replacement is restricted to segmentation-selected regions by design (see [Why diffusion is segmentation-only](#why-diffusion-is-segmentation-only)) — it is not available for YOLO-detected bounding boxes.
 - `worker.max_jobs = 1`: the ARQ worker processes one ML job at a time.
-
-## License
-
-No license file is present in this repository — usage terms are not currently specified.

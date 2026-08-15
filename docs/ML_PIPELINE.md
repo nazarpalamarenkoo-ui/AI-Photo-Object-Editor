@@ -193,7 +193,3 @@ Both scripts skip a download if the destination file already exists, retry on fa
 - This document covers the ML pipeline layer under `backend/app/ml`; the surrounding application (API, storage, auth, frontend) is described only where it directly touches this package.
 - Exact behavior inside `app.ml.processors.*` (mask feathering/blending logic, color-matching algorithm), `app.config.device_manager`, and `app.core.logging` is out of scope for this document — only how the ML layer calls into them is covered.
 - Diffusion-based replacement runs a full Stable Diffusion inpainting pass per call and is the most latency- and memory-sensitive operation in the pipeline, which is also why it's restricted to the segmentation path (see [above](#why-diffusion-is-sam-only)).
-
-## License
-
-No license file is present in the repository — not specified.
